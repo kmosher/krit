@@ -2,7 +2,7 @@
 
 A local code review tool for git diffs. Review your changes in a GitHub PR-like web UI before committing, then copy all comments for your coding agent to fix.
 
-![screenshot](screenshot.png)
+![screenshot](https://raw.githubusercontent.com/wong2/diffx-cli/main/screenshot.png)
 
 ## Install
 
