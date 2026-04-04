@@ -10,7 +10,7 @@ import { FileTree } from './components/FileTree'
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
-  const { patch, repoName, branch, customMode, binaryFiles, loading, error } = useDiff({
+  const { patch, repoName, branch, customMode, binaryFiles, tabSizeMap, loading, error } = useDiff({
     staged: settings.staged,
     untracked: settings.untracked,
   })
@@ -143,6 +143,7 @@ export function App() {
           <DiffViewer
             files={files}
             diffStyle={settings.diffStyle}
+            tabSizeMap={tabSizeMap}
             viewedFiles={viewedFiles}
             binaryFiles={binaryFileMap}
             onViewedChange={handleViewedChange}

@@ -11,6 +11,7 @@ interface DiffData {
   branch: string
   customMode: boolean
   binaryFiles: BinaryFileInfo[]
+  tabSizeMap: Record<string, number>
 }
 
 export interface DiffOptions {
@@ -43,6 +44,7 @@ export function useDiff(options: DiffOptions) {
     branch: data?.branch ?? '',
     customMode: data?.customMode ?? false,
     binaryFiles: data?.binaryFiles ?? [],
+    tabSizeMap: data?.tabSizeMap ?? {},
     loading,
     error,
   }

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { join, extname } from 'node:path'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
-import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, isImageFile } from './git.js'
+import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, isImageFile, getTabSizeForFiles } from './git.js'
 import { loadSettings, saveSettings } from './settings.js'
 import { InMemoryCommentStore } from './comments.js'
 import type { CommentStore } from './comments.js'
@@ -26,6 +26,15 @@ const MIME_TYPES: Record<string, string> = {
 export interface BinaryFileInfo {
   path: string
   type: 'added' | 'deleted' | 'changed'
+}
+
+function parseFilePaths(patch: string): string[] {
+  const paths = new Set<string>()
+  for (const line of patch.split('\n')) {
+    const match = line.match(/^diff --git a\/.+ b\/(.+)$/)
+    if (match) paths.add(match[1])
+  }
+  return [...paths]
 }
 
 function parseBinaryFiles(patch: string): BinaryFileInfo[] {
@@ -82,7 +91,9 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     const repoName = getRepoName()
     const branch = getBranchName()
     const binaryFiles = parseBinaryFiles(patch)
-    return c.json({ patch, repoName, branch, customMode: isCustomMode, binaryFiles })
+    const filePaths = parseFilePaths(patch)
+    const tabSizeMap = getTabSizeForFiles(filePaths)
+    return c.json({ patch, repoName, branch, customMode: isCustomMode, binaryFiles, tabSizeMap })
   })
 
   app.get('/api/file-content', (c) => {

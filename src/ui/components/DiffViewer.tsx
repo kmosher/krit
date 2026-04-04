@@ -7,6 +7,7 @@ import { BinaryFileDiff } from './BinaryFileDiff'
 interface DiffViewerProps {
   files: FileDiffMetadata[]
   diffStyle: 'split' | 'unified'
+  tabSizeMap: Record<string, number>
   viewedFiles: Set<string>
   binaryFiles: Map<string, BinaryFileInfo>
   onViewedChange: (filePath: string, viewed: boolean) => void
@@ -18,6 +19,7 @@ interface DiffViewerProps {
 export function DiffViewer({
   files,
   diffStyle,
+  tabSizeMap,
   viewedFiles,
   binaryFiles,
   onViewedChange,
@@ -57,6 +59,7 @@ export function DiffViewer({
             filePath={filePath}
             annotations={getAnnotationsForFile(filePath)}
             diffStyle={diffStyle}
+            tabSize={tabSizeMap[filePath] ?? 4}
             viewed={viewedFiles.has(filePath)}
             onViewedChange={onViewedChange}
             onAddComment={onAddComment}
