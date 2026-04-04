@@ -19,7 +19,7 @@
     "cli"
   ],
   "bin": {
-    "diffx": "./dist/cli.js"
+    "diffx": "./dist/cli.mjs"
   },
   "files": [
     "dist"
