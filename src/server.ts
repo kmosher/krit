@@ -1,11 +1,12 @@
 import { readFile } from 'node:fs/promises'
-import { join, extname } from 'node:path'
+import { join, extname, resolve } from 'node:path'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, isImageFile, getTabSizeForFiles } from './git.js'
 import { loadSettings, saveSettings } from './settings.js'
 import { InMemoryCommentStore } from './comments.js'
 import type { CommentStore } from './comments.js'
+import { isSafePath } from './path.js'
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -178,7 +179,11 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     let filePath = c.req.path
     if (filePath === '/') filePath = '/index.html'
 
-    const fullPath = join(clientDir, filePath)
+    const relativePath = filePath.slice(1)
+    if (!isSafePath(relativePath, clientDir)) {
+      return c.text('Forbidden', 403)
+    }
+    const fullPath = resolve(clientDir, relativePath)
     try {
       const content = await readFile(fullPath)
       const ext = extname(fullPath)

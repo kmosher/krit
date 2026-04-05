@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process'
-import { basename } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isSafePath } from './path.js'
 import { parseSync as parseEditorConfig, type ProcessedFileConfig } from 'editorconfig'
 
 const IMAGE_EXTENSIONS = new Set([
@@ -28,9 +28,13 @@ function isBinaryFile(absolutePath: string): boolean {
 
 export function getFileContent(filePath: string, version: 'old' | 'new'): Buffer | null {
   const root = getRepoRoot()
+  if (!isSafePath(filePath, root)) {
+    return null
+  }
+  const resolved = resolve(root, filePath)
   if (version === 'new') {
     try {
-      return readFileSync(join(root, filePath))
+      return readFileSync(resolved)
     } catch {
       return null
     }
