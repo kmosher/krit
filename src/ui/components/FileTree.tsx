@@ -9,6 +9,7 @@ import {
   FileDiff,
   FileEdit,
   FileCheck,
+  FileQuestion,
   MessageSquare,
   Search,
 } from 'lucide-react'
@@ -86,6 +87,8 @@ function getFileIcon(file: FileDiffMetadata | undefined, viewed: boolean) {
   switch (changeType) {
     case 'new':
       return <FilePlus size={size} className="ft-icon icon-added" />
+    case 'untracked':
+      return <FileQuestion size={size} className="ft-icon icon-untracked" />
     case 'deleted':
       return <FileMinus size={size} className="ft-icon icon-deleted" />
     case 'rename-pure':

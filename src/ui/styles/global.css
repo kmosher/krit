@@ -743,6 +743,10 @@ body {
   color: #0969da;
 }
 
+.icon-untracked {
+  color: #6e7781;
+}
+
 @media (prefers-color-scheme: dark) {
   .icon-viewed {
     color: #3fb950;
@@ -758,6 +762,10 @@ body {
 
   .icon-renamed {
     color: #58a6ff;
+  }
+
+  .icon-untracked {
+    color: #8b949e;
   }
 }
 

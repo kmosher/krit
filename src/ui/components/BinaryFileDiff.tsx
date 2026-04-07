@@ -38,7 +38,7 @@ export function BinaryFileDiff({ filePath, info, viewed, onViewedChange }: Binar
             <ImagePreview filePath={filePath} changeType={info.type} />
           ) : (
             <div className="binary-diff-message">
-              Binary file {info.type === 'added' ? 'added' : info.type === 'deleted' ? 'deleted' : 'changed'}
+              Binary file {info.type === 'added' ? 'added' : info.type === 'untracked' ? 'untracked' : info.type === 'deleted' ? 'deleted' : 'changed'}
             </div>
           )}
         </div>
@@ -51,7 +51,7 @@ function ImagePreview({ filePath, changeType }: { filePath: string; changeType: 
   const oldSrc = `/api/file-content?path=${encodeURIComponent(filePath)}&version=old`
   const newSrc = `/api/file-content?path=${encodeURIComponent(filePath)}&version=new`
 
-  if (changeType === 'added') {
+  if (changeType === 'added' || changeType === 'untracked') {
     return (
       <div className="image-preview">
         <div className="image-preview-panel">

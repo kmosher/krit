@@ -12,7 +12,7 @@ import { FileTree } from './components/FileTree'
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
-  const { patch, repoName, branch, customMode, binaryFiles, tabSizeMap, loading, error } = useDiff({
+  const { patch, repoName, branch, customMode, binaryFiles, tabSizeMap, untrackedFiles, loading, error } = useDiff({
     staged: settings.staged,
     untracked: settings.untracked,
   })
@@ -27,20 +27,32 @@ export function App() {
     try {
       const parsed = parsePatchFiles(patch)
       const parsedFiles = parsed.flatMap((p) => p.files)
+      const untrackedSet = new Set(untrackedFiles)
+
+      // Mark untracked text files
+      for (const file of parsedFiles) {
+        if (untrackedSet.has(file.name)) {
+          ;(file as any).changeType = 'untracked'
+        }
+      }
 
       // Add synthetic entries for binary files not already in parsed output
       const existingNames = new Set(parsedFiles.map((f) => f.name))
       for (const bf of binaryFiles) {
         if (!existingNames.has(bf.path)) {
+          const isUntracked = bf.type === 'untracked'
           const syntheticFile: FileDiffMetadata = {
             name: bf.path,
-            type: bf.type === 'added' ? 'new' : bf.type === 'deleted' ? 'deleted' : 'change',
+            type: isUntracked || bf.type === 'added' ? 'new' : bf.type === 'deleted' ? 'deleted' : 'change',
             hunks: [],
             splitLineCount: 0,
             unifiedLineCount: 0,
             isPartial: true,
             deletionLines: [],
             additionLines: [],
+          }
+          if (isUntracked) {
+            ;(syntheticFile as any).changeType = 'untracked'
           }
           parsedFiles.push(syntheticFile)
         }
@@ -50,7 +62,7 @@ export function App() {
     } catch {
       return []
     }
-  }, [patch, binaryFiles])
+  }, [patch, binaryFiles, untrackedFiles])
 
   const diffStats = useMemo(() => {
     if (!patch) return { additions: 0, deletions: 0 }

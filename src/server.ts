@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { join, extname, resolve } from 'node:path'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
-import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, isImageFile, getTabSizeForFiles } from './git.js'
+import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, isImageFile, getTabSizeForFiles, getUntrackedFilePaths } from './git.js'
 import { loadSettings, saveSettings } from './settings.js'
 import { InMemoryCommentStore } from './comments.js'
 import type { CommentStore } from './comments.js'
@@ -26,7 +26,7 @@ const MIME_TYPES: Record<string, string> = {
 
 export interface BinaryFileInfo {
   path: string
-  type: 'added' | 'deleted' | 'changed'
+  type: 'added' | 'deleted' | 'changed' | 'untracked'
 }
 
 function parseFilePaths(patch: string): string[] {
@@ -38,7 +38,7 @@ function parseFilePaths(patch: string): string[] {
   return [...paths]
 }
 
-function parseBinaryFiles(patch: string): BinaryFileInfo[] {
+function parseBinaryFiles(patch: string, untrackedFiles?: Set<string>): BinaryFileInfo[] {
   const binaryFiles: BinaryFileInfo[] = []
   const lines = patch.split('\n')
   for (let i = 0; i < lines.length; i++) {
@@ -70,6 +70,9 @@ function parseBinaryFiles(patch: string): BinaryFileInfo[] {
       }
     }
 
+    if (changeType === 'added' && untrackedFiles?.has(filePath)) {
+      changeType = 'untracked'
+    }
     binaryFiles.push({ path: filePath, type: changeType })
   }
   return binaryFiles
@@ -83,19 +86,21 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
 
   app.get('/api/diff', (c) => {
     let patch: string
+    const staged = c.req.query('staged') === 'true'
+    const untracked = c.req.query('untracked') === 'true'
     if (isCustomMode) {
       patch = getCustomGitDiff(customDiffArgs)
     } else {
-      const staged = c.req.query('staged') === 'true'
-      const untracked = c.req.query('untracked') === 'true'
       patch = getGitDiff({ staged, untracked })
     }
     const repoName = getRepoName()
     const branch = getBranchName()
-    const binaryFiles = parseBinaryFiles(patch)
+    const untrackedFiles = untracked ? getUntrackedFilePaths() : []
+    const untrackedSet = new Set(untrackedFiles)
+    const binaryFiles = parseBinaryFiles(patch, untrackedSet)
     const filePaths = parseFilePaths(patch)
     const tabSizeMap = getTabSizeForFiles(filePaths)
-    return c.json({ patch, repoName, branch, customMode: isCustomMode, binaryFiles, tabSizeMap })
+    return c.json({ patch, repoName, branch, customMode: isCustomMode, binaryFiles, tabSizeMap, untrackedFiles })
   })
 
   app.get('/api/file-content', (c) => {

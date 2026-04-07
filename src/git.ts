@@ -123,6 +123,14 @@ export function getTabSizeForFiles(filePaths: string[]): Record<string, number> 
   return result
 }
 
+export function getUntrackedFilePaths(): string[] {
+  const output = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
+    encoding: 'utf-8',
+    maxBuffer: 50 * 1024 * 1024,
+  }).trim()
+  return output ? output.split('\n') : []
+}
+
 function getUntrackedFilesDiff(): string {
   const root = getRepoRoot()
   const output = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
@@ -149,7 +157,7 @@ function getUntrackedFilesDiff(): string {
       try {
         const content = readFileSync(absolutePath, 'utf-8')
         const lines = content.split('\n')
-        const diffLines = lines.map((line) => `+${line}`)
+        const diffLines = lines.map((l: string) => `+${l}`)
         const patch = [
           `diff --git a/${file} b/${file}`,
           'new file mode 100644',

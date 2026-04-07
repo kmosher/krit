@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 
 export interface BinaryFileInfo {
   path: string
-  type: 'added' | 'deleted' | 'changed'
+  type: 'added' | 'deleted' | 'changed' | 'untracked'
 }
 
 interface DiffData {
@@ -12,6 +12,7 @@ interface DiffData {
   customMode: boolean
   binaryFiles: BinaryFileInfo[]
   tabSizeMap: Record<string, number>
+  untrackedFiles: string[]
 }
 
 export interface DiffOptions {
@@ -45,6 +46,7 @@ export function useDiff(options: DiffOptions) {
     customMode: data?.customMode ?? false,
     binaryFiles: data?.binaryFiles ?? [],
     tabSizeMap: data?.tabSizeMap ?? {},
+    untrackedFiles: data?.untrackedFiles ?? [],
     loading,
     error,
   }
