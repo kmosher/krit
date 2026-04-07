@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import type { FileDiffMetadata, DiffLineAnnotation, AnnotationSide } from '@pierre/diffs'
 import type { ReviewComment } from '../../types'
 import type { BinaryFileInfo } from '../hooks/useDiff'
@@ -12,12 +13,14 @@ interface DiffViewerProps {
   viewedFiles: Set<string>
   binaryFiles: Map<string, BinaryFileInfo>
   onViewedChange: (filePath: string, viewed: boolean) => void
-  getAnnotationsForFile: (filePath: string) => DiffLineAnnotation<ReviewComment>[]
+  fileAnnotationsMap: Map<string, DiffLineAnnotation<ReviewComment>[]>
   onAddComment: (filePath: string, side: AnnotationSide, lineNumber: number, lineContent: string, body: string) => void
   onDeleteComment: (id: string) => void
 }
 
-export function DiffViewer({
+const emptyAnnotations: DiffLineAnnotation<ReviewComment>[] = []
+
+export const DiffViewer = memo(function DiffViewer({
   files,
   diffStyle,
   tabSizeMap,
@@ -25,7 +28,7 @@ export function DiffViewer({
   viewedFiles,
   binaryFiles,
   onViewedChange,
-  getAnnotationsForFile,
+  fileAnnotationsMap,
   onAddComment,
   onDeleteComment,
 }: DiffViewerProps) {
@@ -59,7 +62,7 @@ export function DiffViewer({
             id={`file-${filePath}`}
             fileDiff={file}
             filePath={filePath}
-            annotations={getAnnotationsForFile(filePath)}
+            annotations={fileAnnotationsMap.get(filePath) ?? emptyAnnotations}
             diffStyle={diffStyle}
             tabSize={tabSizeMap[filePath] ?? defaultTabSize}
             viewed={viewedFiles.has(filePath)}
@@ -71,4 +74,4 @@ export function DiffViewer({
       })}
     </div>
   )
-}
+})

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import { FileDiff } from '@pierre/diffs/react'
 import type { DiffLineAnnotation, FileDiffMetadata, AnnotationSide } from '@pierre/diffs'
 import type { ReviewComment } from '../../types'
@@ -23,7 +23,7 @@ interface FileDiffCardProps {
   onDeleteComment: (id: string) => void
 }
 
-export function FileDiffCard({
+export const FileDiffCard = memo(function FileDiffCard({
   id,
   fileDiff,
   filePath,
@@ -140,4 +140,4 @@ export function FileDiffCard({
       )}
     </div>
   )
-}
+})

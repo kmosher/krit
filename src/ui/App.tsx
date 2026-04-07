@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef } from 'react'
 import { parsePatchFiles } from '@pierre/diffs'
 import type { FileDiffMetadata } from '@pierre/diffs'
+import type { ReviewComment } from '../types'
 import { useDiff } from './hooks/useDiff'
 import { useComments } from './hooks/useComments'
 import { useSettings } from './hooks/useSettings'
@@ -15,7 +16,7 @@ export function App() {
     staged: settings.staged,
     untracked: settings.untracked,
   })
-  const { comments, addComment, removeComment, getAnnotationsForFile, copyAllComments } =
+  const { comments, addComment, removeComment, copyAllComments } =
     useComments()
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const { viewedFiles, setViewed } = useViewed()
@@ -76,6 +77,23 @@ export function App() {
       counts[c.filePath] = (counts[c.filePath] ?? 0) + 1
     }
     return counts
+  }, [comments])
+
+  const fileAnnotationsMap = useMemo(() => {
+    const map = new Map<string, { side: ReviewComment['side']; lineNumber: number; metadata: ReviewComment }[]>()
+    for (const c of comments) {
+      let list = map.get(c.filePath)
+      if (!list) {
+        list = []
+        map.set(c.filePath, list)
+      }
+      list.push({
+        side: c.side,
+        lineNumber: c.lineNumber,
+        metadata: c,
+      })
+    }
+    return map
   }, [comments])
 
   const handleFileClick = useCallback((filePath: string) => {
@@ -143,7 +161,7 @@ export function App() {
             viewedFiles={viewedFiles}
             binaryFiles={binaryFileMap}
             onViewedChange={handleViewedChange}
-            getAnnotationsForFile={getAnnotationsForFile}
+            fileAnnotationsMap={fileAnnotationsMap}
             onAddComment={addComment}
             onDeleteComment={removeComment}
           />
