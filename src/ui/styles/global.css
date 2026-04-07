@@ -237,7 +237,7 @@ body {
   transition: background-color 0.1s;
 }
 
-.btn:hover {
+.btn:hover:not(:disabled) {
   background: var(--bg-secondary);
 }
 
@@ -270,7 +270,8 @@ body {
   border: none;
 }
 
-.btn-active {
+.btn-active,
+.btn.btn-active:hover {
   background: var(--primary);
   color: #ffffff;
 }
