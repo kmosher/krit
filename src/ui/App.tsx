@@ -9,6 +9,7 @@ import { useViewed } from './hooks/useViewed'
 import { Toolbar } from './components/Toolbar'
 import { DiffViewer } from './components/DiffViewer'
 import { FileTree } from './components/FileTree'
+import { CommentTracker } from './components/CommentTracker'
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
@@ -154,6 +155,7 @@ export function App() {
             untrackedFiles={untrackedSet}
             onFileClick={handleFileClick}
           />
+          <CommentTracker comments={comments} />
         </aside>
         <main className="main" ref={diffViewerRef}>
           <DiffViewer
