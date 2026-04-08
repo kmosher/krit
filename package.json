@@ -29,7 +29,7 @@
     "build": "vite build && tsdown",
     "changeset": "changeset",
     "dev:client": "vite",
-    "dev:server": "tsx src/cli.ts",
+    "dev:server": "tsx src/cli.ts --no-open -p 3433",
     "prepublishOnly": "pnpm run build",
     "release": "pnpm run build && changeset publish",
     "version-packages": "changeset version"
