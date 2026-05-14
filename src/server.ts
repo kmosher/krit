@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { join, extname, resolve } from 'node:path'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
+import { streamSSE, type SSEStreamingApi } from 'hono/streaming'
 import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, isImageFile, getTabSizeForFiles, getUntrackedFilePaths } from './git.js'
 import { loadSettings, saveSettings } from './settings.js'
 import { InMemoryCommentStore } from './comments.js'
@@ -78,11 +79,35 @@ function parseBinaryFiles(patch: string, untrackedFiles?: Set<string>): BinaryFi
   return binaryFiles
 }
 
+type SubscriberRole = 'ui' | 'cli'
+interface Subscriber {
+  id: string
+  role: SubscriberRole
+  stream: SSEStreamingApi
+}
+
 export function createApp(clientDir: string, customDiffArgs?: string[], commentStore?: CommentStore) {
   const app = new Hono()
   const isCustomMode = !!customDiffArgs
   const store = commentStore ?? new InMemoryCommentStore()
   const viewedFiles = new Set<string>()
+
+  const subscribers = new Set<Subscriber>()
+  const snapshotState = () => ({
+    watcherCount: [...subscribers].filter((s) => s.role === 'cli').length,
+    uiCount: [...subscribers].filter((s) => s.role === 'ui').length,
+  })
+  const sendTo = async (sub: Subscriber, payload: unknown) => {
+    try {
+      await sub.stream.writeSSE({ data: JSON.stringify(payload) })
+    } catch {
+      subscribers.delete(sub)
+    }
+  }
+  const broadcast = async (payload: unknown) => {
+    await Promise.all([...subscribers].map((s) => sendTo(s, payload)))
+  }
+  const broadcastState = () => broadcast({ type: 'state', ...snapshotState() })
 
   app.get('/api/diff', (c) => {
     let patch: string
@@ -193,6 +218,49 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     if (!removed) return c.json({ error: 'Comment not found' }, 404)
     return c.json({ ok: true })
   })
+
+  // SSE event stream. ?role=cli for `diffx wait-for-submit` watchers;
+  // default 'ui' for the browser. The UI uses watcherCount to gate the
+  // Submit button; CLI watchers exit on the 'submitted' event.
+  app.get('/api/events', (c) => {
+    const role: SubscriberRole = c.req.query('role') === 'cli' ? 'cli' : 'ui'
+    return streamSSE(c, async (stream) => {
+      const sub: Subscriber = { id: crypto.randomUUID(), role, stream }
+      subscribers.add(sub)
+      await broadcastState()
+      // Initial snapshot to the new subscriber.
+      await sendTo(sub, { type: 'state', ...snapshotState() })
+
+      const cleanup = () => {
+        if (subscribers.delete(sub)) void broadcastState()
+      }
+      c.req.raw.signal.addEventListener('abort', cleanup)
+
+      // Hold open until the client (or the runtime) aborts. Periodic
+      // comment pings keep proxies from idling the connection out.
+      while (!stream.aborted) {
+        await stream.sleep(30_000)
+        if (stream.aborted) break
+        try {
+          await stream.writeSSE({ event: 'ping', data: '' })
+        } catch {
+          break
+        }
+      }
+      cleanup()
+    })
+  })
+
+  // Submit pulse: tells any waiting CLI watchers that the human is done.
+  // Submit is idempotent on the wire; the UI is responsible for greying
+  // out the button once the user has clicked it.
+  app.post('/api/submit', async (c) => {
+    const ts = Date.now()
+    await broadcast({ type: 'submitted', timestamp: ts })
+    return c.json({ ok: true, timestamp: ts })
+  })
+
+  app.get('/api/submit', (c) => c.json(snapshotState()))
 
   app.get('/*', async (c) => {
     let filePath = c.req.path

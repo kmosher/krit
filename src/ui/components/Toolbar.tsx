@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { GitBranch, Settings } from 'lucide-react'
+import { GitBranch, Send, Settings } from 'lucide-react'
 import type { DiffOptions } from '../hooks/useDiff'
 
 interface ToolbarProps {
@@ -19,6 +19,11 @@ interface ToolbarProps {
   onDefaultTabSizeChange: (size: number) => void
   onBrowserChange: (browser: string) => void
   onCopyComments: () => Promise<void>
+  /** Number of CLI watchers subscribed to the event stream — gates Submit. */
+  watcherCount: number
+  /** Timestamp the user clicked Submit on this page, or null. */
+  submittedAt: number | null
+  onSubmitReview: () => Promise<void>
 }
 
 export function Toolbar({
@@ -38,15 +43,45 @@ export function Toolbar({
   onDefaultTabSizeChange,
   onBrowserChange,
   onCopyComments,
+  watcherCount,
+  submittedAt,
+  onSubmitReview,
 }: ToolbarProps) {
   const [copied, setCopied] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
 
   const handleCopy = async () => {
     await onCopyComments()
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
+  }
+
+  const hasWatcher = watcherCount > 0
+  const isSubmitted = submittedAt !== null
+  const submitDisabled = submitting || isSubmitted || !hasWatcher || commentCount === 0
+  const submitLabel = isSubmitted
+    ? 'Submitted ✓'
+    : !hasWatcher
+      ? 'No watcher'
+      : `Submit (${commentCount})`
+  const submitTitle = isSubmitted
+    ? 'Comments have been handed off to the listening Claude session.'
+    : !hasWatcher
+      ? 'No `diffx wait-for-submit` is currently subscribed. Start one from Claude, or use Copy comments to paste manually.'
+      : commentCount === 0
+        ? 'Leave at least one comment before submitting.'
+        : 'Hand off your comments to the listening Claude session.'
+
+  const handleSubmit = async () => {
+    if (submitDisabled) return
+    setSubmitting(true)
+    try {
+      await onSubmitReview()
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   useEffect(() => {
@@ -159,11 +194,21 @@ export function Toolbar({
           )}
         </div>
         <button
-          className="btn btn-primary btn-sm"
+          className="btn btn-sm"
           onClick={handleCopy}
           disabled={commentCount === 0}
+          title="Copy comments as XML to paste into Claude."
         >
-          {copied ? 'Copied!' : `Copy comments (${commentCount})`}
+          {copied ? 'Copied!' : `Copy (${commentCount})`}
+        </button>
+        <button
+          className={`btn btn-primary btn-sm ${isSubmitted ? 'btn-active' : ''}`}
+          onClick={handleSubmit}
+          disabled={submitDisabled}
+          title={submitTitle}
+        >
+          <Send size={12} style={{ marginRight: 4, verticalAlign: -1 }} />
+          {submitLabel}
         </button>
       </div>
     </div>

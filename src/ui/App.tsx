@@ -4,6 +4,7 @@ import type { FileDiffMetadata } from '@pierre/diffs'
 import type { ReviewComment } from '../types'
 import { useDiff } from './hooks/useDiff'
 import { useComments } from './hooks/useComments'
+import { useReviewState, submitReview } from './hooks/useReviewState'
 import { useSettings } from './hooks/useSettings'
 import { useViewed } from './hooks/useViewed'
 import { Toolbar } from './components/Toolbar'
@@ -19,6 +20,7 @@ export function App() {
   })
   const { comments, addComment, removeComment, copyAllComments } =
     useComments()
+  const reviewState = useReviewState()
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -159,6 +161,9 @@ export function App() {
         onDefaultTabSizeChange={(size) => updateSettings({ defaultTabSize: size })}
         onBrowserChange={(browser) => updateSettings({ browser })}
         onCopyComments={copyAllComments}
+        watcherCount={reviewState.watcherCount}
+        submittedAt={reviewState.submittedAt}
+        onSubmitReview={submitReview}
       />
       <div className="app-body">
         <aside className={`sidebar ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>

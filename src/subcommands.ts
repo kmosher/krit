@@ -79,4 +79,76 @@ export async function cmdReopen(id: string | undefined): Promise<void> {
   console.log(`reopened ${id}`)
 }
 
-export const SUBCOMMANDS = new Set(['state', 'comments', 'reply', 'resolve', 'reopen'])
+/**
+ * Block until the user clicks "Submit to Claude" in the diffx browser UI.
+ *
+ * Subscribes to the server's SSE stream with role=cli, which:
+ *   - counts toward the UI's `watcherCount` (enabling the Submit button)
+ *   - delivers a one-shot `submitted` event when the user clicks it
+ *
+ * Exit codes:
+ *   0  — submit fired; the human is done reviewing
+ *   2  — connection lost / server gone away (likely diffx server stopped)
+ *   130 — interrupted (Ctrl+C) — node's standard SIGINT exit
+ *
+ * The orchestrating Claude session typically runs this in the background;
+ * the task-completion notification is the wake-up signal to process comments.
+ */
+export async function cmdWaitForSubmit(): Promise<void> {
+  const state = requireState()
+  const url = `${state.url}/api/events?role=cli`
+
+  process.on('SIGINT', () => process.exit(130))
+  process.on('SIGTERM', () => process.exit(130))
+
+  let res: Response
+  try {
+    res = await fetch(url, { headers: { Accept: 'text/event-stream' } })
+  } catch (err) {
+    console.error(`wait-for-submit: cannot reach diffx at ${url}: ${(err as Error).message}`)
+    process.exit(2)
+  }
+  if (!res.ok || !res.body) {
+    console.error(`wait-for-submit: SSE handshake failed (${res.status} ${res.statusText})`)
+    process.exit(2)
+  }
+
+  console.error('wait-for-submit: connected — leave comments and click Submit in the browser.')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) {
+      console.error('wait-for-submit: server closed the connection before submit fired.')
+      process.exit(2)
+    }
+    buf += decoder.decode(value, { stream: true })
+    // SSE events are separated by a blank line.
+    let idx: number
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      const dataLines = frame
+        .split('\n')
+        .filter((l) => l.startsWith('data: '))
+        .map((l) => l.slice(6))
+      if (dataLines.length === 0) continue
+      const data = dataLines.join('\n')
+      if (!data) continue // ping
+      let parsed: { type?: string; timestamp?: number }
+      try {
+        parsed = JSON.parse(data)
+      } catch {
+        continue
+      }
+      if (parsed.type === 'submitted') {
+        console.log(JSON.stringify({ submitted: true, timestamp: parsed.timestamp ?? null }))
+        process.exit(0)
+      }
+    }
+  }
+}
+
+export const SUBCOMMANDS = new Set(['state', 'comments', 'reply', 'resolve', 'reopen', 'wait-for-submit'])
