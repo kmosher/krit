@@ -10,9 +10,15 @@ function requireState(): DiffxState {
   return state
 }
 
+function baseUrl(state: DiffxState): string {
+  // 127.0.0.1 → localhost so sandbox host allowlists (which only accept
+  // the name) don't block the loopback connection.
+  return state.url.replace('://127.0.0.1', '://localhost')
+}
+
 async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
   const state = requireState()
-  const url = `${state.url}${path}`
+  const url = `${baseUrl(state)}${path}`
   let res: Response
   try {
     res = await fetch(url, {
@@ -57,7 +63,9 @@ export async function cmdReply(id: string | undefined, body: string | undefined)
     console.error('Usage: diffx reply <comment-id> <text>')
     process.exit(1)
   }
-  await api('POST', `/api/comments/${id}/replies`, { body })
+  // ?source=cli prevents this reply from being broadcast as a `reply-added`
+  // event, which would otherwise wake up `diffx watch` (i.e. ourselves).
+  await api('POST', `/api/comments/${id}/replies?source=cli`, { body })
   console.log(`replied to ${id}`)
 }
 
@@ -79,24 +87,17 @@ export async function cmdReopen(id: string | undefined): Promise<void> {
   console.log(`reopened ${id}`)
 }
 
+type SseEvent = { type?: string; [k: string]: unknown }
+
 /**
- * Block until the user clicks "Submit to Claude" in the diffx browser UI.
- *
- * Subscribes to the server's SSE stream with role=cli, which:
- *   - counts toward the UI's `watcherCount` (enabling the Submit button)
- *   - delivers a one-shot `submitted` event when the user clicks it
- *
- * Exit codes:
- *   0  — submit fired; the human is done reviewing
- *   2  — connection lost / server gone away (likely diffx server stopped)
- *   130 — interrupted (Ctrl+C) — node's standard SIGINT exit
- *
- * The orchestrating Claude session typically runs this in the background;
- * the task-completion notification is the wake-up signal to process comments.
+ * Connects to the diffx server's SSE stream as role=cli and invokes
+ * `onEvent` for each parsed event. Resolves only when the server closes
+ * the stream; never returns on its own. Exits the process on connect
+ * failure (code 2).
  */
-export async function cmdWaitForSubmit(): Promise<void> {
+async function streamEvents(label: string, onEvent: (ev: SseEvent) => void): Promise<void> {
   const state = requireState()
-  const url = `${state.url}/api/events?role=cli`
+  const url = `${baseUrl(state)}/api/events?role=cli`
 
   process.on('SIGINT', () => process.exit(130))
   process.on('SIGTERM', () => process.exit(130))
@@ -105,25 +106,20 @@ export async function cmdWaitForSubmit(): Promise<void> {
   try {
     res = await fetch(url, { headers: { Accept: 'text/event-stream' } })
   } catch (err) {
-    console.error(`wait-for-submit: cannot reach diffx at ${url}: ${(err as Error).message}`)
+    console.error(`${label}: cannot reach diffx at ${url}: ${(err as Error).message}`)
     process.exit(2)
   }
   if (!res.ok || !res.body) {
-    console.error(`wait-for-submit: SSE handshake failed (${res.status} ${res.statusText})`)
+    console.error(`${label}: SSE handshake failed (${res.status} ${res.statusText})`)
     process.exit(2)
   }
-
-  console.error('wait-for-submit: connected — leave comments and click Submit in the browser.')
 
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buf = ''
   while (true) {
     const { value, done } = await reader.read()
-    if (done) {
-      console.error('wait-for-submit: server closed the connection before submit fired.')
-      process.exit(2)
-    }
+    if (done) return
     buf += decoder.decode(value, { stream: true })
     // SSE events are separated by a blank line.
     let idx: number
@@ -137,18 +133,63 @@ export async function cmdWaitForSubmit(): Promise<void> {
       if (dataLines.length === 0) continue
       const data = dataLines.join('\n')
       if (!data) continue // ping
-      let parsed: { type?: string; timestamp?: number }
+      let parsed: SseEvent
       try {
         parsed = JSON.parse(data)
       } catch {
         continue
       }
-      if (parsed.type === 'submitted') {
-        console.log(JSON.stringify({ submitted: true, timestamp: parsed.timestamp ?? null }))
-        process.exit(0)
-      }
+      onEvent(parsed)
     }
   }
 }
 
-export const SUBCOMMANDS = new Set(['state', 'comments', 'reply', 'resolve', 'reopen', 'wait-for-submit'])
+/**
+ * Block until the user clicks "Done reviewing" in the diffx browser UI.
+ *
+ * Exit codes: 0 on submit, 2 on connection loss, 130 on Ctrl+C.
+ *
+ * Retained for the batch-review workflow. The streaming flow uses
+ * `diffx watch` instead — see cmdWatch below.
+ */
+export async function cmdWaitForSubmit(): Promise<void> {
+  console.error('wait-for-submit: connected — leave comments and click Done reviewing in the browser.')
+  await streamEvents('wait-for-submit', (ev) => {
+    if (ev.type === 'submitted') {
+      console.log(JSON.stringify({ submitted: true, timestamp: ev.timestamp ?? null }))
+      process.exit(0)
+    }
+  })
+  console.error('wait-for-submit: server closed the connection before submit fired.')
+  process.exit(2)
+}
+
+/**
+ * Stream comment events from the diffx UI, one JSON line per event.
+ *
+ * Designed to run as a long-lived Monitor task: each printed line is a
+ * wake-up notification for the orchestrating Claude session. Exits 0
+ * when the user clicks "Done reviewing", 2 if the server drops, 130 on
+ * Ctrl+C.
+ *
+ * Emitted line shapes (one per line, newline-terminated):
+ *   {"type":"comment-added","comment":{...}}
+ *   {"type":"reply-added","commentId":"...","reply":{...}}
+ *   {"type":"submitted","timestamp":...}     // final line before exit 0
+ */
+export async function cmdWatch(): Promise<void> {
+  console.error('watch: connected — streaming comment events. Click Done reviewing to stop.')
+  await streamEvents('watch', (ev) => {
+    if (ev.type === 'comment-added' || ev.type === 'reply-added') {
+      process.stdout.write(JSON.stringify(ev) + '\n')
+    } else if (ev.type === 'submitted') {
+      process.stdout.write(JSON.stringify(ev) + '\n')
+      process.exit(0)
+    }
+    // state events and pings are intentionally swallowed.
+  })
+  console.error('watch: server closed the connection.')
+  process.exit(2)
+}
+
+export const SUBCOMMANDS = new Set(['state', 'comments', 'reply', 'resolve', 'reopen', 'wait-for-submit', 'watch'])

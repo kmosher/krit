@@ -8,7 +8,7 @@ import { isGitRepo } from './git.js'
 import { startServer } from './server.js'
 import { loadSettings } from './settings.js'
 import { defaultStatePath, writeState, removeState } from './state.js'
-import { SUBCOMMANDS, cmdState, cmdComments, cmdReply, cmdResolve, cmdReopen, cmdWaitForSubmit } from './subcommands.js'
+import { SUBCOMMANDS, cmdState, cmdComments, cmdReply, cmdResolve, cmdReopen, cmdWaitForSubmit, cmdWatch } from './subcommands.js'
 
 // Subcommand dispatch happens BEFORE parseArgs so that flags like --staged
 // don't get rejected when we're really running a subcommand. We only treat
@@ -52,6 +52,10 @@ if (hasSubcommand) {
       await cmdWaitForSubmit()
       // cmdWaitForSubmit exits on its own
       process.exit(0)
+    case 'watch':
+      await cmdWatch()
+      // cmdWatch exits on its own
+      process.exit(0)
   }
 }
 
@@ -86,8 +90,10 @@ Subcommands (talk to the running diffx server for the current session):
   reply <id> <text...>        Reply to a comment
   resolve <id>                Mark a comment resolved
   reopen <id>                 Reopen a resolved comment
-  wait-for-submit             Block until the user clicks Submit in the browser UI
+  wait-for-submit             Block until the user clicks Done reviewing in the browser UI
                               (exit 0 on submit, 2 on disconnect, 130 on Ctrl+C)
+  watch                       Stream comment events as JSON lines on stdout
+                              (one line per new comment / reply; exits 0 on Done reviewing)
 
 Examples:
   diffx                        Review uncommitted changes

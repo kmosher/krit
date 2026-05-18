@@ -62,17 +62,17 @@ export function Toolbar({
   const isSubmitted = submittedAt !== null
   const submitDisabled = submitting || isSubmitted || !hasWatcher || commentCount === 0
   const submitLabel = isSubmitted
-    ? 'Submitted ✓'
+    ? 'Done ✓'
     : !hasWatcher
       ? 'No watcher'
-      : `Submit (${commentCount})`
+      : `Done reviewing (${commentCount})`
   const submitTitle = isSubmitted
-    ? 'Comments have been handed off to the listening Claude session.'
+    ? 'Review finished — the listening Claude session has been told to stop watching.'
     : !hasWatcher
-      ? 'No `diffx wait-for-submit` is currently subscribed. Start one from Claude, or use Copy comments to paste manually.'
+      ? 'No `diffx watch` (or `wait-for-submit`) is currently subscribed. Start one from Claude, or use Copy comments to paste manually.'
       : commentCount === 0
-        ? 'Leave at least one comment before submitting.'
-        : 'Hand off your comments to the listening Claude session.'
+        ? 'Leave at least one comment before finishing the review.'
+        : 'End the review session — tells the listening Claude session you are done.'
 
   const handleSubmit = async () => {
     if (submitDisabled) return

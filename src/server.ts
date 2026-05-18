@@ -188,6 +188,7 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
       replies: [],
     }
     const created = await store.add(comment)
+    void broadcast({ type: 'comment-added', comment: created })
     return c.json(created, 201)
   })
 
@@ -201,6 +202,7 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
 
   app.post('/api/comments/:id/replies', async (c) => {
     const commentId = c.req.param('id')
+    const source = c.req.query('source') ?? 'ui'
     const { body } = await c.req.json()
     const reply = {
       id: crypto.randomUUID(),
@@ -209,6 +211,12 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     }
     const updated = await store.addReply(commentId, reply)
     if (!updated) return c.json({ error: 'Comment not found' }, 404)
+    // Only human (UI) replies become wake-ups for the watching agent.
+    // Replies the agent posts via `diffx reply` carry ?source=cli and
+    // would otherwise feed back into its own watch loop.
+    if (source !== 'cli') {
+      void broadcast({ type: 'reply-added', commentId, reply })
+    }
     return c.json(updated)
   })
 
@@ -219,9 +227,13 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     return c.json({ ok: true })
   })
 
-  // SSE event stream. ?role=cli for `diffx wait-for-submit` watchers;
-  // default 'ui' for the browser. The UI uses watcherCount to gate the
-  // Submit button; CLI watchers exit on the 'submitted' event.
+  // SSE event stream. ?role=cli for `diffx watch` / `wait-for-submit`
+  // watchers; default 'ui' for the browser. Event types on the wire:
+  //   state          — subscriber-count snapshot (UI uses it to gate Submit)
+  //   comment-added  — new comment from any source
+  //   reply-added    — new reply from the UI (agent-posted replies suppressed
+  //                    to avoid feeding the agent's own watch loop)
+  //   submitted      — one-shot pulse when the user clicks "Done reviewing"
   app.get('/api/events', (c) => {
     const role: SubscriberRole = c.req.query('role') === 'cli' ? 'cli' : 'ui'
     return streamSSE(c, async (stream) => {
