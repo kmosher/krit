@@ -13,6 +13,11 @@ interface DiffData {
   binaryFiles: BinaryFileInfo[]
   tabSizeMap: Record<string, number>
   untrackedFiles: string[]
+  // Git refs (or sentinels: 'WORKING_TREE' / 'INDEX') that the current diff was
+  // computed against. Used by file-content fetches so hunk expansion sees the
+  // same source the diff renderer is looking at.
+  baseRef: string
+  headRef: string
 }
 
 export interface DiffOptions {
@@ -47,6 +52,8 @@ export function useDiff(options: DiffOptions) {
     binaryFiles: data?.binaryFiles ?? [],
     tabSizeMap: data?.tabSizeMap ?? {},
     untrackedFiles: data?.untrackedFiles ?? [],
+    baseRef: data?.baseRef ?? 'HEAD',
+    headRef: data?.headRef ?? 'WORKING_TREE',
     loading,
     error,
   }

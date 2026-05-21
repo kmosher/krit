@@ -47,6 +47,94 @@ export function getFileContent(filePath: string, version: 'old' | 'new'): Buffer
   }
 }
 
+/**
+ * Sentinels for the two non-ref content sources we surface alongside named git refs:
+ *   - WORKING_TREE: the on-disk file (what `readFileSync` returns).
+ *   - INDEX: the staged version (what `git show :path` returns).
+ * Everything else is treated as a git revision and passed to `git show <ref>:path`.
+ */
+export const WORKING_TREE_REF = 'WORKING_TREE'
+export const INDEX_REF = 'INDEX'
+
+export function getFileContentAtRef(filePath: string, ref: string): Buffer | null {
+  const root = getRepoRoot()
+  if (!isSafePath(filePath, root)) return null
+  if (ref === WORKING_TREE_REF) {
+    try {
+      return readFileSync(resolve(root, filePath))
+    } catch {
+      return null
+    }
+  }
+  // Both INDEX and named refs go through `git show`. Index is `git show :path`
+  // (no ref prefix). Named refs are `git show <ref>:path`. The 50MB cap matches
+  // the legacy getFileContent — large enough for any sane source file, small
+  // enough to prevent obvious DOSing.
+  const spec = ref === INDEX_REF ? `:${filePath}` : `${ref}:${filePath}`
+  try {
+    return execFileSync('git', ['show', spec], { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve a diffx invocation to the (old, new) refs the patch was computed against,
+ * so we can serve the matching file contents for hunk expansion.
+ *
+ * Mirrors what `git diff` itself does with these arg shapes:
+ *   - (none)              → working tree vs HEAD               → old=HEAD,            new=WORKING_TREE
+ *   - --staged / --cached → index vs HEAD                      → old=HEAD,            new=INDEX
+ *   - <rev>               → working tree vs <rev>              → old=<rev>,           new=WORKING_TREE
+ *   - <rev1> <rev2>       → <rev2> vs <rev1>                   → old=<rev1>,          new=<rev2>
+ *   - <rev1>..<rev2>      → same as above                      → old=<rev1>,          new=<rev2>
+ *   - <rev1>...<rev2>     → <rev2> vs merge-base(<rev1>,<rev2>)→ old=mergeBase(...),  new=<rev2>
+ *
+ * Anything we can't parse falls back to the working-tree default; the client only
+ * uses these for context-line expansion, so an incorrect ref renders as "this file
+ * has no diff" — annoying but not corrupting.
+ */
+export function resolveDiffRefs(
+  customDiffArgs: string[] | undefined,
+): { baseRef: string; headRef: string } {
+  const args = customDiffArgs ?? []
+  const positionals: string[] = []
+  let staged = false
+  let pastDashDash = false
+  for (const a of args) {
+    if (pastDashDash) continue // everything after `--` is a pathspec, not a ref
+    if (a === '--') { pastDashDash = true; continue }
+    if (a === '--staged' || a === '--cached') { staged = true; continue }
+    if (a.startsWith('-')) continue // any other git-diff flag (e.g. --ignore-whitespace)
+    positionals.push(a)
+  }
+  if (staged) return { baseRef: 'HEAD', headRef: INDEX_REF }
+  if (positionals.length === 0) return { baseRef: 'HEAD', headRef: WORKING_TREE_REF }
+  if (positionals.length === 1) {
+    const a = positionals[0]
+    if (a.includes('...')) {
+      const [x, y] = a.split('...')
+      const head = y || 'HEAD'
+      try {
+        const mergeBase = execFileSync('git', ['merge-base', x, head], { stdio: 'pipe' })
+          .toString()
+          .trim()
+        return { baseRef: mergeBase, headRef: head }
+      } catch {
+        return { baseRef: x, headRef: head }
+      }
+    }
+    if (a.includes('..')) {
+      const [x, y] = a.split('..')
+      return { baseRef: x, headRef: y || 'HEAD' }
+    }
+    return { baseRef: a, headRef: WORKING_TREE_REF }
+  }
+  // 2+ positionals: treat first two as refs (git diff's own behavior; extra positionals
+  // would be pathspecs and we ignore them for ref resolution).
+  return { baseRef: positionals[0], headRef: positionals[1] }
+}
+
 export function isGitRepo(): boolean {
   try {
     execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { stdio: 'pipe' })

@@ -3,7 +3,7 @@ import { join, extname, resolve } from 'node:path'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { streamSSE, type SSEStreamingApi } from 'hono/streaming'
-import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, isImageFile, getTabSizeForFiles, getUntrackedFilePaths } from './git.js'
+import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, getFileContentAtRef, resolveDiffRefs, WORKING_TREE_REF, isImageFile, getTabSizeForFiles, getUntrackedFilePaths } from './git.js'
 import { loadSettings, saveSettings } from './settings.js'
 import { InMemoryCommentStore } from './comments.js'
 import type { CommentStore } from './comments.js'
@@ -113,10 +113,17 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     let patch: string
     const staged = c.req.query('staged') === 'true'
     const untracked = c.req.query('untracked') === 'true'
+    let refs: { baseRef: string; headRef: string }
     if (isCustomMode) {
       patch = getCustomGitDiff(customDiffArgs)
+      refs = resolveDiffRefs(customDiffArgs)
     } else {
       patch = getGitDiff({ staged, untracked })
+      // Default mode mirrors how `git diff` behaves with no args: working tree vs HEAD,
+      // unless --staged toggles index vs HEAD.
+      refs = staged
+        ? { baseRef: 'HEAD', headRef: 'INDEX' }
+        : { baseRef: 'HEAD', headRef: WORKING_TREE_REF }
     }
     const repoName = getRepoName()
     const branch = getBranchName()
@@ -125,7 +132,17 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     const binaryFiles = parseBinaryFiles(patch, untrackedSet)
     const filePaths = parseFilePaths(patch)
     const tabSizeMap = getTabSizeForFiles(filePaths)
-    return c.json({ patch, repoName, branch, customMode: isCustomMode, binaryFiles, tabSizeMap, untrackedFiles })
+    return c.json({
+      patch,
+      repoName,
+      branch,
+      customMode: isCustomMode,
+      binaryFiles,
+      tabSizeMap,
+      untrackedFiles,
+      baseRef: refs.baseRef,
+      headRef: refs.headRef,
+    })
   })
 
   app.get('/api/file-content', (c) => {
@@ -143,6 +160,37 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     return new Response(new Uint8Array(content), {
       headers: { 'Content-Type': contentType },
     })
+  })
+
+  // Text variant of /api/file-content: returns JSON instead of raw bytes, so the
+  // browser can pass it back to the diff renderer for hunk expansion. The `ref`
+  // query is whatever resolveDiffRefs returned for this diff (a git rev, or one
+  // of the WORKING_TREE / INDEX sentinels). Soft-caps payloads at FILE_TEXT_CAP_BYTES;
+  // the client can re-request with ?force=true when the user explicitly opts in.
+  const FILE_TEXT_CAP_BYTES = 5 * 1024 * 1024
+  app.get('/api/file-text', (c) => {
+    const path = c.req.query('path')
+    const ref = c.req.query('ref')
+    const force = c.req.query('force') === 'true'
+    if (!path || !ref) {
+      return c.json({ error: 'Missing path or ref' }, 400)
+    }
+    const content = getFileContentAtRef(path, ref)
+    if (!content) {
+      return c.json({ error: 'File not found' }, 404)
+    }
+    // Binary sniff: any NUL byte in the first 8KB. Cheaper than a magic-bytes table
+    // and matches the same heuristic git uses for "diff: file is binary".
+    const sniff = Math.min(content.length, 8192)
+    for (let i = 0; i < sniff; i++) {
+      if (content[i] === 0) {
+        return c.json({ binary: true, size: content.length })
+      }
+    }
+    if (content.length > FILE_TEXT_CAP_BYTES && !force) {
+      return c.json({ oversize: true, size: content.length, cap: FILE_TEXT_CAP_BYTES })
+    }
+    return c.json({ contents: content.toString('utf-8'), size: content.length })
   })
 
   app.get('/api/settings', (c) => {

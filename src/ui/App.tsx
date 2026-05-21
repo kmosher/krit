@@ -14,7 +14,7 @@ import { CommentTracker } from './components/CommentTracker'
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
-  const { patch, repoName, branch, customMode, binaryFiles, tabSizeMap, untrackedFiles, loading, error } = useDiff({
+  const { patch, repoName, branch, customMode, binaryFiles, tabSizeMap, untrackedFiles, baseRef, headRef, loading, error } = useDiff({
     staged: settings.staged,
     untracked: settings.untracked,
   })
@@ -187,6 +187,8 @@ export function App() {
             defaultTabSize={settings.defaultTabSize}
             viewedFiles={viewedFiles}
             binaryFiles={binaryFileMap}
+            baseRef={baseRef}
+            headRef={headRef}
             onViewedChange={handleViewedChange}
             fileAnnotationsMap={fileAnnotationsMap}
             onAddComment={addComment}
