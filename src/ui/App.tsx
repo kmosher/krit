@@ -18,7 +18,7 @@ export function App() {
     staged: settings.staged,
     untracked: settings.untracked,
   })
-  const { comments, addComment, removeComment, copyAllComments } =
+  const { comments, addComment, removeComment, replyToComment, copyAllComments } =
     useComments()
   const reviewState = useReviewState()
   const [activeFile, setActiveFile] = useState<string | null>(null)
@@ -191,6 +191,7 @@ export function App() {
             fileAnnotationsMap={fileAnnotationsMap}
             onAddComment={addComment}
             onDeleteComment={removeComment}
+            onReplyComment={replyToComment}
           />
         </main>
       </div>

@@ -7,7 +7,8 @@ import { CommentBubble } from './CommentBubble'
 
 interface PendingComment {
   side: AnnotationSide
-  lineNumber: number
+  startLine: number
+  endLine: number
 }
 
 interface FileDiffCardProps {
@@ -19,8 +20,9 @@ interface FileDiffCardProps {
   tabSize: number
   viewed: boolean
   onViewedChange: (filePath: string, viewed: boolean) => void
-  onAddComment: (filePath: string, side: AnnotationSide, lineNumber: number, lineContent: string, body: string) => void
+  onAddComment: (filePath: string, side: AnnotationSide, lineNumber: number, endLine: number, lineContent: string, body: string) => void
   onDeleteComment: (id: string) => void
+  onReplyComment: (id: string, body: string) => void
 }
 
 export const FileDiffCard = memo(function FileDiffCard({
@@ -34,9 +36,11 @@ export const FileDiffCard = memo(function FileDiffCard({
   onViewedChange,
   onAddComment,
   onDeleteComment,
+  onReplyComment,
 }: FileDiffCardProps) {
   const [pending, setPending] = useState<PendingComment | null>(null)
 
+  // Resolve one line's text from the diff side. Returns '' for lines outside any hunk.
   const getLineContent = (side: AnnotationSide, lineNumber: number): string => {
     const lines = side === 'additions' ? fileDiff.additionLines : fileDiff.deletionLines
     const startKey = side === 'additions' ? 'additionStart' : 'deletionStart'
@@ -53,13 +57,44 @@ export const FileDiffCard = memo(function FileDiffCard({
     return ''
   }
 
+  // Concatenate one line per row in [startLine, endLine] (inclusive), newline-joined.
+  // Rows outside any hunk (gutter selection can sweep past hunk boundaries) yield ''
+  // from getLineContent; we drop those so trailing empty lines don't corrupt the
+  // agent's view of what the user actually highlighted.
+  const getRangeContent = (side: AnnotationSide, startLine: number, endLine: number): string => {
+    const out: string[] = []
+    for (let n = startLine; n <= endLine; n++) {
+      const line = getLineContent(side, n)
+      if (line !== '') out.push(line)
+    }
+    return out.join('\n')
+  }
+
+  // Translate the library's SelectedLineRange into our pending-comment shape, or null
+  // if the selection is unusable (no side, or cross-side drag on a split diff — both
+  // sides have independent line-number coordinate spaces, so we can't form a single span).
+  const rangeFromGutterClick = (
+    range: { start: number; end: number; side?: AnnotationSide; endSide?: AnnotationSide },
+  ): PendingComment | null => {
+    const side = range.side ?? range.endSide
+    if (!side) return null
+    if (range.endSide && range.side && range.endSide !== range.side) return null
+    return {
+      side,
+      startLine: Math.min(range.start, range.end),
+      endLine: Math.max(range.start, range.end),
+    }
+  }
+
+  // Anchor the pending form at the end of the selected range so it appears just below
+  // the highlighted lines (matches GitHub's behavior for multi-line review comments).
   const allAnnotations: DiffLineAnnotation<ReviewComment | { _pending: true }>[] = [
     ...annotations,
     ...(pending
       ? [
           {
             side: pending.side,
-            lineNumber: pending.lineNumber,
+            lineNumber: pending.endLine,
             metadata: { _pending: true as const },
           },
         ]
@@ -87,6 +122,19 @@ export const FileDiffCard = memo(function FileDiffCard({
             options={{
               diffStyle,
               enableGutterUtility: true,
+              // Required so the drag *shows* a line highlight as the user pulls down
+              // the gutter. Without this the gesture silently builds a range but
+              // looks broken — the user sees no feedback and assumes nothing is happening.
+              enableLineSelection: true,
+              // Built-in gutter selection: click the `+` for a single line, or press-and-drag
+              // from the `+` down/up across the gutter to span multiple lines.
+              onGutterUtilityClick: (range) => {
+                // Don't clobber an in-progress comment form — the user may have typed text
+                // they don't want to lose. They can Cancel the existing form first.
+                if (pending) return
+                const next = rangeFromGutterClick(range)
+                if (next) setPending(next)
+              },
               theme: { dark: 'github-dark', light: 'github-light' },
               themeType: 'system',
               unsafeCSS: `:host { --diffs-tab-size: ${tabSize}; }`,
@@ -104,37 +152,32 @@ export const FileDiffCard = memo(function FileDiffCard({
             )}
             renderAnnotation={(annotation) => {
               if ('_pending' in annotation.metadata) {
+                const rangeLabel =
+                  pending && pending.endLine > pending.startLine
+                    ? `Commenting on lines ${pending.startLine}–${pending.endLine}`
+                    : null
                 return (
-                  <CommentForm
-                    onSubmit={(body) => {
-                      const lineContent = getLineContent(pending!.side, pending!.lineNumber)
-                      onAddComment(filePath, pending!.side, pending!.lineNumber, lineContent, body)
-                      setPending(null)
-                    }}
-                    onCancel={() => setPending(null)}
-                  />
+                  <div>
+                    {rangeLabel && <div className="comment-range-label">{rangeLabel}</div>}
+                    <CommentForm
+                      onSubmit={(body) => {
+                        const lineContent = getRangeContent(pending!.side, pending!.startLine, pending!.endLine)
+                        onAddComment(filePath, pending!.side, pending!.startLine, pending!.endLine, lineContent, body)
+                        setPending(null)
+                      }}
+                      onCancel={() => setPending(null)}
+                    />
+                  </div>
                 )
               }
               return (
                 <CommentBubble
                   comment={annotation.metadata as ReviewComment}
                   onDelete={onDeleteComment}
+                  onReply={onReplyComment}
                 />
               )
             }}
-            renderGutterUtility={(getHoveredLine) => (
-              <button
-                className="gutter-add-btn"
-                onClick={() => {
-                  const line = getHoveredLine()
-                  if (line) {
-                    setPending({ side: line.side, lineNumber: line.lineNumber })
-                  }
-                }}
-              >
-                +
-              </button>
-            )}
           />
         </>
       )}

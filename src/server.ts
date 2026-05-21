@@ -176,11 +176,16 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
 
   app.post('/api/comments', async (c) => {
     const body = await c.req.json()
+    // Clamp endLine to never precede lineNumber. Inverted ranges from a buggy client
+    // would otherwise silently store and confuse every downstream consumer.
+    const lineNumber: number = body.lineNumber
+    const endLine: number = Math.max(body.endLine ?? lineNumber, lineNumber)
     const comment = {
       id: crypto.randomUUID(),
       filePath: body.filePath,
       side: body.side,
-      lineNumber: body.lineNumber,
+      lineNumber,
+      endLine,
       lineContent: body.lineContent,
       body: body.body,
       status: 'open' as const,
@@ -202,20 +207,35 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
 
   app.post('/api/comments/:id/replies', async (c) => {
     const commentId = c.req.param('id')
-    const source = c.req.query('source') ?? 'ui'
+    // source=ui → human in the browser; anything else (including absent) → agent/CLI.
+    // The browser must opt in explicitly. This makes the "safer" silent path the default
+    // so an older or unknown client can't masquerade as a human, trigger auto-reopen,
+    // and feed itself through the SSE watch loop.
+    const source = c.req.query('source') === 'ui' ? 'ui' : 'cli'
     const { body } = await c.req.json()
+    const replyAuthor: 'user' | 'agent' = source === 'ui' ? 'user' : 'agent'
     const reply = {
       id: crypto.randomUUID(),
       body,
       createdAt: Date.now(),
+      author: replyAuthor,
     }
     const updated = await store.addReply(commentId, reply)
     if (!updated) return c.json({ error: 'Comment not found' }, 404)
-    // Only human (UI) replies become wake-ups for the watching agent.
-    // Replies the agent posts via `diffx reply` carry ?source=cli and
-    // would otherwise feed back into its own watch loop.
-    if (source !== 'cli') {
-      void broadcast({ type: 'reply-added', commentId, reply })
+    if (source === 'ui') {
+      // A human reply on a resolved comment reopens it so the next agent pass picks it up.
+      // The broadcast carries the post-update status so watchers don't have to re-GET to
+      // notice the reopen — the wire event is the source of truth for state changes.
+      if (updated.status === 'resolved') {
+        await store.update(commentId, { status: 'open' })
+        updated.status = 'open'
+      }
+      void broadcast({
+        type: 'reply-added',
+        commentId,
+        reply,
+        commentStatus: updated.status,
+      })
     }
     return c.json(updated)
   })

@@ -167,6 +167,17 @@ process.on('SIGTERM', () => {
 })
 process.on('exit', cleanup)
 
+const doneReviewingHint = `When you're done reviewing, click "Done reviewing" in the browser (or run /diffx-review in your terminal — Ctrl+C to abort).`
+
+// Common tail: tell the user where to point a browser and what to do when finished.
+// Always called, regardless of whether we tried to auto-open — the URL is also the
+// only positive-confirmation fallback when `open()` reports success but no tab actually
+// rendered (sandboxed `open(1)` on macOS exits 0 silently in that case).
+const printManualUrlHint = (url: string): void => {
+  console.log(`If the tab didn't open, visit ${url} in your browser.`)
+  console.log(doneReviewingHint)
+}
+
 if (!values['no-open']) {
   const settings = loadSettings()
   const openHost = host === '0.0.0.0' ? '127.0.0.1' : host
@@ -178,5 +189,24 @@ if (!values['no-open']) {
     appName = apps[settings.browser] || settings.browser
   }
   const options = appName ? { app: { name: appName } } : {}
-  openModule.default(openUrl, options)
+  // `open()` rejects on spawn failure; the spawned child may still exit non-zero shortly after.
+  try {
+    const child = await openModule.default(openUrl, options)
+    console.log(`Opened a browser tab. diffx is now waiting for you to leave inline comments in the UI.`)
+    printManualUrlHint(openUrl)
+    child.once('exit', (code) => {
+      if (code !== 0 && code !== null) {
+        console.error(`Note: browser-open helper exited with code ${code}; the tab may not have opened.`)
+      }
+    })
+    child.once('error', (err) => {
+      console.error(`Note: browser-open helper failed after spawn: ${err.message}.`)
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`Could not open a browser tab automatically (${msg}).`)
+    printManualUrlHint(openUrl)
+  }
+} else {
+  printManualUrlHint(localUrl)
 }

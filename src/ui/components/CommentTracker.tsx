@@ -75,6 +75,7 @@ export function CommentTracker({ comments }: CommentTrackerProps) {
                   <StatusBadge status={status} />
                   <span className="ct-item-file" title={comment.filePath}>
                     {fileName(comment.filePath)}:{comment.lineNumber}
+                    {comment.endLine && comment.endLine > comment.lineNumber ? `–${comment.endLine}` : ''}
                   </span>
                   <span className="ct-item-time">{timeAgo(comment.createdAt)}</span>
                 </div>

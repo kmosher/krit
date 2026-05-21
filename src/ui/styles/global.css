@@ -494,6 +494,83 @@ body {
     color: var(--text-secondary);
 }
 
+.comment-bubble-range {
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary, rgba(127, 127, 127, 0.12));
+    padding: 1px 6px;
+    border-radius: 4px;
+}
+
+/* The human reviewer's replies — accent blue (--primary, GitHub's blue family). */
+.comment-reply-user {
+    background: color-mix(in srgb, var(--primary) 14%, var(--bg));
+    border-left: 3px solid var(--primary);
+    padding: 6px 8px;
+    border-radius: 4px;
+    margin-top: 4px;
+}
+.comment-reply-user .comment-reply-avatar { color: var(--primary); }
+.comment-reply-user .comment-reply-author { color: var(--primary); }
+
+/* The agent's replies — a distinct violet so the bot voice never blends into the user's. */
+.comment-reply-agent {
+    --agent: #8957e5;
+    background: color-mix(in srgb, var(--agent) 12%, var(--bg));
+    border-left: 3px solid var(--agent);
+    padding: 6px 8px;
+    border-radius: 4px;
+    margin-top: 4px;
+}
+.comment-reply-agent .comment-reply-avatar { color: #8957e5; }
+.comment-reply-agent .comment-reply-author { color: #8957e5; }
+
+@media (prefers-color-scheme: dark) {
+    .comment-reply-agent { --agent: #a371f7; }
+    .comment-reply-agent .comment-reply-avatar,
+    .comment-reply-agent .comment-reply-author { color: #a371f7; }
+}
+
+.comment-reply-author {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.comment-bubble-reply-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+    padding: 4px 8px;
+    font-size: 11px;
+    background: transparent;
+    border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+    border-radius: 4px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.comment-bubble-reply-btn:hover {
+    background: var(--bg-tertiary, rgba(127, 127, 127, 0.12));
+    color: var(--text);
+}
+
+.comment-reply-form {
+    margin-top: 6px;
+}
+
+.comment-range-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+    padding: 2px 6px;
+    background: var(--bg-tertiary, rgba(127, 127, 127, 0.12));
+    border-radius: 4px;
+    display: inline-block;
+}
+
 .comment-bubble-body {
     font-size: 13px;
     line-height: 1.5;
