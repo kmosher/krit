@@ -114,6 +114,31 @@ The skill is a single streaming entrypoint: **`/diffx-review`**. The agent launc
 
 If you'd rather work batch-style without an attached agent, just click **Copy** in the toolbar and paste the XML into a chat — every consumer that parses the format above will still work.
 
+## Developing locally
+
+To run a working copy of diffx from a checkout (instead of the published `diffx-cli` package), point the global `diffx` binary at your source tree once and rebuild after each change:
+
+```bash
+git clone https://github.com/wong2/diffx.git   # or your fork
+cd diffx
+pnpm install
+pnpm build                                     # produces dist/cli.mjs + dist/client/
+pnpm link --global                             # exposes `diffx` on PATH from this checkout
+```
+
+`pnpm link --global` symlinks `<npm-global>/lib/node_modules/diffx-cli` to your checkout, so `which diffx` resolves to `dist/cli.mjs` in the working copy. Re-run `pnpm build` (or `pnpm dev:client` for live-reload during UI work) after editing.
+
+If you also want the `/diffx-review` skill to track your local source, link the SKILL.md into Claude Code's skills directory:
+
+```bash
+mkdir -p ~/.claude/skills/diffx-review
+ln skills/diffx-review/SKILL.md ~/.claude/skills/diffx-review/SKILL.md     # hardlink: edits visible at both paths
+# or, more robust across git checkouts:
+ln -s "$PWD/skills/diffx-review/SKILL.md" ~/.claude/skills/diffx-review/SKILL.md
+```
+
+The hardlink is what `npx skills add` lays down on first install — fastest path, but a git operation that rewrites the file via rename will break the link silently. The symlink survives every checkout (at the cost of a slightly less "vanilla" install).
+
 ## License
 
 MIT
