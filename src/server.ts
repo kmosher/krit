@@ -3,7 +3,7 @@ import { join, extname, resolve } from 'node:path'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { streamSSE, type SSEStreamingApi } from 'hono/streaming'
-import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, getFileContentAtRef, resolveDiffRefs, WORKING_TREE_REF, getTabSizeForFiles, getUntrackedFilePaths } from './git.js'
+import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, getFileContentAtRef, resolveDiffRefs, WORKING_TREE_REF, getUntrackedFilePaths } from './git.js'
 import { loadSettings, saveSettings } from './settings.js'
 import { InMemoryCommentStore } from './comments.js'
 import type { CommentStore } from './comments.js'
@@ -136,7 +136,6 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     const untrackedSet = new Set(untrackedFiles)
     const binaryFiles = parseBinaryFiles(patch, untrackedSet)
     const filePaths = parseFilePaths(patch)
-    const tabSizeMap = getTabSizeForFiles(filePaths)
     const binarySet = new Set(binaryFiles.map((b) => b.path))
 
     type SideContents =
@@ -174,10 +173,7 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
       branch,
       customMode: isCustomMode,
       binaryFiles,
-      tabSizeMap,
       untrackedFiles,
-      baseRef: refs.baseRef,
-      headRef: refs.headRef,
       fileContents,
     })
   })

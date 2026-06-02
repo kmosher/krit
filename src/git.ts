@@ -2,7 +2,6 @@ import { execFileSync } from 'node:child_process'
 import { basename, join, resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { isSafePath } from './path.js'
-import { parseSync as parseEditorConfig, type ProcessedFileConfig } from 'editorconfig'
 
 const IMAGE_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico', '.avif',
@@ -190,25 +189,6 @@ export function getGitDiff(options: { staged?: boolean; untracked?: boolean } = 
   }
 
   return parts.join('\n')
-}
-
-export function getTabSizeForFiles(filePaths: string[]): Record<string, number> {
-  const root = getRepoRoot()
-  const cache = new Map<string, ProcessedFileConfig>()
-  const result: Record<string, number> = {}
-  for (const filePath of filePaths) {
-    try {
-      const absPath = join(root, filePath)
-      const config = parseEditorConfig(absPath, { cache })
-      const size = config.tab_width ?? (config.indent_size === 'tab' ? undefined : config.indent_size)
-      if (typeof size === 'number') {
-        result[filePath] = size
-      }
-    } catch {
-      // skip files that fail to resolve
-    }
-  }
-  return result
 }
 
 export function getUntrackedFilePaths(): string[] {
