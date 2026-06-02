@@ -12,16 +12,6 @@ import type { ReviewComment } from '../../types'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 
-// TODO(hunk-expansion): CodeView's "expand context" only renders when
-// FileDiffMetadata.isPartial === false (i.e. deletionLines/additionLines
-// contain the full file, not just the patch). parsePatchFiles produces
-// partial metadata, so right now there's no expand-context UI — a regression
-// from MultiFileDiff which used oldFile/newFile to provide both sides. The
-// fix is to (1) keep useFileContents fetching both sides per file and
-// (2) replace each item's fileDiff with parseDiffFromFile(oldFile, newFile)
-// once both sides have loaded. Whether to fetch eagerly for all files or
-// progressively near the viewport is the open design question.
-
 // Discriminated union on `_pending`. Persisted comments are `ReviewComment`s
 // straight from the server; the in-flight draft (only one at a time) carries
 // the gutter-selected range so we can reconstruct line content on submit.

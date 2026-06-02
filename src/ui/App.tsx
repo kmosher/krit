@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
-import { parsePatchFiles } from '@pierre/diffs'
-import type { FileDiffMetadata } from '@pierre/diffs'
+import { parsePatchFiles, parseDiffFromFile } from '@pierre/diffs'
+import type { FileDiffMetadata, FileContents } from '@pierre/diffs'
 import type { ReviewComment } from '../types'
 import { useDiff } from './hooks/useDiff'
 import { useComments } from './hooks/useComments'
@@ -15,7 +15,7 @@ import { CommentTracker } from './components/CommentTracker'
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
-  const { patch, repoName, branch, customMode, binaryFiles, untrackedFiles, loading, error } = useDiff({
+  const { patch, repoName, branch, customMode, binaryFiles, fileContents, untrackedFiles, loading, error } = useDiff({
     staged: settings.staged,
     untracked: settings.untracked,
   })
@@ -47,8 +47,29 @@ export function App() {
       const parsed = parsePatchFiles(patch)
       const parsedFiles = parsed.flatMap((p) => p.files)
 
+      // Upgrade each file's FileDiffMetadata from patch-only (isPartial:true)
+      // to full-file (isPartial:false) by re-running it through
+      // parseDiffFromFile when both sides' contents are bundled in the
+      // /api/diff response. Full-file metadata is what CodeView needs to
+      // render the expand-context UI between hunks.
+      const upgraded = parsedFiles.map((file) => {
+        const entry = fileContents[file.name]
+        if (!entry) return file
+        if (!('contents' in entry.old) || !('contents' in entry.new)) {
+          // Oversize, binary, or missing on one side — patch-only it stays.
+          return file
+        }
+        const oldFile: FileContents = { name: file.name, contents: entry.old.contents }
+        const newFile: FileContents = { name: file.name, contents: entry.new.contents }
+        try {
+          return parseDiffFromFile(oldFile, newFile)
+        } catch {
+          return file
+        }
+      })
+
       // Add synthetic entries for binary files not already in parsed output
-      const existingNames = new Set(parsedFiles.map((f) => f.name))
+      const existingNames = new Set(upgraded.map((f) => f.name))
       for (const bf of binaryFiles) {
         if (!existingNames.has(bf.path)) {
           const syntheticFile: FileDiffMetadata = {
@@ -61,15 +82,15 @@ export function App() {
             deletionLines: [],
             additionLines: [],
           }
-          parsedFiles.push(syntheticFile)
+          upgraded.push(syntheticFile)
         }
       }
 
-      return parsedFiles
+      return upgraded
     } catch {
       return []
     }
-  }, [patch, binaryFiles])
+  }, [patch, binaryFiles, fileContents])
 
   const diffStats = useMemo(() => {
     if (!patch) return { additions: 0, deletions: 0 }

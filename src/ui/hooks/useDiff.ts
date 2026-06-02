@@ -5,6 +5,19 @@ export interface BinaryFileInfo {
   type: 'added' | 'deleted' | 'changed' | 'untracked'
 }
 
+// Per-side file contents bundled into /api/diff. Used to construct
+// non-partial FileDiffMetadata so CodeView can render expand-context UI.
+// Files that exceed the server's per-file cap come back as `oversize`;
+// missing-at-ref (added/deleted file) comes back as `missing`. CodeView
+// falls back to patch-only rendering in either case.
+export type SideContents =
+  | { contents: string }
+  | { binary: true }
+  | { oversize: true; size: number }
+  | { missing: true }
+
+export type FileContentsMap = Record<string, { old: SideContents; new: SideContents }>
+
 interface DiffData {
   patch: string
   repoName: string
@@ -13,11 +26,7 @@ interface DiffData {
   binaryFiles: BinaryFileInfo[]
   tabSizeMap: Record<string, number>
   untrackedFiles: string[]
-  // Git refs (or sentinels: 'WORKING_TREE' / 'INDEX') that the current diff was
-  // computed against. Used by file-content fetches so hunk expansion sees the
-  // same source the diff renderer is looking at.
-  baseRef: string
-  headRef: string
+  fileContents: FileContentsMap
 }
 
 export interface DiffOptions {
@@ -52,8 +61,7 @@ export function useDiff(options: DiffOptions) {
     binaryFiles: data?.binaryFiles ?? [],
     tabSizeMap: data?.tabSizeMap ?? {},
     untrackedFiles: data?.untrackedFiles ?? [],
-    baseRef: data?.baseRef ?? 'HEAD',
-    headRef: data?.headRef ?? 'WORKING_TREE',
+    fileContents: data?.fileContents ?? {},
     loading,
     error,
   }
