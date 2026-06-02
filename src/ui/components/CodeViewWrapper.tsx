@@ -12,6 +12,16 @@ import type { ReviewComment } from '../../types'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 
+// TODO(hunk-expansion): CodeView's "expand context" only renders when
+// FileDiffMetadata.isPartial === false (i.e. deletionLines/additionLines
+// contain the full file, not just the patch). parsePatchFiles produces
+// partial metadata, so right now there's no expand-context UI — a regression
+// from MultiFileDiff which used oldFile/newFile to provide both sides. The
+// fix is to (1) keep useFileContents fetching both sides per file and
+// (2) replace each item's fileDiff with parseDiffFromFile(oldFile, newFile)
+// once both sides have loaded. Whether to fetch eagerly for all files or
+// progressively near the viewport is the open design question.
+
 // Discriminated union on `_pending`. Persisted comments are `ReviewComment`s
 // straight from the server; the in-flight draft (only one at a time) carries
 // the gutter-selected range so we can reconstruct line content on submit.
@@ -210,22 +220,54 @@ export const CodeViewWrapper = memo(
       },
     )
 
+    // Imperatively toggle item.collapsed on the viewer. Bumping item.version
+    // tells CodeView to re-render this single item without rebuilding the
+    // whole items array.
+    const handleToggleCollapse = useStableCallback((itemId: string) => {
+      const viewer = viewerRef.current
+      if (!viewer) return
+      const item = viewer.getItem(itemId)
+      if (!item || item.type !== 'diff') return
+      item.collapsed = item.collapsed !== true
+      item.version = (typeof item.version === 'number' ? item.version : 0) + 1
+      viewer.updateItem(item)
+    })
+
     const renderHeaderPrefix = useStableCallback(
       (item: CodeViewItem<Metadata>) => {
         if (item.type !== 'diff') return null
         const viewed = viewedFiles.has(item.id)
+        const empty =
+          item.fileDiff.splitLineCount === 0 && item.fileDiff.unifiedLineCount === 0
         return (
-          <label
-            className="viewed-label"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <input
-              type="checkbox"
-              checked={viewed}
-              onChange={(e) => onViewedChange(item.id, e.target.checked)}
-            />
-            Viewed
-          </label>
+          <div className="codeview-header-prefix">
+            <button
+              type="button"
+              className="codeview-collapse-btn"
+              disabled={empty}
+              aria-expanded={!item.collapsed}
+              aria-label={item.collapsed ? 'Expand diff' : 'Collapse diff'}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                handleToggleCollapse(item.id)
+              }}
+            >
+              {/* Unicode chevron-right; rotates 90deg when expanded via CSS */}
+              <span className={`chevron ${item.collapsed ? '' : 'chevron-down'}`}>›</span>
+            </button>
+            <label
+              className="viewed-label"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <input
+                type="checkbox"
+                checked={viewed}
+                onChange={(e) => onViewedChange(item.id, e.target.checked)}
+              />
+              Viewed
+            </label>
+          </div>
         )
       },
     )

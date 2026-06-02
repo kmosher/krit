@@ -354,6 +354,49 @@ body {
     min-height: 0;
 }
 
+/* Collapse chevron + Viewed checkbox cluster, rendered into each file's
+   sticky header via renderHeaderPrefix. */
+.codeview-header-prefix {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.codeview-collapse-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.codeview-collapse-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+}
+
+.codeview-collapse-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.codeview-collapse-btn .chevron {
+    display: inline-block;
+    font-size: 16px;
+    line-height: 1;
+    transition: transform 120ms ease-out;
+}
+
+.codeview-collapse-btn .chevron.chevron-down {
+    transform: rotate(90deg);
+}
+
 /* CodeView surface — owns the scroll for all text-file diffs. CodeView reads
    scrollTop off this element (via containerRef) to drive virtualization. */
 .codeview-surface {
