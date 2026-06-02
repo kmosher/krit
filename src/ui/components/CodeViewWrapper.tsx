@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useImperativeHandle, forwardRef, memo } from 'react'
+import { useState, useRef, useMemo, useEffect, useImperativeHandle, forwardRef, memo } from 'react'
 import { CodeView, useStableCallback, type CodeViewHandle } from '@pierre/diffs/react'
 import type {
   CodeViewItem,
@@ -45,11 +45,6 @@ interface Props {
   ): void
   onDeleteComment(id: string): void
   onReplyComment(id: string, body: string): void
-  // Fires when the scroll position crosses into a different file's
-  // territory, used by the file tree to highlight the currently-visible
-  // file. Throttled to one call per animation frame and deduped against
-  // the last reported value, so listener side-effects (setState) don't
-  // tear during rapid scroll.
   onActiveFileChange?(filePath: string | null): void
 }
 
@@ -85,6 +80,11 @@ function getRangeContent(
     if (line !== '') out.push(line)
   }
   return out.join('\n')
+}
+
+function bumpVersion(item: CodeViewItem<Metadata>): number {
+  const v = typeof item.version === 'number' ? item.version : 0
+  return v + 1
 }
 
 export const CodeViewWrapper = memo(
@@ -125,33 +125,61 @@ export const CodeViewWrapper = memo(
       [],
     )
 
-    // Build CodeViewItem[] from parsed files + comments + pending draft.
-    // Controlled mode: items re-derived on every change. CodeView diffs by id
-    // so unchanged files don't re-tokenize. If this proves too thrashy we
-    // can switch to initialItems + imperative viewer.updateItem (diffshub pattern).
-    const items = useMemo<CodeViewItem<Metadata>[]>(() => {
-      return files.map((fileDiff) => {
-        const persisted = fileAnnotationsMap.get(fileDiff.name) ?? []
-        const annotations: DiffLineAnnotation<Metadata>[] =
-          pending && pending.itemId === fileDiff.name
-            ? [
-                ...persisted,
-                {
-                  side: pending.side,
-                  lineNumber: pending.endLine,
-                  metadata: pending,
-                },
-              ]
-            : persisted
-        return {
-          id: fileDiff.name,
-          type: 'diff' as const,
-          fileDiff,
-          annotations,
-          version: 0,
-        }
-      })
+    // Uncontrolled mode: initialItems is computed once at mount; subsequent
+    // state changes (annotations, viewed, pending, collapse) are pushed
+    // through the viewer handle via updateItem with a bumped version.
+    // CodeView throws if updateItem is called on a controlled (items=...)
+    // surface — so we deliberately do NOT pass `items`.
+    const initialItems = useMemo<CodeViewItem<Metadata>[]>(
+      () => buildItems(files, fileAnnotationsMap, pending),
+      // Intentionally only depend on `files` — the rest gets pushed
+      // imperatively. If files change, the viewerKey on DiffViewer already
+      // remounts this whole component, so we'd be building from scratch.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [files],
+    )
+
+    // Push annotation changes (persisted comments + pending draft) into the
+    // viewer when fileAnnotationsMap or pending changes. Touch only the items
+    // whose annotation set actually changed; CodeView re-renders only the
+    // affected items because of the version bump.
+    const lastAnnotationsRef = useRef<Map<string, DiffLineAnnotation<Metadata>[]>>(new Map())
+    useEffect(() => {
+      const viewer = viewerRef.current
+      if (!viewer) return
+      for (const file of files) {
+        const next = mergeAnnotations(fileAnnotationsMap.get(file.name) ?? [], pending, file.name)
+        const prev = lastAnnotationsRef.current.get(file.name)
+        if (annotationsEqual(prev, next)) continue
+        const item = viewer.getItem(file.name)
+        if (!item || item.type !== 'diff') continue
+        item.annotations = next
+        item.version = bumpVersion(item)
+        viewer.updateItem(item)
+        lastAnnotationsRef.current.set(file.name, next)
+      }
     }, [files, fileAnnotationsMap, pending])
+
+    // Push viewed-state changes: bump version on whichever file just toggled.
+    // The viewed flag is read inside renderHeaderPrefix's closure, so the
+    // version bump is just a signal to "re-run renderHeaderPrefix for this item."
+    const lastViewedRef = useRef<Set<string>>(new Set())
+    useEffect(() => {
+      const viewer = viewerRef.current
+      if (!viewer) return
+      const prev = lastViewedRef.current
+      const next = viewedFiles
+      for (const file of files) {
+        const before = prev.has(file.name)
+        const after = next.has(file.name)
+        if (before === after) continue
+        const item = viewer.getItem(file.name)
+        if (!item || item.type !== 'diff') continue
+        item.version = bumpVersion(item)
+        viewer.updateItem(item)
+      }
+      lastViewedRef.current = new Set(next)
+    }, [files, viewedFiles])
 
     const handleGutterClick = useStableCallback(
       (
@@ -226,7 +254,7 @@ export const CodeViewWrapper = memo(
       const item = viewer.getItem(itemId)
       if (!item || item.type !== 'diff') return
       item.collapsed = item.collapsed !== true
-      item.version = (typeof item.version === 'number' ? item.version : 0) + 1
+      item.version = bumpVersion(item)
       viewer.updateItem(item)
     })
 
@@ -327,7 +355,7 @@ export const CodeViewWrapper = memo(
           viewerRef.current = v
         }}
         containerRef={scrollRef}
-        items={items}
+        initialItems={initialItems}
         options={options}
         onScroll={handleScroll}
         renderAnnotation={renderAnnotation}
@@ -337,3 +365,53 @@ export const CodeViewWrapper = memo(
     )
   }),
 )
+
+function buildItems(
+  files: FileDiffMetadata[],
+  fileAnnotationsMap: Map<string, DiffLineAnnotation<ReviewComment>[]>,
+  pending: DraftMetadata | null,
+): CodeViewItem<Metadata>[] {
+  return files.map((fileDiff) => ({
+    id: fileDiff.name,
+    type: 'diff' as const,
+    fileDiff,
+    annotations: mergeAnnotations(
+      fileAnnotationsMap.get(fileDiff.name) ?? [],
+      pending,
+      fileDiff.name,
+    ),
+    version: 0,
+  }))
+}
+
+function mergeAnnotations(
+  persisted: DiffLineAnnotation<ReviewComment>[],
+  pending: DraftMetadata | null,
+  fileName: string,
+): DiffLineAnnotation<Metadata>[] {
+  if (!pending || pending.itemId !== fileName) return persisted
+  return [
+    ...persisted,
+    {
+      side: pending.side,
+      lineNumber: pending.endLine,
+      metadata: pending,
+    },
+  ]
+}
+
+function annotationsEqual(
+  a: DiffLineAnnotation<Metadata>[] | undefined,
+  b: DiffLineAnnotation<Metadata>[],
+): boolean {
+  if (a === b) return true
+  if (!a || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    // Shallow equal: metadata identity is enough — persisted comments come
+    // through react-query (stable ref per id) and the draft is its own ref.
+    if (a[i].metadata !== b[i].metadata) return false
+    if (a[i].lineNumber !== b[i].lineNumber) return false
+    if (a[i].side !== b[i].side) return false
+  }
+  return true
+}
