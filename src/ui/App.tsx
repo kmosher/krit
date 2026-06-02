@@ -9,12 +9,13 @@ import { useSettings } from './hooks/useSettings'
 import { useViewed } from './hooks/useViewed'
 import { Toolbar } from './components/Toolbar'
 import { DiffViewer } from './components/DiffViewer'
+import type { CodeViewWrapperHandle } from './components/CodeViewWrapper'
 import { FileTree } from './components/FileTree'
 import { CommentTracker } from './components/CommentTracker'
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
-  const { patch, repoName, branch, customMode, binaryFiles, tabSizeMap, untrackedFiles, baseRef, headRef, loading, error } = useDiff({
+  const { patch, repoName, branch, customMode, binaryFiles, untrackedFiles, loading, error } = useDiff({
     staged: settings.staged,
     untracked: settings.untracked,
   })
@@ -30,7 +31,7 @@ export function App() {
     }
   })
   const { viewedFiles, setViewed } = useViewed()
-  const diffViewerRef = useRef<HTMLDivElement>(null)
+  const diffViewerRef = useRef<CodeViewWrapperHandle>(null)
 
   useEffect(() => {
     try {
@@ -116,10 +117,7 @@ export function App() {
 
   const handleFileClick = useCallback((filePath: string) => {
     setActiveFile(filePath)
-    const el = document.getElementById(`file-${filePath}`)
-    if (el) {
-      el.scrollIntoView({ block: 'start' })
-    }
+    diffViewerRef.current?.scrollToFile(filePath)
   }, [])
 
   const handleViewedChange = useCallback((filePath: string, viewed: boolean) => {
@@ -179,16 +177,14 @@ export function App() {
           />
           {!sidebarCollapsed && <CommentTracker comments={comments} />}
         </aside>
-        <main className="main" ref={diffViewerRef}>
+        <main className="main">
           <DiffViewer
+            ref={diffViewerRef}
             files={files}
             diffStyle={settings.diffStyle}
-            tabSizeMap={tabSizeMap}
             defaultTabSize={settings.defaultTabSize}
             viewedFiles={viewedFiles}
             binaryFiles={binaryFileMap}
-            baseRef={baseRef}
-            headRef={headRef}
             onViewedChange={handleViewedChange}
             fileAnnotationsMap={fileAnnotationsMap}
             onAddComment={addComment}
