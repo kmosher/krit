@@ -200,6 +200,11 @@ export function App() {
         </aside>
         <main className="main">
           <DiffViewer
+            // Remount the whole CodeView surface when the diff identity changes
+            // (staged/untracked toggle, custom-mode arg change). Cleanly drops
+            // viewer state — scroll position, virtualization layout, draft
+            // comment — instead of trying to patch them across the transition.
+            key={`${settings.staged}:${settings.untracked}:${customMode}`}
             ref={diffViewerRef}
             files={files}
             diffStyle={settings.diffStyle}
