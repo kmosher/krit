@@ -124,11 +124,21 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
       refs = resolveDiffRefs(customDiffArgs)
     } else {
       patch = getGitDiff({ staged, untracked })
-      // Default mode mirrors how `git diff` behaves with no args: working tree vs HEAD,
-      // unless --staged toggles index vs HEAD.
-      refs = staged
-        ? { baseRef: 'HEAD', headRef: 'INDEX' }
-        : { baseRef: 'HEAD', headRef: WORKING_TREE_REF }
+      // Refs must mirror what getGitDiff actually covers so parseDiffFromFile
+      // can reproduce the patch from the bundled file contents:
+      //   - staged=true alone        → index vs HEAD          → {HEAD, INDEX}
+      //   - staged=true + untracked  → working tree vs HEAD   → {HEAD, WORKING_TREE}
+      //   - staged=false (default)   → working tree vs index  → {INDEX, WORKING_TREE}
+      // The previous ternary always used {HEAD, INDEX} when staged=true, which
+      // produced empty file contents when nothing was staged — making CodeView
+      // render headers with no bodies (no hunks).
+      if (staged && untracked) {
+        refs = { baseRef: 'HEAD', headRef: WORKING_TREE_REF }
+      } else if (staged) {
+        refs = { baseRef: 'HEAD', headRef: 'INDEX' }
+      } else {
+        refs = { baseRef: 'INDEX', headRef: WORKING_TREE_REF }
+      }
     }
     const repoName = getRepoName()
     const branch = getBranchName()
