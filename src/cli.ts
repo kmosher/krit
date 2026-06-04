@@ -4,9 +4,9 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
 import getPort from 'get-port'
-import { isGitRepo } from './git.js'
+import { isGitRepo, getRepoName, getBranchName } from './git.js'
 import { startServer } from './server.js'
-import { loadSettings } from './settings.js'
+import { loadSettings, type Settings } from './settings.js'
 import { defaultStatePath, writeState, removeState } from './state.js'
 import { SUBCOMMANDS, cmdState, cmdComments, cmdReply, cmdResolve, cmdReopen, cmdWaitForSubmit, cmdWatch } from './subcommands.js'
 
@@ -178,11 +178,44 @@ const printManualUrlHint = (url: string): void => {
   console.log(doneReviewingHint)
 }
 
-if (!values['no-open']) {
-  const settings = loadSettings()
-  const openHost = host === '0.0.0.0' ? '127.0.0.1' : host
-  const openUrl = `http://${openHost}:${actualPort}`
+// Best-effort window title for the desktop app — repo + branch. Cosmetic, so a
+// git hiccup just drops it; the review still opens.
+const reviewWindowTitle = (): string | undefined => {
+  try {
+    const repo = getRepoName()
+    const branch = getBranchName()
+    return branch ? `${repo} · ${branch}` : repo
+  } catch {
+    return undefined
+  }
+}
+
+// Hand this review's URL to the configured UI: the diffx desktop app (a diffx://
+// deep link, which the running app turns into a new window) or a browser tab.
+// Either way, any failure degrades to the manual-URL hint rather than aborting —
+// the server is already up, so a human can always just open the URL.
+const launchReviewUI = async (openUrl: string, settings: Settings): Promise<void> => {
   const openModule = await import('open')
+
+  if (settings.launcher === 'app') {
+    // The desktop app claims the diffx:// scheme on first launch; this deep link
+    // routes to the running instance (cold-starting it if needed), which reads
+    // `url` and spawns a window pointed at this review's server.
+    const params = new URLSearchParams({ url: openUrl })
+    const title = reviewWindowTitle()
+    if (title) params.set('title', title)
+    try {
+      await openModule.default(`diffx://review?${params.toString()}`)
+      console.log(`Opened the diffx app. It's now waiting for you to leave inline comments.`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`Could not reach the diffx app (${msg}); is it installed? Falling back to the URL.`)
+    }
+    printManualUrlHint(openUrl)
+    return
+  }
+
+  // Browser tab (default). settings.browser, when set, names a specific app.
   let appName: string | readonly string[] | undefined
   if (settings.browser) {
     const apps = openModule.apps as Record<string, string | readonly string[]>
@@ -207,6 +240,13 @@ if (!values['no-open']) {
     console.error(`Could not open a browser tab automatically (${msg}).`)
     printManualUrlHint(openUrl)
   }
+}
+
+if (!values['no-open']) {
+  const settings = loadSettings()
+  const openHost = host === '0.0.0.0' ? '127.0.0.1' : host
+  const openUrl = `http://${openHost}:${actualPort}`
+  await launchReviewUI(openUrl, settings)
 } else {
   printManualUrlHint(localUrl)
 }

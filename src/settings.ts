@@ -11,6 +11,9 @@ export interface Settings {
   diffStyle: 'split' | 'unified'
   defaultTabSize: number
   browser?: string
+  // Where a new review opens. 'browser' (default) opens a tab; 'app' fires a
+  // diffx:// deep link that the desktop app turns into its own window.
+  launcher?: 'browser' | 'app'
 }
 
 const DEFAULTS: Settings = {
