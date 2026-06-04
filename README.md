@@ -130,6 +130,20 @@ the rewritten lines
 
 Each diff header has an **Edit** button. Click it to open a fullscreen editor seeded with the file's current working-tree contents; save (`⌘S` or the button) writes back to disk and the diff view refreshes immediately via SSE. Useful for quick rewrites you don't want to formalize as a suggestion — the agent picks them up on the next poll. The editor is CodeMirror, with syntax highlighting, line numbers, and code folding.
 
+## Desktop app
+
+By default `diffx` opens each review in a tab in your default browser. Optionally, it can open each review in its own window of a dedicated **diffx** macOS app instead — handy when several reviews are in flight, since they collect as separate windows under a single dock icon rather than tabs scattered across your browser.
+
+Enable it in `~/.config/diffx/settings.json`:
+
+```json
+{ "launcher": "app" }
+```
+
+With that set, `diffx` fires a `diffx://review?url=…` deep link instead of opening a browser tab; the running app turns each link into a window keyed by the review's server port (re-running diffx for an already-open review just focuses its window). Leave `launcher` unset (or `"browser"`) for the default tab behavior — and if the app isn't installed, diffx notes it and falls back to printing the URL.
+
+The app is a thin [Tauri](https://v2.tauri.app/) shell living under [`desktop/`](desktop/); see [`desktop/README.md`](desktop/README.md) to build and install it (`cargo tauri build`, then drop `diffx.app` into `/Applications` and launch it once so macOS registers the `diffx://` scheme).
+
 ## Developing locally
 
 To run a working copy of diffx from a checkout (instead of the published `diffx-cli` package), point the global `diffx` binary at your source tree once and rebuild after each change:
