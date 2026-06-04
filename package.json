@@ -35,8 +35,12 @@
     "version-packages": "changeset version"
   },
   "dependencies": {
+    "@codemirror/language": "^6.12.3",
     "@codemirror/language-data": "^6.5.2",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.43.0",
     "@hono/node-server": "^1.14.1",
+    "@lezer/highlight": "^1.2.3",
     "@tanstack/react-query": "^5.96.2",
     "@uiw/react-codemirror": "^4.25.10",
     "get-port": "^7.2.0",

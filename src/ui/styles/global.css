@@ -957,6 +957,25 @@ body {
     background: var(--surface-2, #f6f8fa);
 }
 
+.comment-suggestion-cm {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--surface-2, #f6f8fa);
+}
+.comment-suggestion-cm .cm-editor {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    min-height: 80px;
+    max-height: 320px;
+}
+.comment-suggestion-cm .cm-editor.cm-focused {
+    outline: none;
+}
+.comment-suggestion-cm .cm-scroller {
+    line-height: 1.5;
+}
+
 .btn-ghost {
     background: transparent;
     border: 1px solid transparent;

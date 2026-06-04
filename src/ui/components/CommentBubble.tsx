@@ -90,6 +90,7 @@ export function CommentBubble({ comment, onDelete, onReply }: CommentBubbleProps
       {replying ? (
         <div className="comment-reply-form">
           <CommentForm
+            filePath={comment.filePath}
             onSubmit={(body) => {
               onReply(comment.id, body)
               setReplying(false)

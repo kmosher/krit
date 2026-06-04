@@ -1,20 +1,45 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
+import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror'
+import { Prec } from '@codemirror/state'
+import { keymap } from '@codemirror/view'
+import { pierreSyntaxHighlighting } from './pierreHighlightStyle'
+import { useLanguageExtension } from '../hooks/useLanguageExtension'
 
 interface CommentFormProps {
   // Original line content selected for the comment; required for suggest-mode
-  // (we pre-fill the suggestion textarea with it). Single-line: one string; range:
+  // (we pre-fill the suggestion editor with it). Single-line: one string; range:
   // newline-joined. Empty string is treated as "no original content captured."
   originalLines?: string
+  // Used in suggest mode to pick the syntax-highlighting language for the
+  // CodeMirror editor. Optional so reply forms (which don't suggest) can omit it.
+  filePath?: string
   onSubmit: (body: string, suggestion?: { newLines: string[] }) => void
   onCancel: () => void
 }
 
-export function CommentForm({ originalLines = '', onSubmit, onCancel }: CommentFormProps) {
+function useColorScheme(): 'light' | 'dark' {
+  const [scheme, setScheme] = useState<'light' | 'dark'>(() =>
+    typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light',
+  )
+  useEffect(() => {
+    const mql = window.matchMedia('(prefers-color-scheme: dark)')
+    const handler = (e: MediaQueryListEvent) => setScheme(e.matches ? 'dark' : 'light')
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [])
+  return scheme
+}
+
+export function CommentForm({ originalLines = '', filePath, onSubmit, onCancel }: CommentFormProps) {
   const [body, setBody] = useState('')
   const [suggestMode, setSuggestMode] = useState(false)
   const [suggestionText, setSuggestionText] = useState(originalLines)
   const bodyRef = useRef<HTMLTextAreaElement>(null)
-  const suggestionRef = useRef<HTMLTextAreaElement>(null)
+  const cmRef = useRef<ReactCodeMirrorRef>(null)
+  const langExt = useLanguageExtension(filePath)
+  const scheme = useColorScheme()
 
   useEffect(() => {
     bodyRef.current?.focus()
@@ -22,19 +47,23 @@ export function CommentForm({ originalLines = '', onSubmit, onCancel }: CommentF
 
   useEffect(() => {
     if (suggestMode) {
-      // Refocus into the suggestion textarea when entering suggest mode so the
-      // user can start typing the rewrite immediately.
-      requestAnimationFrame(() => suggestionRef.current?.focus())
+      // Focus the CodeMirror editor as soon as it mounts so the user can start
+      // typing the rewrite immediately.
+      requestAnimationFrame(() => cmRef.current?.view?.focus())
     }
   }, [suggestMode])
+
+  // Capture mutable refs to the latest submit/cancel handlers so the CodeMirror
+  // keymap extension (created once) always calls through to the current closure
+  // values instead of a stale snapshot.
+  const submitRef = useRef<() => void>(() => {})
+  const cancelRef = useRef<() => void>(onCancel)
 
   const handleSubmit = () => {
     const trimmedBody = body.trim()
     if (suggestMode) {
-      // In suggest mode the rewrite is the payload, but only send a suggestion
-      // if the user actually edited it — an unchanged suggestion is just noise
-      // that renders as a no-op diff in the comment. Fall back to a plain
-      // comment when only the body has content.
+      // Only send a suggestion payload if the user actually edited the rewrite —
+      // an unchanged suggestion is just noise that renders as a no-op diff.
       const changed = suggestionText !== originalLines
       if (!changed && !trimmedBody) return
       if (changed) {
@@ -48,8 +77,10 @@ export function CommentForm({ originalLines = '', onSubmit, onCancel }: CommentF
       onSubmit(trimmedBody)
     }
   }
+  submitRef.current = handleSubmit
+  cancelRef.current = onCancel
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleTextareaKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault()
       handleSubmit()
@@ -58,6 +89,28 @@ export function CommentForm({ originalLines = '', onSubmit, onCancel }: CommentF
       onCancel()
     }
   }
+
+  // Memoized so the extensions array reference is stable across renders —
+  // CodeMirror reconfigures on prop change, and a fresh array every render
+  // both wastes work and can lose intermediate language loads.
+  // - Mod-Enter / Escape are wired at Prec.high so they win over CM's
+  //   defaults (Escape would otherwise just clear focus).
+  // - syntaxHighlighting(defaultHighlightStyle) is included explicitly because
+  //   basicSetup's copy uses fallback:true, which can no-op when a language
+  //   extension reconfigures in after mount.
+  const cmExtensions = useMemo(
+    () => [
+      Prec.high(
+        keymap.of([
+          { key: 'Mod-Enter', run: () => { submitRef.current(); return true } },
+          { key: 'Escape', run: () => { cancelRef.current(); return true } },
+        ]),
+      ),
+      pierreSyntaxHighlighting(scheme),
+      ...langExt,
+    ],
+    [langExt, scheme],
+  )
 
   const submitLabel = suggestMode ? 'Suggest rewrite' : 'Comment'
   const submitDisabled = suggestMode
@@ -70,23 +123,28 @@ export function CommentForm({ originalLines = '', onSubmit, onCancel }: CommentF
       className={suggestMode ? 'comment-form-description' : undefined}
       value={body}
       onChange={(e) => setBody(e.target.value)}
-      onKeyDown={handleKeyDown}
+      onKeyDown={handleTextareaKeyDown}
       placeholder={suggestMode ? 'Optional description...' : 'Leave a review comment...'}
       rows={suggestMode ? 2 : 3}
     />
   )
 
   const suggestionField = suggestMode ? (
-    <textarea
-      ref={suggestionRef}
-      className="comment-suggestion-textarea"
-      value={suggestionText}
-      onChange={(e) => setSuggestionText(e.target.value)}
-      onKeyDown={handleKeyDown}
-      placeholder="Suggested rewrite..."
-      spellCheck={false}
-      rows={Math.max(3, suggestionText.split('\n').length + 1)}
-    />
+    <div className="comment-suggestion-cm">
+      <CodeMirror
+        ref={cmRef}
+        value={suggestionText}
+        onChange={(v) => setSuggestionText(v)}
+        extensions={cmExtensions}
+        theme={scheme}
+        basicSetup={{
+          lineNumbers: false,
+          foldGutter: false,
+          highlightActiveLine: false,
+          tabSize: 2,
+        }}
+      />
+    </div>
   ) : null
 
   return (

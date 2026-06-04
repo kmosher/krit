@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
-import CodeMirror, { type Extension } from '@uiw/react-codemirror'
-import { languages } from '@codemirror/language-data'
+import CodeMirror from '@uiw/react-codemirror'
+import { useLanguageExtension } from '../hooks/useLanguageExtension'
+import { pierreSyntaxHighlighting } from './pierreHighlightStyle'
 
 interface Props {
   filePath: string
@@ -32,35 +33,9 @@ export function FileEditorModal({ filePath, initialContents, onClose, onSave }: 
   const [contents, setContents] = useState(initialContents)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  const [langExt, setLangExt] = useState<Extension[]>([])
+  const langExt = useLanguageExtension(filePath)
   const scheme = useColorScheme()
-
-  const filename = useMemo(() => {
-    const slash = filePath.lastIndexOf('/')
-    return slash >= 0 ? filePath.slice(slash + 1) : filePath
-  }, [filePath])
-
-  useEffect(() => {
-    let cancelled = false
-    const desc =
-      languages.find((l) => l.extensions.some((e) => filename.endsWith('.' + e))) ??
-      languages.find((l) => l.filename?.test(filename))
-    if (!desc) {
-      setLangExt([])
-      return
-    }
-    desc
-      .load()
-      .then((support) => {
-        if (!cancelled) setLangExt([support])
-      })
-      .catch(() => {
-        if (!cancelled) setLangExt([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [filename])
+  const cmExtensions = useMemo(() => [pierreSyntaxHighlighting(scheme), ...langExt], [langExt, scheme])
 
   const dirty = contents !== initialContents
 
@@ -115,7 +90,7 @@ export function FileEditorModal({ filePath, initialContents, onClose, onSave }: 
           <CodeMirror
             value={contents}
             onChange={(v) => setContents(v)}
-            extensions={langExt}
+            extensions={cmExtensions}
             theme={scheme}
             height="100%"
             autoFocus
