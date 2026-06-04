@@ -114,6 +114,22 @@ The skill is a single streaming entrypoint: **`/diffx`**. The agent launches `di
 
 If you'd rather work batch-style without an attached agent, just click **Copy** in the toolbar and paste the XML into a chat — every consumer that parses the format above will still work.
 
+### Inline suggestions
+
+Every comment form has a **Suggest edit** toggle. Flip it on and the form pre-fills a monospace textarea with the lines you selected; edit them in place and submit. The comment then carries a `suggestion: { newLines }` payload alongside the body, and `Copy comments` emits it as a GitHub-style fenced block the agent can recognize:
+
+````
+<suggestion>
+```suggestion
+the rewritten lines
+```
+</suggestion>
+````
+
+### In-browser file editor
+
+Each diff header has an **Edit** button. Click it to open a fullscreen editor seeded with the file's current working-tree contents; save (`⌘S` or the button) writes back to disk and the diff view refreshes immediately via SSE. Useful for quick rewrites you don't want to formalize as a suggestion — the agent picks them up on the next poll. The editor is a plain textarea today; the seam is intentionally small so a heavier editor (Monaco, CodeMirror) can drop in later.
+
 ## Developing locally
 
 To run a working copy of diffx from a checkout (instead of the published `diffx-cli` package), point the global `diffx` binary at your source tree once and rebuild after each change:
