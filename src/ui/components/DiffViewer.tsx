@@ -81,15 +81,24 @@ export const DiffViewer = memo(
 
     return (
       <div className="diff-viewer">
-        {binaryFileEntries.map(({ file, info }) => (
-          <BinaryFileDiff
-            key={file.name}
-            filePath={file.name}
-            info={info}
-            viewed={viewedFiles.has(file.name)}
-            onViewedChange={onViewedChange}
-          />
-        ))}
+        {binaryFileEntries.length > 0 && (
+          // Binary files render outside CodeView (it only knows text 'file'/'diff'
+          // items), so they can't share its scroll. Bound them to their own
+          // capped, scrollable band — otherwise a stack of tall image previews
+          // fills the viewport and pins the code scroller below the fold, with
+          // no way to scroll past until each is marked viewed.
+          <div className="diff-viewer-binaries">
+            {binaryFileEntries.map(({ file, info }) => (
+              <BinaryFileDiff
+                key={file.name}
+                filePath={file.name}
+                info={info}
+                viewed={viewedFiles.has(file.name)}
+                onViewedChange={onViewedChange}
+              />
+            ))}
+          </div>
+        )}
         {textFiles.length > 0 && (
           <CodeViewWrapper
             ref={ref}

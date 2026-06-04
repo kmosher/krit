@@ -354,6 +354,16 @@ body {
     min-height: 0;
 }
 
+/* Binary previews live outside CodeView's scroller, so cap them to their own
+   scrollable band. flex-shrink:0 + max-height keeps them from squeezing the
+   code scroller (.codeview-surface, flex:1) below it down to nothing. */
+.diff-viewer-binaries {
+    flex-shrink: 0;
+    max-height: 45vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
 /* Collapse chevron + Viewed checkbox cluster, rendered into each file's
    sticky header via renderHeaderPrefix. */
 .codeview-header-prefix {
@@ -1108,7 +1118,7 @@ body {
 
 .image-preview-img {
     max-width: 100%;
-    max-height: 500px;
+    max-height: 280px;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: repeating-conic-gradient(#f0f0f0 0% 25%, #ffffff 0% 50%) 50% /
