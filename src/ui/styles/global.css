@@ -690,6 +690,8 @@ body {
 }
 
 .comment-form textarea {
+    display: block;
+    box-sizing: border-box;
     width: 100%;
     min-height: 80px;
     padding: 8px 12px;
@@ -706,6 +708,15 @@ body {
     outline: none;
     border-color: var(--primary);
     box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.15);
+}
+
+.comment-form textarea + textarea {
+    margin-top: 8px;
+}
+
+.comment-form-description {
+    min-height: 0;
+    font-size: 13px;
 }
 
 .comment-form-actions {

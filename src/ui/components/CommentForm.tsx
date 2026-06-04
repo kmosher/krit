@@ -31,12 +31,17 @@ export function CommentForm({ originalLines = '', onSubmit, onCancel }: CommentF
   const handleSubmit = () => {
     const trimmedBody = body.trim()
     if (suggestMode) {
-      // In suggest mode, the rewrite is the payload — the body is optional
-      // commentary. Allow submit if suggestion differs from original OR body
-      // has content; reject if both are empty/unchanged (would be a no-op).
+      // In suggest mode the rewrite is the payload, but only send a suggestion
+      // if the user actually edited it — an unchanged suggestion is just noise
+      // that renders as a no-op diff in the comment. Fall back to a plain
+      // comment when only the body has content.
       const changed = suggestionText !== originalLines
       if (!changed && !trimmedBody) return
-      onSubmit(trimmedBody, { newLines: suggestionText.split('\n') })
+      if (changed) {
+        onSubmit(trimmedBody, { newLines: suggestionText.split('\n') })
+      } else {
+        onSubmit(trimmedBody)
+      }
       return
     }
     if (trimmedBody) {
@@ -59,31 +64,42 @@ export function CommentForm({ originalLines = '', onSubmit, onCancel }: CommentF
     ? suggestionText === originalLines && !body.trim()
     : !body.trim()
 
+  const bodyField = (
+    <textarea
+      ref={bodyRef}
+      className={suggestMode ? 'comment-form-description' : undefined}
+      value={body}
+      onChange={(e) => setBody(e.target.value)}
+      onKeyDown={handleKeyDown}
+      placeholder={suggestMode ? 'Optional description...' : 'Leave a review comment...'}
+      rows={suggestMode ? 2 : 3}
+    />
+  )
+
+  const suggestionField = suggestMode ? (
+    <textarea
+      ref={suggestionRef}
+      className="comment-suggestion-textarea"
+      value={suggestionText}
+      onChange={(e) => setSuggestionText(e.target.value)}
+      onKeyDown={handleKeyDown}
+      placeholder="Suggested rewrite..."
+      spellCheck={false}
+      rows={Math.max(3, suggestionText.split('\n').length + 1)}
+    />
+  ) : null
+
   return (
     <div className="comment-form">
-      <textarea
-        ref={bodyRef}
-        value={body}
-        onChange={(e) => setBody(e.target.value)}
-        onKeyDown={handleKeyDown}
-        placeholder={
-          suggestMode
-            ? 'Optional: explain the rewrite...'
-            : 'Leave a review comment...'
-        }
-        rows={suggestMode ? 2 : 3}
-      />
-      {suggestMode && (
-        <textarea
-          ref={suggestionRef}
-          className="comment-suggestion-textarea"
-          value={suggestionText}
-          onChange={(e) => setSuggestionText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Suggested rewrite..."
-          spellCheck={false}
-          rows={Math.max(3, suggestionText.split('\n').length + 1)}
-        />
+      {/* In suggest mode the rewrite is the primary input — render it first
+          and demote the body to a small "optional description" below. */}
+      {suggestMode ? (
+        <>
+          {suggestionField}
+          {bodyField}
+        </>
+      ) : (
+        bodyField
       )}
       <div className="comment-form-actions">
         <button
