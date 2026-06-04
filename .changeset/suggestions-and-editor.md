@@ -2,9 +2,9 @@
 "diffx-cli": minor
 ---
 
-Inline rewrite suggestions — every comment form now has a **Suggest edit** toggle that pre-fills a monospace textarea with the selected lines. Submitting captures both the original lines and the rewrite; the comment bubble shows them as an inline old/new diff. `Copy comments` emits each suggestion as a GitHub-style ` ```suggestion ` fence inside `<suggestion>` tags so an attached agent can recognize and apply it.
+Inline rewrite suggestions — every comment form now has a **Suggest edit** toggle that pre-fills a syntax-highlighted CodeMirror editor with the selected lines. Submitting captures both the original lines and the rewrite; the comment bubble shows them as an inline old/new diff. `Copy comments` emits each suggestion as a GitHub-style ` ```suggestion ` fence inside `<suggestion>` tags so an attached agent can recognize and apply it.
 
-In-browser file editor — each diff header gains an **Edit** button that opens a fullscreen modal seeded with the file's current working-tree contents. Save writes back to disk via a new `PUT /api/file-content` endpoint and broadcasts a `file-written` SSE so the diff refreshes immediately. The editor is a plain textarea today; the component interface is minimal so Monaco/CodeMirror can drop in later without touching surrounding wiring.
+In-browser file editor — each diff header gains an **Edit** button that opens a fullscreen modal seeded with the file's current working-tree contents. Save writes back to disk via a new `PUT /api/file-content` endpoint and broadcasts a `file-written` SSE so the diff refreshes immediately. The editor is CodeMirror, with syntax highlighting, line numbers, and code folding.
 
 Gutter & drag fixes —
 

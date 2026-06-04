@@ -116,7 +116,7 @@ If you'd rather work batch-style without an attached agent, just click **Copy** 
 
 ### Inline suggestions
 
-Every comment form has a **Suggest edit** toggle. Flip it on and the form pre-fills a monospace textarea with the lines you selected; edit them in place and submit. The comment then carries a `suggestion: { newLines }` payload alongside the body, and `Copy comments` emits it as a GitHub-style fenced block the agent can recognize:
+Every comment form has a **Suggest edit** toggle. Flip it on and the form pre-fills a syntax-highlighted CodeMirror editor with the lines you selected; edit them in place and submit. The comment then carries a `suggestion: { newLines }` payload alongside the body, and `Copy comments` emits it as a GitHub-style fenced block the agent can recognize:
 
 ````
 <suggestion>
@@ -128,7 +128,7 @@ the rewritten lines
 
 ### In-browser file editor
 
-Each diff header has an **Edit** button. Click it to open a fullscreen editor seeded with the file's current working-tree contents; save (`⌘S` or the button) writes back to disk and the diff view refreshes immediately via SSE. Useful for quick rewrites you don't want to formalize as a suggestion — the agent picks them up on the next poll. The editor is a plain textarea today; the seam is intentionally small so a heavier editor (Monaco, CodeMirror) can drop in later.
+Each diff header has an **Edit** button. Click it to open a fullscreen editor seeded with the file's current working-tree contents; save (`⌘S` or the button) writes back to disk and the diff view refreshes immediately via SSE. Useful for quick rewrites you don't want to formalize as a suggestion — the agent picks them up on the next poll. The editor is CodeMirror, with syntax highlighting, line numbers, and code folding.
 
 ## Developing locally
 
