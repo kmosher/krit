@@ -87,6 +87,15 @@ export async function cmdReopen(id: string | undefined): Promise<void> {
   console.log(`reopened ${id}`)
 }
 
+export async function cmdRefresh(): Promise<void> {
+  // Tells the browser tab to refetch /api/diff. Needed after edits made
+  // outside the in-browser editor (e.g. an agent's own Edit tool), since
+  // those writes never hit PUT /api/file-content and so never broadcast
+  // file-written on their own.
+  await api('POST', '/api/refresh')
+  console.log('refreshed')
+}
+
 type SseEvent = { type?: string; [k: string]: unknown }
 
 /**
@@ -192,4 +201,4 @@ export async function cmdWatch(): Promise<void> {
   process.exit(2)
 }
 
-export const SUBCOMMANDS = new Set(['state', 'comments', 'reply', 'resolve', 'reopen', 'wait-for-submit', 'watch'])
+export const SUBCOMMANDS = new Set(['state', 'comments', 'reply', 'resolve', 'reopen', 'wait-for-submit', 'watch', 'refresh'])

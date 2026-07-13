@@ -8,7 +8,7 @@ import { isGitRepo, getRepoName, getBranchName } from './git.js'
 import { startServer } from './server.js'
 import { loadSettings, type Settings } from './settings.js'
 import { defaultStatePath, writeState, removeState } from './state.js'
-import { SUBCOMMANDS, cmdState, cmdComments, cmdReply, cmdResolve, cmdReopen, cmdWaitForSubmit, cmdWatch } from './subcommands.js'
+import { SUBCOMMANDS, cmdState, cmdComments, cmdReply, cmdResolve, cmdReopen, cmdWaitForSubmit, cmdWatch, cmdRefresh } from './subcommands.js'
 
 // Subcommand dispatch happens BEFORE parseArgs so that flags like --staged
 // don't get rejected when we're really running a subcommand. We only treat
@@ -56,6 +56,9 @@ if (hasSubcommand) {
       await cmdWatch()
       // cmdWatch exits on its own
       process.exit(0)
+    case 'refresh':
+      await cmdRefresh()
+      process.exit(0)
   }
 }
 
@@ -94,6 +97,8 @@ Subcommands (talk to the running diffx server for the current session):
                               (exit 0 on submit, 2 on disconnect, 130 on Ctrl+C)
   watch                       Stream comment events as JSON lines on stdout
                               (one line per new comment / reply; exits 0 on Done reviewing)
+  refresh                     Tell the browser tab to refetch the diff (after edits
+                              made outside the in-browser editor)
 
 Examples:
   diffx                        Review uncommitted changes

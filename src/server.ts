@@ -220,6 +220,14 @@ export function createApp(clientDir: string, customDiffArgs?: string[], commentS
     return c.json({ ok: true })
   })
 
+  app.post('/api/refresh', async (c) => {
+    // Manual nudge for changes made outside the in-browser editor (e.g. an
+    // agent editing files on disk via its own tools) — those writes don't go
+    // through PUT /api/file-content, so nothing else broadcasts file-written.
+    void broadcast({ type: 'file-written', path: null })
+    return c.json({ ok: true })
+  })
+
   app.get('/api/settings', (c) => {
     return c.json(loadSettings())
   })

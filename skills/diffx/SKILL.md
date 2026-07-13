@@ -91,9 +91,11 @@ Read the new line(s) from the Monitor. For each:
 - **`comment-added`** — read `comment.filePath`/`lineNumber`/`body`. Decide what it is:
   - **Change request** ("rename x", "extract helper", "use Map here") → Read the file, apply the change via Edit, then:
     ```bash
+    diffx refresh
     diffx reply <id> "Done. <one-line summary of what changed>"
     diffx resolve <id>
     ```
+    `diffx refresh` tells the open browser tab to refetch the diff so the edit shows up immediately — your Edit-tool writes don't go through diffx's own file-write path, so nothing else triggers that refresh.
   - **Question** ("why not X?", "is this thread-safe?") → answer in reply. If you're confident the answer fully addresses it, also `diffx resolve <id>`. If it might prompt follow-up, leave it open.
     ```bash
     diffx reply <id> "<your answer>"

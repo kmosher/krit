@@ -181,7 +181,9 @@ export function useComments() {
         .filter((c) => c.filePath === filePath)
         .map((c) => ({
           side: c.side,
-          lineNumber: c.lineNumber,
+          // Anchor at the bottom line of the range so the box renders below
+          // the full selection, matching where the in-progress draft appears.
+          lineNumber: c.endLine ?? c.lineNumber,
           metadata: c,
         }))
     },
