@@ -10,7 +10,12 @@ const xmlEscape = (s: string): string =>
 
 const lineAttr = (c: ReviewComment): string => {
   const endLine = c.endLine ?? c.lineNumber
-  const range = endLine > c.lineNumber ? ` line="${c.lineNumber}" endLine="${endLine}"` : ` line="${c.lineNumber}"`
+  let range = endLine > c.lineNumber ? ` line="${c.lineNumber}" endLine="${endLine}"` : ` line="${c.lineNumber}"`
+  // Schema v3: exact character offsets, when this comment was anchored to a
+  // native text selection rather than whole lines (see SelectionPill).
+  if (c.startColumn !== undefined && c.endColumn !== undefined) {
+    range += ` startColumn="${c.startColumn}" endColumn="${c.endColumn}"`
+  }
   // Surfaced so the agent knows this position is a best-effort re-anchor
   // (see reanchor.ts) rather than treating it as exact.
   return c.outdated ? `${range} outdated="true"` : range
@@ -18,16 +23,20 @@ const lineAttr = (c: ReviewComment): string => {
 
 // Render the diff context for a comment as one or more `<code>` lines, prefixed with
 // + (addition) or - (deletion) and XML-escaped so embedded `<` (generics, JSX, etc.) doesn't
-// break the wrapper. Multi-line ranges keep one diff line per row.
+// break the wrapper. Multi-line ranges keep one diff line per row. When the comment carries
+// a character-level anchor (schema v3), an extra <selected> block gives the agent the exact
+// substring rather than making it recompute one from lineContent + column offsets.
 const renderCodeBlock = (c: ReviewComment): string[] => {
   const prefix = c.side === 'additions' ? '+' : '-'
   const codeLines = c.lineContent.split('\n')
-  if (codeLines.length === 1) return [`<code>${prefix} ${xmlEscape(codeLines[0])}</code>`]
-  return [
-    '<code>',
-    ...codeLines.map((cl) => `${prefix} ${xmlEscape(cl)}`),
-    '</code>',
-  ]
+  const block =
+    codeLines.length === 1
+      ? [`<code>${prefix} ${xmlEscape(codeLines[0])}</code>`]
+      : ['<code>', ...codeLines.map((cl) => `${prefix} ${xmlEscape(cl)}`), '</code>']
+  if (c.selectedText !== undefined) {
+    block.push(`<selected>${xmlEscape(c.selectedText)}</selected>`)
+  }
+  return block
 }
 
 async function fetchComments(): Promise<ReviewComment[]> {
@@ -43,7 +52,19 @@ export function useComments() {
   const { data: comments = [] } = useQuery({ queryKey: COMMENTS_KEY, queryFn: fetchComments, refetchInterval: 3000 })
 
   const addMutation = useMutation({
-    mutationFn: async (params: { filePath: string; side: 'deletions' | 'additions'; lineNumber: number; endLine: number; lineContent: string; body: string; suggestion?: { newLines: string[] }; status?: 'draft' }) => {
+    mutationFn: async (params: {
+      filePath: string
+      side: 'deletions' | 'additions'
+      lineNumber: number
+      endLine: number
+      lineContent: string
+      body: string
+      suggestion?: { newLines: string[] }
+      status?: 'draft'
+      startColumn?: number
+      endColumn?: number
+      selectedText?: string
+    }) => {
       const res = await fetch('/api/comments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -125,8 +146,21 @@ export function useComments() {
       body: string,
       suggestion?: { newLines: string[] },
       asDraft?: boolean,
+      charAnchor?: { startColumn: number; endColumn: number; selectedText: string },
     ) => {
-      addMutation.mutate({ filePath, side, lineNumber, endLine, lineContent, body, suggestion, ...(asDraft ? { status: 'draft' } : {}) })
+      addMutation.mutate({
+        filePath,
+        side,
+        lineNumber,
+        endLine,
+        lineContent,
+        body,
+        suggestion,
+        ...(asDraft ? { status: 'draft' } : {}),
+        ...(charAnchor
+          ? { startColumn: charAnchor.startColumn, endColumn: charAnchor.endColumn, selectedText: charAnchor.selectedText }
+          : {}),
+      })
     },
     [addMutation],
   )
@@ -177,7 +211,9 @@ export function useComments() {
       grouped.set(comment.filePath, list)
     }
 
-    const lines: string[] = ['<code-review-comments version="2">']
+    // v3: adds startColumn/endColumn on <comment> and a <selected> block,
+    // both only present when the comment has a character-level anchor.
+    const lines: string[] = ['<code-review-comments version="3">']
     for (const [filePath, fileComments] of grouped) {
       lines.push(`<file path="${xmlEscape(filePath)}">`)
       for (const comment of fileComments) {

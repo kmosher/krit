@@ -1551,3 +1551,105 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* Selection pill — floats at the end of a native text selection inside the
+   code surface (Stage 6). Fixed-position, so its x/y are viewport coords. */
+.selection-pill {
+    z-index: 300;
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+@media (prefers-color-scheme: dark) {
+    .selection-pill {
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }
+}
+
+.selection-pill-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.selection-pill-btn:hover {
+    background: var(--bg-secondary);
+}
+
+.selection-pill-btn-danger {
+    color: var(--danger);
+}
+
+.selection-pill-btn-danger:hover {
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* Undo toast — bottom-corner, shown after a SelectionPill delete */
+.undo-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    z-index: 400;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px 10px 16px;
+    background: var(--text);
+    color: var(--bg);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    font-size: 13px;
+}
+
+.undo-toast-message {
+    max-width: 40ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.undo-toast-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    border-radius: 5px;
+    background: var(--primary);
+    color: #ffffff;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.undo-toast-btn:hover {
+    background: var(--primary-hover);
+}
+
+.undo-toast-dismiss {
+    border: none;
+    background: transparent;
+    color: var(--bg);
+    opacity: 0.6;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+}
+
+.undo-toast-dismiss:hover {
+    opacity: 1;
+}

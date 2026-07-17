@@ -94,7 +94,7 @@ Replies carry `author: 'user' | 'agent'`. You only see `reply-added` events for 
 
 **Draft comments never reach you.** The user can save a comment as a draft instead of posting it — drafts are invisible to `diffx watch`/`diffx comments` until the user posts them (or clicks Done reviewing, which posts any stragglers). You will never see a draft comment's `comment-added` until that happens; there's nothing to do differently, just don't assume every comment the user has typed is one you've seen.
 
-The clipboard "Copy comments" payload carries a `<code-review-comments version="2">` root. Future shape changes will bump that version; if you see a higher version than you understand, fall back to `diffx watch` / `diffx comments` (always the wire-current shape) rather than parsing the payload.
+The clipboard "Copy comments" payload carries a `<code-review-comments version="3">` root. v3 adds `startColumn`/`endColumn` on `<comment>` and a `<selected>` block, both present only when the reviewer commented on an exact text selection rather than whole lines — treat `<selected>` as the precise substring to act on, more precise than `<code>`'s full line(s). Future shape changes will bump the version again; if you see a higher version than you understand, fall back to `diffx watch` / `diffx comments` (always the wire-current shape) rather than parsing the payload.
 
 Subscribing also lights up the **Done reviewing** button in the browser — if no watcher is attached, the button greys out and the user falls back to "Copy comments."
 

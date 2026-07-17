@@ -13,6 +13,8 @@ import type { CodeViewWrapperHandle } from './components/CodeViewWrapper'
 import { FileTree } from './components/FileTree'
 import { CommentTracker } from './components/CommentTracker'
 import { FileEditorModal } from './components/FileEditorModal'
+import { UndoToast } from './components/UndoToast'
+import type { SelectionAnchor } from './utils/selectionMapping'
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
@@ -89,6 +91,51 @@ export function App() {
       throw new Error(`Save failed: ${msg}`)
     }
   }, [editingFile])
+
+  // SelectionPill's "Delete" — splices the exact selected range out of the
+  // working-tree file server-side and surfaces an Undo toast. Server owns
+  // the actual undo buffer (POST /api/edits/undo by id); this is just the
+  // toast's lifecycle.
+  const [undoToast, setUndoToast] = useState<{ id: string; message: string } | null>(null)
+  const handleDeleteRange = useCallback(async (filePath: string, anchor: SelectionAnchor) => {
+    const res = await fetch('/api/edits/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filePath,
+        startLine: anchor.startLine,
+        startColumn: anchor.startColumn,
+        endLine: anchor.endLine,
+        endColumn: anchor.endColumn,
+      }),
+    })
+    if (!res.ok) {
+      const msg = await res.text().catch(() => res.statusText)
+      alert(`Delete failed: ${msg}`)
+      return
+    }
+    const { undoId } = (await res.json()) as { undoId: string }
+    const preview = anchor.selectedText.replace(/\s+/g, ' ').trim()
+    setUndoToast({
+      id: undoId,
+      message: `Deleted "${preview.length > 40 ? preview.slice(0, 39) + '…' : preview}"`,
+    })
+  }, [])
+
+  const handleUndoDelete = useCallback(async () => {
+    if (!undoToast) return
+    const { id } = undoToast
+    setUndoToast(null)
+    const res = await fetch('/api/edits/undo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
+    if (!res.ok) {
+      const msg = await res.text().catch(() => res.statusText)
+      alert(`Undo failed: ${msg}`)
+    }
+  }, [undoToast])
 
   useEffect(() => {
     try {
@@ -325,6 +372,7 @@ export function App() {
             onAddComment={addComment}
             onDeleteComment={removeComment}
             onReplyComment={replyToComment}
+            onDeleteRange={handleDeleteRange}
             onActiveFileChange={setActiveFile}
             onEditFile={handleEditFile}
             onActiveDraftsChange={setActiveDraftFiles}
@@ -337,6 +385,13 @@ export function App() {
           initialContents={editingFile.contents}
           onClose={() => setEditingFile(null)}
           onSave={handleSaveEditedFile}
+        />
+      )}
+      {undoToast && (
+        <UndoToast
+          message={undoToast.message}
+          onUndo={handleUndoDelete}
+          onDismiss={() => setUndoToast(null)}
         />
       )}
     </div>

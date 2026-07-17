@@ -2,6 +2,7 @@ import { memo, useMemo, forwardRef } from 'react'
 import type { FileDiffMetadata, DiffLineAnnotation, AnnotationSide } from '@pierre/diffs'
 import type { ReviewComment } from '../../types'
 import type { BinaryFileInfo } from '../hooks/useDiff'
+import type { SelectionAnchor } from '../utils/selectionMapping'
 import { BinaryFileDiff } from './BinaryFileDiff'
 import { CodeViewWrapper, type CodeViewWrapperHandle } from './CodeViewWrapper'
 
@@ -15,9 +16,20 @@ interface DiffViewerProps {
   fileStatsMap: Record<string, { additions: number; deletions: number }>
   onViewedChange: (filePath: string, viewed: boolean) => void
   fileAnnotationsMap: Map<string, DiffLineAnnotation<ReviewComment>[]>
-  onAddComment: (filePath: string, side: AnnotationSide, lineNumber: number, endLine: number, lineContent: string, body: string, suggestion?: { newLines: string[] }) => void
+  onAddComment: (
+    filePath: string,
+    side: AnnotationSide,
+    lineNumber: number,
+    endLine: number,
+    lineContent: string,
+    body: string,
+    suggestion?: { newLines: string[] },
+    asDraft?: boolean,
+    charAnchor?: { startColumn: number; endColumn: number; selectedText: string },
+  ) => void
   onDeleteComment: (id: string) => void
   onReplyComment: (id: string, body: string) => void
+  onDeleteRange?: (filePath: string, anchor: SelectionAnchor) => void
   onActiveFileChange?: (filePath: string | null) => void
   onEditFile?: (filePath: string) => void
   onActiveDraftsChange?: (files: Set<string>) => void
@@ -38,6 +50,7 @@ export const DiffViewer = memo(
       onAddComment,
       onDeleteComment,
       onReplyComment,
+      onDeleteRange,
       onActiveFileChange,
       onEditFile,
       onActiveDraftsChange,
@@ -115,6 +128,7 @@ export const DiffViewer = memo(
             onAddComment={onAddComment}
             onDeleteComment={onDeleteComment}
             onReplyComment={onReplyComment}
+            onDeleteRange={onDeleteRange}
             onActiveFileChange={onActiveFileChange}
             onEditFile={onEditFile}
             onActiveDraftsChange={onActiveDraftsChange}
