@@ -132,3 +132,60 @@ Live refresh shifts line numbers; anchors must track.
 required before `ultra` mode is honest; 4 kills the liveness ice-cream-cone;
 5-6 are the new interaction features; 7 is an independent felt bug; 8 closes
 the loop. Stages are independently shippable in this order.
+
+## Decisions
+
+Implemented through Stage 4 (partial); Stages 5-8 not started. See branch
+`kmosher/glowup` for commit-by-commit detail.
+
+- **Stage 1 — file-set changes still fully remount.** `CodeViewHandle` (the
+  `@pierre/diffs` API surface diffx builds on) has `updateItem` and
+  `addItems` but no `removeItem`. A file's content changing is patched in
+  place via `updateItem` (replacing `item.fileDiff`, bumping `item.version`);
+  a file being *added or removed* from the diff (new untracked file
+  appearing, a revert dropping one back to identical) still triggers a full
+  `<CodeView>` remount, since there's no way to shrink the item list
+  in place. This is the common case (content edits) done right and the rare
+  case (file added/removed) falling back to the old behavior, not a partial
+  implementation of the per-file goal.
+- **Stage 1 — draft lifting scoped to the new-comment form.** Only the
+  comment/suggest-edit draft form (`CodeViewWrapper`'s `pending` map) had its
+  text lifted out of local state. Reply forms (`CommentBubble`) were left
+  alone — they're short-lived, never coincide with a remount, and lifting
+  them would require plumbing per-comment draft state through a different
+  owner.
+- **Stage 2 — `file-written` bypasses refreshMode entirely; only
+  `file-changed` is gated.** `file-written` fires from the in-browser editor
+  save or `diffx refresh` — both are the user/agent asking directly, so they
+  always apply immediately. Only ambient fs-watcher discovery
+  (`file-changed`) is subject to manual/live-unless-active/ultra policy.
+- **Stage 2 — "active" file = open draft or open FileEditorModal.**
+  live-unless-active's activity signal doesn't (yet) include "the file is
+  currently in the scrolled viewport" — only an open comment/suggest draft
+  or the file-editor modal counts. Scroll-position activity would need
+  wiring `onActiveFileChange` into the same set and wasn't worth the extra
+  surface for this pass.
+- **Stage 3 — re-anchoring scoped to open, additions-side comments.**
+  Deletion-side comments anchor to the diff's "old" side, which by
+  definition has no live counterpart in the working tree to re-anchor
+  against, so they're left alone. Resolved comments aren't re-anchored
+  either — a resolved thread's exact position is no longer load-bearing.
+- **Stage 3 — the in-browser editor save re-anchors twice.** `PUT
+  /api/file-content` calls `reanchorAndBroadcast` directly (so the response
+  already reflects new positions), and the fs-watcher independently detects
+  the same write ~200ms later and calls it again. The second call is a no-op
+  (positions already match) — redundant but harmless, not worth suppressing.
+- **Stage 4 — the `/api/events-ws` agent endpoint was not built.** The
+  installed `@hono/node-server` (1.19.12) has no `/ws` export in this
+  version's `dist/`; shipping it would mean either bumping that dependency
+  (unverified blast radius) or hand-rolling a `ws`-package integration
+  against the raw `http.Server` `serve()` returns. Both are bigger, riskier
+  changes than fit alongside the rest of Stage 4. `diffx watch` (SSE) is
+  still the only agent-facing stream; it now also forwards `comment-updated`,
+  `clients`, and `review-ended`, so an agent using it already gets the
+  Stage 3/4 presence and re-anchoring signals — it just isn't a native `ws:`
+  Monitor source yet. The "agent connected" toolbar dot from the design (tied
+  to a ws subscriber's `role:'agent'`) is deferred with it.
+- **Stages 5-8 — not started.** Draft comments, character-level
+  selection/delete, the suggest-edit event-isolation fix, and durability +
+  skill updates remain as designed above with no implementation yet.
