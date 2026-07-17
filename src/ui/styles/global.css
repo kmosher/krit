@@ -752,6 +752,10 @@ body {
     background: var(--bg);
     color: var(--text);
     resize: vertical;
+    /* JS auto-grow (CommentForm) sets height to fit content; cap it so a
+       huge paste doesn't swallow the viewport. */
+    max-height: 45vh;
+    overflow-y: auto;
 }
 
 .comment-form textarea:focus {

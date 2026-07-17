@@ -92,6 +92,16 @@ export function CommentForm({
     bodyRef.current?.focus()
   }, [])
 
+  // Auto-grow the body textarea to fit its content (pasted text included) up
+  // to the CSS max-height, past which it scrolls. height:auto first so it can
+  // also shrink when text is deleted.
+  useEffect(() => {
+    const el = bodyRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`
+  }, [body, suggestMode])
+
   useEffect(() => {
     if (suggestMode) {
       // Focus the CodeMirror editor as soon as it mounts so the user can start
@@ -220,6 +230,11 @@ export function CommentForm({
           foldGutter: false,
           highlightActiveLine: false,
           tabSize: 2,
+          // drawSelection replaces the native caret with CM's own .cm-cursor
+          // overlay, whose focus/selection tracking breaks inside CodeView's
+          // shadow root on WebKit — the caret simply never renders. The
+          // native caret works everywhere.
+          drawSelection: false,
         }}
       />
     </div>

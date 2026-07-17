@@ -49,15 +49,62 @@ function getShadowAwareSelection(target: Node | null): Selection | null {
   return document.getSelection()
 }
 
+// Safari/WebKit path (incl. the Tauri desktop shell's WKWebView): no
+// ShadowRoot.getSelection(), but the standard Selection.getComposedRanges()
+// pierces the shadow boundary when handed the shadow root. Returns a live
+// Range rebuilt from the first composed StaticRange, or null if the API is
+// missing or the composed range still isn't shadow-internal.
+//
+// The API shipped with two signatures: the current spec takes an options
+// object ({ shadowRoots }); original Safari 17 took variadic shadow roots.
+// The wrong shape isn't an error — it just returns host-retargeted ranges —
+// so try the spec form and fall back to variadic if the result didn't
+// actually pierce into our root.
+function getComposedSelectionRange(root: ShadowRoot): Range | null {
+  const sel = document.getSelection() as
+    | (Selection & {
+        getComposedRanges?: (opts?: { shadowRoots?: ShadowRoot[] } | ShadowRoot) => StaticRange[]
+      })
+    | null
+  if (!sel || typeof sel.getComposedRanges !== 'function') return null
+
+  let ranges = sel.getComposedRanges({ shadowRoots: [root] })
+  if (ranges.length === 0 || !root.contains(ranges[0].startContainer)) {
+    ranges = sel.getComposedRanges(root)
+  }
+  const sr = ranges[0]
+  if (!sr) return null
+  if (sr.startContainer === sr.endContainer && sr.startOffset === sr.endOffset) return null
+  try {
+    const r = document.createRange()
+    r.setStart(sr.startContainer, sr.startOffset)
+    r.setEnd(sr.endContainer, sr.endOffset)
+    return r
+  } catch {
+    return null
+  }
+}
+
 // Returns the active selection's Range, using the shadow-aware lookup
 // above, seeded from the node an originating event touched (its
 // composedPath()[0] is the deepest — possibly shadow-internal — target,
 // which is what tells us which shadow root to ask).
 export function getActiveSelectionRange(eventTarget: EventTarget | null): Range | null {
   const node = eventTarget instanceof Node ? eventTarget : null
+  const root = node?.getRootNode?.()
   const sel = getShadowAwareSelection(node)
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
-  return sel.getRangeAt(0)
+  if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0)
+    // document.getSelection() inside a shadow root hands back a range
+    // retargeted to the host — detectable because it no longer sits inside
+    // our shadow root. Fall through to getComposedRanges in that case
+    // instead of returning a useless host-level range.
+    if (!(root instanceof ShadowRoot) || root.contains(range.startContainer)) {
+      return range
+    }
+  }
+  if (root instanceof ShadowRoot) return getComposedSelectionRange(root)
+  return null
 }
 
 function closestLineElement(node: Node): HTMLElement | null {
