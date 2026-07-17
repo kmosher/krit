@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { GitBranch, Send, Settings, RefreshCw } from 'lucide-react'
+import { GitBranch, Send, Settings, RefreshCw, Bot } from 'lucide-react'
 import type { DiffOptions } from '../hooks/useDiff'
 import type { RefreshMode } from '../hooks/useSettings'
 
@@ -22,6 +22,8 @@ interface ToolbarProps {
   onCopyComments: () => Promise<void>
   /** Number of CLI watchers subscribed to the event stream — gates Submit. */
   watcherCount: number
+  /** Agent subscribers connected over the native /api/events-ws endpoint. */
+  agentCount: number
   /** Timestamp the user clicked Submit on this page, or null. */
   submittedAt: number | null
   onSubmitReview: () => Promise<void>
@@ -54,6 +56,7 @@ export function Toolbar({
   onBrowserChange,
   onCopyComments,
   watcherCount,
+  agentCount,
   submittedAt,
   onSubmitReview,
   refreshMode,
@@ -133,6 +136,15 @@ export function Toolbar({
           {additions > 0 && <span className="stat-additions"> +{additions}</span>}
           {deletions > 0 && <span className="stat-deletions"> -{deletions}</span>}
         </span>
+        {agentCount > 0 && (
+          <span
+            className="toolbar-agent-dot"
+            title={`${agentCount} agent${agentCount === 1 ? '' : 's'} connected over /api/events-ws`}
+          >
+            <Bot size={12} />
+            Agent connected
+          </span>
+        )}
       </div>
       <div className="toolbar-right">
         <div className="toolbar-toggle">

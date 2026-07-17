@@ -266,6 +266,7 @@ export function App() {
         onBrowserChange={(browser) => updateSettings({ browser })}
         onCopyComments={copyAllComments}
         watcherCount={reviewState.watcherCount}
+        agentCount={reviewState.agentCount}
         submittedAt={reviewState.submittedAt}
         onSubmitReview={submitReview}
         refreshMode={settings.refreshMode}

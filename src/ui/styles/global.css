@@ -92,6 +92,19 @@ body {
     }
 }
 
+/* Lit while an agent is connected over /api/events-ws */
+.toolbar-agent-dot {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 15%, transparent);
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-weight: 500;
+}
+
 .toolbar-stat {
     font-size: 12px;
     color: var(--text-secondary);

@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises'
 import { join, extname, resolve } from 'node:path'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
-import { streamSSE, type SSEStreamingApi } from 'hono/streaming'
+import { streamSSE } from 'hono/streaming'
+import { WebSocketServer } from 'ws'
 import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, getFileContentAtRef, getRepoRoot, resolveDiffRefs, WORKING_TREE_REF, getUntrackedFilePaths, writeWorkingTreeFile } from './git.js'
 import { loadSettings, saveSettings } from './settings.js'
 import { InMemoryCommentStore, FileBackedCommentStore } from './comments.js'
@@ -30,6 +31,10 @@ const MIME_TYPES: Record<string, string> = {
 export interface BinaryFileInfo {
   path: string
   type: 'added' | 'deleted' | 'changed' | 'untracked'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }
 
 function parseFilePaths(patch: string): string[] {
@@ -106,12 +111,30 @@ function parseBinaryFiles(patch: string, untrackedFiles?: Set<string>): BinaryFi
   return binaryFiles
 }
 
-type SubscriberRole = 'ui' | 'cli'
+// 'agent' subscribers connect over /api/events-ws (native WebSocket, see
+// startServer) instead of SSE — the Claude skill's Monitor tool wires up
+// directly to that instead of shelling out to `diffx watch`. Transport
+// details live behind `send()` below so broadcast/sendTo don't care which
+// kind of subscriber they're talking to.
+type SubscriberRole = 'ui' | 'cli' | 'agent'
 interface Subscriber {
   id: string
   role: SubscriberRole
-  stream: SSEStreamingApi
+  send(payload: unknown): Promise<void>
+  // 'agent' only: mirrors the debounce `diffx watch` does client-side to
+  // turn noisy `state` snapshots into a stable `clients {browsers}` line —
+  // done server-side here since there's no separate CLI process to do it
+  // on the agent's behalf for a native ws connection.
+  clientsDebounce?: {
+    timer?: NodeJS.Timeout
+    lastEmitted: number
+  }
 }
+
+// Debounce window for the state->clients transform, matching diffx watch's
+// CLIENTS_DEBOUNCE_MS in subcommands.ts — long enough that a browser tab
+// reload doesn't read as a leave-then-rejoin blip.
+const CLIENTS_DEBOUNCE_MS = 4000
 
 // Grace period after the last browser tab disconnects before the server
 // shuts itself down. Long enough to survive a page refresh or a brief
@@ -143,13 +166,31 @@ export function createApp(
   const snapshotState = () => ({
     watcherCount: [...subscribers].filter((s) => s.role === 'cli').length,
     uiCount: [...subscribers].filter((s) => s.role === 'ui').length,
+    agentCount: [...subscribers].filter((s) => s.role === 'agent').length,
   })
   const sendTo = async (sub: Subscriber, payload: unknown) => {
+    // Agent (ws) subscribers get the same "clients" presence line
+    // `diffx watch` derives client-side from `state` — never the raw
+    // snapshot, which is noisier than an agent needs.
+    if (sub.role === 'agent' && isRecord(payload) && payload.type === 'state' && typeof payload.uiCount === 'number') {
+      scheduleClientsUpdate(sub, payload.uiCount)
+      return
+    }
     try {
-      await sub.stream.writeSSE({ data: JSON.stringify(payload) })
+      await sub.send(payload)
     } catch {
       if (subscribers.delete(sub)) checkIdle()
     }
+  }
+  const scheduleClientsUpdate = (sub: Subscriber, browsers: number) => {
+    const debounce = (sub.clientsDebounce ??= { lastEmitted: -1 })
+    if (debounce.timer) clearTimeout(debounce.timer)
+    debounce.timer = setTimeout(() => {
+      debounce.timer = undefined
+      if (browsers === debounce.lastEmitted) return
+      debounce.lastEmitted = browsers
+      void sendTo(sub, { type: 'clients', browsers })
+    }, CLIENTS_DEBOUNCE_MS)
   }
   const broadcast = async (payload: unknown) => {
     await Promise.all([...subscribers].map((s) => sendTo(s, payload)))
@@ -523,7 +564,13 @@ export function createApp(
   app.get('/api/events', (c) => {
     const role: SubscriberRole = c.req.query('role') === 'cli' ? 'cli' : 'ui'
     return streamSSE(c, async (stream) => {
-      const sub: Subscriber = { id: crypto.randomUUID(), role, stream }
+      const sub: Subscriber = {
+        id: crypto.randomUUID(),
+        role,
+        send: async (payload) => {
+          await stream.writeSSE({ data: JSON.stringify(payload) })
+        },
+      }
       subscribers.add(sub)
       checkIdle()
       await broadcastState()
@@ -594,7 +641,26 @@ export function createApp(
     }
   })
 
-  return { app, closeWatcher: () => repoWatcher.close() }
+  // Registers a role:'agent' subscriber for the native /api/events-ws
+  // endpoint (see startServer, which owns the raw WebSocket upgrade — that
+  // needs Node's http.Server, which lives outside createApp's Hono-only
+  // surface). Mirrors what the SSE handler above does on connect/disconnect
+  // (idle-shutdown accounting, initial state snapshot) so an agent
+  // connecting over ws behaves identically to one connecting over SSE.
+  const registerAgentSubscriber = (send: (payload: unknown) => Promise<void>): (() => void) => {
+    const sub: Subscriber = { id: crypto.randomUUID(), role: 'agent', send }
+    subscribers.add(sub)
+    checkIdle()
+    void broadcastState()
+    return () => {
+      if (subscribers.delete(sub)) {
+        checkIdle()
+        void broadcastState()
+      }
+    }
+  }
+
+  return { app, closeWatcher: () => repoWatcher.close(), registerAgentSubscriber }
 }
 
 export function startServer(options: {
@@ -618,7 +684,17 @@ export function startServer(options: {
   }
 
   const commentStore = options.commentsFilePath ? new FileBackedCommentStore(options.commentsFilePath) : undefined
-  const { app, closeWatcher } = createApp(options.clientDir, options.customDiffArgs, commentStore, onShutdown)
+  const { app, closeWatcher, registerAgentSubscriber } = createApp(options.clientDir, options.customDiffArgs, commentStore, onShutdown)
+
+  // Native WebSocket endpoint for an agent's Monitor connection — the
+  // Claude skill wires Monitor's `ws:` source directly to this instead of
+  // shelling out to `diffx watch`. noServer:true because we're sharing the
+  // one HTTP server @hono/node-server already owns; WebSocketServer
+  // normally wants to bind its own port. Handled at the raw http.Server
+  // level (server.on('upgrade', ...)) since Hono itself has no upgrade
+  // handling — @hono/node-server doesn't ship a /ws helper in the installed
+  // version (1.19.12), and bumping it was out of scope for this change.
+  const wss = new WebSocketServer({ noServer: true })
 
   return new Promise((resolve) => {
     server = serve({
@@ -627,6 +703,26 @@ export function startServer(options: {
       hostname: options.host,
     }, (info) => {
       resolve({ port: info.port })
+    })
+
+    server.on('upgrade', (request, socket, head) => {
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      if (url.pathname !== '/api/events-ws') {
+        socket.destroy()
+        return
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        const unregister = registerAgentSubscriber(async (payload) => {
+          await new Promise<void>((res, rej) => {
+            ws.send(JSON.stringify(payload), (err) => (err ? rej(err) : res()))
+          })
+        })
+        // Both can fire for the same disconnect (ws's own behavior); the
+        // registration cleanup is idempotent (Set.delete no-ops the second
+        // time), so calling unregister from both is safe.
+        ws.on('close', unregister)
+        ws.on('error', unregister)
+      })
     })
   })
 }

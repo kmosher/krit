@@ -73,6 +73,8 @@ diffx watch
 
 Run this as a **Monitor task** (not a background Bash task). `diffx watch` subscribes to the diffx event stream and writes one JSON line to stdout per event. Each line is a wake-up notification — the Monitor surfaces them as they arrive, so you can process the user's comments as soon as they leave them.
 
+Alternatively, if Monitor's native `ws:` source is available in this environment, connect it directly to `ws://<host>:<port>/api/events-ws` instead of spawning `diffx watch` as a subprocess — same JSON line shapes below, one message per event, no separate process to manage. `diffx state` gives you the port. Registering over this endpoint also lights up an "Agent connected" indicator in the browser toolbar (distinct from the `diffx watch`/watcher indicator, since the two are different subscriber roles).
+
 Line shapes:
 
 ```json

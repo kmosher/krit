@@ -5,6 +5,8 @@ export interface ReviewState {
   watcherCount: number
   /** Number of UI subscribers — this client is one of them. */
   uiCount: number
+  /** Number of agent subscribers connected over the native /api/events-ws endpoint. */
+  agentCount: number
   /** Timestamp of the most recent Submit click this page has seen, or null. */
   submittedAt: number | null
 }
@@ -18,13 +20,14 @@ export function useReviewState(): ReviewState {
   const [state, setState] = useState<ReviewState>({
     watcherCount: 0,
     uiCount: 0,
+    agentCount: 0,
     submittedAt: null,
   })
 
   useEffect(() => {
     const es = new EventSource('/api/events')
     es.onmessage = (e) => {
-      let msg: { type?: string; watcherCount?: number; uiCount?: number; timestamp?: number }
+      let msg: { type?: string; watcherCount?: number; uiCount?: number; agentCount?: number; timestamp?: number }
       try {
         msg = JSON.parse(e.data)
       } catch {
@@ -35,6 +38,7 @@ export function useReviewState(): ReviewState {
           ...prev,
           watcherCount: msg.watcherCount ?? prev.watcherCount,
           uiCount: msg.uiCount ?? prev.uiCount,
+          agentCount: msg.agentCount ?? prev.agentCount,
         }))
       } else if (msg.type === 'submitted') {
         setState((prev) => ({ ...prev, submittedAt: msg.timestamp ?? Date.now() }))
