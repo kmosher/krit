@@ -42,8 +42,17 @@ function truncateForLabel(text: string, max = 40): string {
 // A draft is uniquely identified by file + side + line range. Clicking the +
 // on a line that already has an open draft just focuses the existing form
 // instead of stacking a second one in the same slot.
+const NUL = String.fromCharCode(0)
+// A draft key joins its fields with a NUL separator (not a space): itemId
+// is a file path, which can legally contain spaces, so a space separator
+// could collide two different (path, side, range) tuples into the same
+// key. NUL can't appear in any of these fields, so it can't collide.
+// Built via String.fromCharCode rather than a literal byte or escape
+// sequence in a template literal -- either of those previously left an
+// actual NUL byte in this source file, which made git/`file` misclassify
+// the whole file as binary and silently broke the production bundler.
 function draftKey(d: Pick<DraftMetadata, 'itemId' | 'side' | 'startLine' | 'endLine'>): string {
-  return `${d.itemId} ${d.side} ${d.startLine} ${d.endLine}`
+  return [d.itemId, d.side, d.startLine, d.endLine].join(NUL)
 }
 
 // Every annotation (comment form, suggest-edit CodeMirror, comment bubble
