@@ -64,7 +64,8 @@ export async function cmdReply(id: string | undefined, body: string | undefined)
     process.exit(1)
   }
   // ?source=cli prevents this reply from being broadcast as a `reply-added`
-  // event, which would otherwise wake up `diffx watch` (i.e. ourselves).
+  // event, which would otherwise wake up the agent's own event subscription
+  // (the /api/events-ws Monitor) — i.e. ourselves.
   await api('POST', `/api/comments/${id}/replies?source=cli`, { body })
   console.log(`replied to ${id}`)
 }
@@ -168,8 +169,8 @@ async function streamEvents(label: string, onEvent: (ev: SseEvent) => void): Pro
  *
  * Exit codes: 0 on submit, 2 on connection loss, 130 on Ctrl+C.
  *
- * Retained for the batch-review workflow. The streaming flow uses
- * `diffx watch` instead — see cmdWatch below.
+ * Retained for the batch-review workflow. The streaming flow subscribes
+ * to the /api/events-ws WebSocket endpoint directly (see the diffx skill).
  */
 export async function cmdWaitForSubmit(): Promise<void> {
   console.error('wait-for-submit: connected — leave comments and click Done reviewing in the browser.')
@@ -183,92 +184,4 @@ export async function cmdWaitForSubmit(): Promise<void> {
   process.exit(2)
 }
 
-// Debounce window for turning `state` snapshots into a `clients` presence
-// line — long enough that a browser tab reload (which drops and immediately
-// re-opens the SSE connection) reads as "still there" instead of a
-// leave-then-rejoin blip.
-const CLIENTS_DEBOUNCE_MS = 4000
-
-/**
- * Stream comment events from the diffx UI, one JSON line per event.
- *
- * Designed to run as a long-lived Monitor task: each printed line is a
- * wake-up notification for the orchestrating Claude session. "Done
- * reviewing" is NOT terminal — comments/replies can keep arriving after it,
- * so watch stays connected and keeps streaming them. It only exits once the
- * diffx server itself shuts down. The server keys its own shutdown on
- * browser (not watcher) presence — see reason codes below — so this command
- * is never what keeps a review "stuck open."
- *
- * Exit codes: 0 if `submitted` was ever seen; 3 if the server broadcast
- * `review-ended` (reviewer left without submitting) before submitting; 2 if
- * the connection just drops with neither; 130 on Ctrl+C.
- *
- * Emitted line shapes (one per line, newline-terminated):
- *   {"type":"comment-added","comment":{...}}
- *   {"type":"reply-added","commentId":"...","reply":{...}}
- *   {"type":"comment-updated","comment":{...}}  // re-anchored after a live
- *                                                 file edit shifted its lines,
- *                                                 or newly/no-longer outdated
- *   {"type":"user-edit","action":"delete","filePath":"...","range":{...},"deletedText":"..."}
- *                                                // a direct in-browser delete (or "undo") --
- *                                                // a context update, not a request; the file
- *                                                // already reflects it, don't re-apply it
- *   {"type":"clients","browsers":N}             // debounced browser-tab presence
- *   {"type":"submitted","timestamp":...}        // not final — watch keeps streaming after this
- *   {"type":"review-ended","reason":"idle"|"no-browser"}  // terminal
- */
-export async function cmdWatch(): Promise<void> {
-  console.error('watch: connected — streaming comment events.')
-  let submitted = false
-  let lastEmittedBrowsers = -1
-  let pendingBrowsers: number | null = null
-  let clientsDebounce: NodeJS.Timeout | undefined
-
-  const flushClients = () => {
-    if (pendingBrowsers === null || pendingBrowsers === lastEmittedBrowsers) return
-    lastEmittedBrowsers = pendingBrowsers
-    process.stdout.write(JSON.stringify({ type: 'clients', browsers: lastEmittedBrowsers }) + '\n')
-  }
-
-  await streamEvents('watch', (ev) => {
-    if (ev.type === 'comment-added' || ev.type === 'reply-added' || ev.type === 'comment-updated' || ev.type === 'user-edit') {
-      process.stdout.write(JSON.stringify(ev) + '\n')
-    } else if (ev.type === 'submitted') {
-      submitted = true
-      process.stdout.write(JSON.stringify(ev) + '\n')
-    } else if (ev.type === 'review-ended') {
-      // Terminal event — exit now instead of waiting for the connection to
-      // close. The server tears itself down right after broadcasting this,
-      // and holding our SSE stream open only delays (older builds: deadlocks)
-      // that shutdown. The server sends this on idle shutdown even after a
-      // "Done reviewing" click, so it only means "left without submitting"
-      // (exit 3) when no submitted pulse preceded it.
-      if (clientsDebounce) clearTimeout(clientsDebounce)
-      process.stdout.write(JSON.stringify(ev) + '\n')
-      if (submitted) {
-        console.error('watch: server shut down after Done reviewing.')
-        process.exit(0)
-      }
-      console.error('watch: reviewer left without submitting.')
-      process.exit(3)
-    } else if (ev.type === 'state') {
-      // Was previously swallowed entirely; now debounced into a `clients`
-      // presence line so the agent can tell whether anyone's still reviewing.
-      pendingBrowsers = typeof ev.uiCount === 'number' ? ev.uiCount : 0
-      if (clientsDebounce) clearTimeout(clientsDebounce)
-      clientsDebounce = setTimeout(flushClients, CLIENTS_DEBOUNCE_MS)
-    }
-    // pings are intentionally swallowed.
-  })
-  if (clientsDebounce) clearTimeout(clientsDebounce)
-
-  if (submitted) {
-    console.error('watch: server shut down after Done reviewing.')
-    process.exit(0)
-  }
-  console.error('watch: server closed the connection before Done reviewing.')
-  process.exit(2)
-}
-
-export const SUBCOMMANDS = new Set(['state', 'comments', 'reply', 'resolve', 'reopen', 'wait-for-submit', 'watch', 'refresh'])
+export const SUBCOMMANDS = new Set(['state', 'comments', 'reply', 'resolve', 'reopen', 'wait-for-submit', 'refresh'])

@@ -56,7 +56,7 @@ export function watchRepo(root: string, onChange: (path: string) => void): RepoW
   }
 
   const watcher: FSWatcher = watch(root, {
-    ignored: (path: string) => /(^|\/)(\.git|node_modules)(\/|$)/.test(path),
+    ignored: (path: string) => /(^|\/)(\.git|node_modules|\.claude)(\/|$)/.test(path),
     ignoreInitial: true,
     persistent: true,
   })

@@ -114,7 +114,7 @@ function parseBinaryFiles(patch: string, untrackedFiles?: Set<string>): BinaryFi
 
 // 'agent' subscribers connect over /api/events-ws (native WebSocket, see
 // startServer) instead of SSE — the Claude skill's Monitor tool wires up
-// directly to that instead of shelling out to `diffx watch`. Transport
+// directly to that (the retired `diffx watch` subprocess used SSE). Transport
 // details live behind `send()` below so broadcast/sendTo don't care which
 // kind of subscriber they're talking to.
 type SubscriberRole = 'ui' | 'cli' | 'agent'
@@ -122,7 +122,7 @@ interface Subscriber {
   id: string
   role: SubscriberRole
   send(payload: unknown): Promise<void>
-  // 'agent' only: mirrors the debounce `diffx watch` does client-side to
+  // 'agent' only: mirrors the debounce the retired `diffx watch` did client-side to
   // turn noisy `state` snapshots into a stable `clients {browsers}` line —
   // done server-side here since there's no separate CLI process to do it
   // on the agent's behalf for a native ws connection.
@@ -132,7 +132,7 @@ interface Subscriber {
   }
 }
 
-// Debounce window for the state->clients transform, matching diffx watch's
+// Debounce window for the state->clients transform, matching the old watch
 // CLIENTS_DEBOUNCE_MS in subcommands.ts — long enough that a browser tab
 // reload doesn't read as a leave-then-rejoin blip.
 const CLIENTS_DEBOUNCE_MS = 4000
@@ -171,7 +171,7 @@ export function createApp(
   })
   const sendTo = async (sub: Subscriber, payload: unknown) => {
     // Agent (ws) subscribers get the same "clients" presence line
-    // `diffx watch` derives client-side from `state` — never the raw
+    // subcommand derived client-side from `state` — never the raw
     // snapshot, which is noisier than an agent needs.
     if (sub.role === 'agent' && isRecord(payload) && payload.type === 'state' && typeof payload.uiCount === 'number') {
       scheduleClientsUpdate(sub, payload.uiCount)
@@ -199,7 +199,7 @@ export function createApp(
   const broadcastState = () => broadcast({ type: 'state', ...snapshotState() })
 
   // Principal-based idle shutdown (see IDLE_SHUTDOWN_MS/NO_BROWSER_TIMEOUT_MS
-  // above). `review-ended` is a terminal broadcast — `diffx watch` treats it
+  // above). `review-ended` is a terminal broadcast — subscribers treat it
   // as "the reviewer left without submitting" (exit code 3) — sent before we
   // tear the process down so any connected watcher gets to see it land.
   let everHadBrowser = false
@@ -231,7 +231,7 @@ export function createApp(
 
   // Re-anchors non-resolved, additions-side comments on `path` to their new
   // position after a working-tree change and broadcasts the ones that moved
-  // (or went outdated) as comment-updated — the UI, `diffx watch`, and any
+  // (or went outdated) as comment-updated — the UI and any
   // ws agent subscriber all key off this event, so it runs server-side once
   // instead of three times with three chances to disagree. Drafts are
   // re-anchored (their position stays accurate) but never broadcast — they
@@ -620,7 +620,7 @@ export function createApp(
     return c.json({ ok: true })
   })
 
-  // SSE event stream. ?role=cli for `diffx watch` / `wait-for-submit`
+  // SSE event stream. ?role=cli for `wait-for-submit`
   // watchers; default 'ui' for the browser. Event types on the wire:
   //   state          — subscriber-count snapshot (UI uses it to gate Submit)
   //   comment-added   — new comment from any source
@@ -758,7 +758,7 @@ export function startServer(options: {
     console.log('Idle shutdown: no browser connected.')
     server.close(() => process.exit(0))
     // server.close() only resolves once every open connection ends — and a
-    // still-attached `diffx watch` SSE stream never ends on its own (it waits
+    // still-attached CLI SSE stream (`wait-for-submit`) never ends on its own (it waits
     // for the server), which would deadlock the shutdown with the watcher and
     // server each waiting on the other. The review-ended broadcast has already
     // been flushed by the time we get here, so sever whatever's left.
@@ -774,7 +774,7 @@ export function startServer(options: {
 
   // Native WebSocket endpoint for an agent's Monitor connection — the
   // Claude skill wires Monitor's `ws:` source directly to this instead of
-  // shelling out to `diffx watch`. noServer:true because we're sharing the
+  // shelling out to a subprocess. noServer:true because we're sharing the
   // one HTTP server @hono/node-server already owns; WebSocketServer
   // normally wants to bind its own port. Handled at the raw http.Server
   // level (server.on('upgrade', ...)) since Hono itself has no upgrade

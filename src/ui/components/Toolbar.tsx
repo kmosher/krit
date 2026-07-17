@@ -81,7 +81,10 @@ export function Toolbar({
   // copied, not the total including anything still draft-only.
   const postableCommentCount = commentCount - draftCount
 
-  const hasWatcher = watcherCount > 0
+  // Either subscriber kind counts as "someone is listening": role:'cli'
+  // (wait-for-submit over SSE) or role:'agent' (the /api/events-ws Monitor,
+  // the streaming flow's transport now that `diffx watch` is retired).
+  const hasWatcher = watcherCount > 0 || agentCount > 0
   const isSubmitted = submittedAt !== null
   const submitDisabled = submitting || isSubmitted || !hasWatcher || commentCount === 0
   const submitLabel = isSubmitted
@@ -92,7 +95,7 @@ export function Toolbar({
   const submitTitle = isSubmitted
     ? 'Review finished — the listening Claude session has been told to stop watching.'
     : !hasWatcher
-      ? 'No `diffx watch` (or `wait-for-submit`) is currently subscribed. Start one from Claude, or use Copy comments to paste manually.'
+      ? 'No agent or watcher is currently subscribed to events. Have Claude attach one, or use Copy comments to paste manually.'
       : commentCount === 0
         ? 'Leave at least one comment before finishing the review.'
         : draftCount > 0

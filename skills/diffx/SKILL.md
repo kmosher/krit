@@ -63,19 +63,21 @@ Run with `run_in_background: true` so the server stays alive while the user revi
 
 **Always pass `dangerouslyDisableSandbox: true` on this Bash call.** diffx spawns a child `open` process to launch the browser tab; the Claude Bash sandbox blocks that child even though `diffx` itself would run fine, and the tab silently fails to open ("browser-open helper exited with code 1"). Disabling the sandbox on the parent call lets the spawned `open` through.
 
-`diffx` automatically opens a new browser tab pointed at the local server. Once the tab is open, the server sits idle waiting for the user to leave inline comments — it is **not** doing any work in the background and will not proceed on its own. Activity resumes only when the user comments (you see it via `diffx watch`) or clicks **Done reviewing**.
+`diffx` automatically opens a new browser tab pointed at the local server. Once the tab is open, the server sits idle waiting for the user to leave inline comments — it is **not** doing any work in the background and will not proceed on its own. Activity resumes only when the user comments (you see it via the event Monitor, Step 2) or clicks **Done reviewing**.
 
-## Step 2: Stream comment events (Monitor)
+## Step 2: Stream comment events (Monitor ws)
 
-```bash
-diffx watch
+Connect a **Monitor** with its native `ws:` source to the server's WebSocket event endpoint:
+
+```
+Monitor({ws: {url: "ws://127.0.0.1:<port>/api/events-ws"}, persistent: true, ...})
 ```
 
-Run this as a **Monitor task** (not a background Bash task). `diffx watch` subscribes to the diffx event stream and writes one JSON line to stdout per event. Each line is a wake-up notification — the Monitor surfaces them as they arrive, so you can process the user's comments as soon as they leave them.
+`diffx state` prints the port/URL (it reads the state file the server wrote at launch). Each incoming frame is one JSON event and arrives as a wake-up notification, so you can process the user's comments as soon as they leave them. Registering also lights up an "Agent connected" dot in the browser toolbar.
 
-Alternatively, if Monitor's native `ws:` source is available in this environment, connect it directly to `ws://<host>:<port>/api/events-ws` instead of spawning `diffx watch` as a subprocess — same JSON line shapes below, one message per event, no separate process to manage. `diffx state` gives you the port. Registering over this endpoint also lights up an "Agent connected" indicator in the browser toolbar (distinct from the `diffx watch`/watcher indicator, since the two are different subscriber roles).
+(`diffx watch`, the old subprocess transport for this, is retired; `diffx wait-for-submit` remains for the non-streaming batch flow.)
 
-Line shapes:
+Frame shapes:
 
 ```json
 {"type":"comment-added","comment":{"id":"...","filePath":"...","lineNumber":42,"endLine":42,"body":"...", ...}}
@@ -92,11 +94,11 @@ Replies carry `author: 'user' | 'agent'`. You only see `reply-added` events for 
 
 **`comment-updated`** fires when a live file edit shifted a comment's anchor (or restored/broke the match): `lineNumber`/`endLine` reflect the new position, `outdated: true` means the server couldn't confidently re-match it and the position may be stale. Update your working copy of that comment's location rather than treating it as a new comment.
 
-**Draft comments never reach you.** The user can save a comment as a draft instead of posting it — drafts are invisible to `diffx watch`/`diffx comments` until the user posts them (or clicks Done reviewing, which posts any stragglers). You will never see a draft comment's `comment-added` until that happens; there's nothing to do differently, just don't assume every comment the user has typed is one you've seen.
+**Draft comments never reach you.** The user can save a comment as a draft instead of posting it — drafts are invisible to the event stream and `diffx comments` until the user posts them (or clicks Done reviewing, which posts any stragglers). You will never see a draft comment's `comment-added` until that happens; there's nothing to do differently, just don't assume every comment the user has typed is one you've seen.
 
-The clipboard "Copy comments" payload carries a `<code-review-comments version="3">` root. v3 adds `startColumn`/`endColumn` on `<comment>` and a `<selected>` block, both present only when the reviewer commented on an exact text selection rather than whole lines — treat `<selected>` as the precise substring to act on, more precise than `<code>`'s full line(s). Future shape changes will bump the version again; if you see a higher version than you understand, fall back to `diffx watch` / `diffx comments` (always the wire-current shape) rather than parsing the payload.
+The clipboard "Copy comments" payload carries a `<code-review-comments version="3">` root. v3 adds `startColumn`/`endColumn` on `<comment>` and a `<selected>` block, both present only when the reviewer commented on an exact text selection rather than whole lines — treat `<selected>` as the precise substring to act on, more precise than `<code>`'s full line(s). Future shape changes will bump the version again; if you see a higher version than you understand, fall back to the event stream / `diffx comments` (always the wire-current shape) rather than parsing the payload.
 
-Subscribing also lights up the **Done reviewing** button in the browser — if no watcher is attached, the button greys out and the user falls back to "Copy comments."
+Subscribing also lights up the **Done reviewing** button in the browser — if nothing is listening, the button greys out and the user falls back to "Copy comments."
 
 ## Step 3: Hand off and end the turn
 
@@ -133,23 +135,23 @@ Read the new line(s) from the Monitor. For each:
 
 - **`reply-added`** — the user replied to one of your earlier replies (probably pushback or follow-up). Read the reply, treat it like a new request scoped to that comment, and respond the same way.
 
-- **`submitted`** — the user clicked Done reviewing. This is **not** the end of the session — they can still leave more comments or reply to yours, and you'll keep waking up for them. Acknowledge briefly (e.g. "Got it — I'll keep watching in case you have more comments") and end the turn as usual. Do not summarize or wrap up yet; that happens in Step 5, when the Monitor itself exits.
+- **`submitted`** — the user clicked Done reviewing. This is **not** the end of the session — they can still leave more comments or reply to yours, and you'll keep waking up for them. Acknowledge briefly (e.g. "Got it — I'll keep watching in case you have more comments") and end the turn as usual. Do not summarize or wrap up yet; that happens in Step 5, when the socket closes.
 
 End the turn after handling the event(s). The Monitor will wake you again on the next one.
 
 **Self-echo guard:** your own `diffx reply` calls don't produce `reply-added` events (the server suppresses them via `?source=cli`). You only wake on human input.
 
-## Step 5: Wrap up (when the Monitor exits)
+## Step 5: Wrap up (when the socket closes)
 
-The diffx server shuts itself down once every browser tab has disconnected (with a short grace period for refreshes) — this Monitor's own connection doesn't keep it alive on its own. That's what ends the session, not the `submitted` event. When the Monitor process exits:
+The diffx server shuts itself down once every browser tab has disconnected (with a short grace period for refreshes) — the Monitor's own ws connection doesn't keep it alive on its own. That's what ends the session, not the `submitted` event. It broadcasts `review-ended` as its final frame, then the socket close ends the Monitor. Interpret the ending by what you saw before the close:
 
-- **Exit 0** — the user clicked Done reviewing at some point before closing the tab. Summarize briefly: N applied, M answered, K left open (and why).
-- **Exit 3** — the server broadcast `review-ended` (the last browser tab left, or none ever connected) before `submitted` was ever seen. The reviewer walked away without clicking Done reviewing. Tell the user what you got through (if anything) and that the review session ended without an explicit sign-off; don't silently re-launch.
-- **Exit 2** — the connection dropped some other way (crash, killed, port conflict) with neither `submitted` nor `review-ended` seen. Tell the user and stop; don't silently re-launch.
+- **`submitted` seen** (whether or not `review-ended` followed) — a clean finish. Summarize briefly: N applied, M answered, K left open (and why).
+- **`review-ended` without a prior `submitted`** — the reviewer walked away (closed the tab, or never opened one) without clicking Done reviewing. Tell the user what you got through (if anything) and that the review ended without an explicit sign-off; don't silently re-launch.
+- **Socket closed/errored with neither seen** — the server died unexpectedly (crash, killed, port conflict). Tell the user and stop; don't silently re-launch.
 
 ## Failure modes
 
-- **No watcher attached when user tries to click Done** → they'll see "No watcher" in the UI. They can either start the watch from Claude or fall back to Copy.
+- **No listener attached when user tries to click Done** → they'll see "No watcher" in the UI. They can either have Claude attach the ws Monitor or fall back to Copy.
 
 ## Manual fallback
 

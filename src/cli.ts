@@ -9,7 +9,7 @@ import { startServer } from './server.js'
 import { loadSettings, type Settings } from './settings.js'
 import { defaultStatePath, writeState, removeStateIfOwned } from './state.js'
 import { commentsFilePathFor } from './persistence.js'
-import { SUBCOMMANDS, cmdState, cmdComments, cmdReply, cmdResolve, cmdReopen, cmdWaitForSubmit, cmdWatch, cmdRefresh } from './subcommands.js'
+import { SUBCOMMANDS, cmdState, cmdComments, cmdReply, cmdResolve, cmdReopen, cmdWaitForSubmit, cmdRefresh } from './subcommands.js'
 
 // Subcommand dispatch happens BEFORE parseArgs so that flags like --staged
 // don't get rejected when we're really running a subcommand. We only treat
@@ -24,6 +24,16 @@ const hasSubcommand =
   firstPositional !== undefined &&
   SUBCOMMANDS.has(firstPositional) &&
   (dashDashIdx === -1 || subcommandIdx < dashDashIdx)
+
+// Retired subcommand. Without this stub, `diffx watch` would fall through to
+// the server-launch path and try to git-diff a ref named "watch" — a
+// confusing failure for anyone (or any stale skill/script) still calling it.
+if (!hasSubcommand && firstPositional === 'watch' && (dashDashIdx === -1 || subcommandIdx < dashDashIdx)) {
+  console.error(
+    'diffx watch is retired. Subscribe to ws://<host>:<port>/api/events-ws instead (diffx state prints the URL); diffx wait-for-submit remains for the batch flow.',
+  )
+  process.exit(2)
+}
 
 if (hasSubcommand) {
   const [sub, ...rest] = rawArgs.slice(subcommandIdx)
@@ -52,10 +62,6 @@ if (hasSubcommand) {
     case 'wait-for-submit':
       await cmdWaitForSubmit()
       // cmdWaitForSubmit exits on its own
-      process.exit(0)
-    case 'watch':
-      await cmdWatch()
-      // cmdWatch exits on its own
       process.exit(0)
     case 'refresh':
       await cmdRefresh()
@@ -96,7 +102,6 @@ Subcommands (talk to the running diffx server for the current session):
   reopen <id>                 Reopen a resolved comment
   wait-for-submit             Block until the user clicks Done reviewing in the browser UI
                               (exit 0 on submit, 2 on disconnect, 130 on Ctrl+C)
-  watch                       Stream comment events as JSON lines on stdout
                               (one line per new comment / reply / submit; stays connected
                               after Done reviewing, exits when the diffx server shuts down)
   refresh                     Tell the browser tab to refetch the diff (after edits

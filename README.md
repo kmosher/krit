@@ -51,13 +51,12 @@ diffx comments [open|resolved|replied|all]
 diffx reply <id> <text...>        # Reply to a comment (tagged author: 'agent')
 diffx resolve <id>                # Mark a comment resolved
 diffx reopen <id>                 # Reopen a resolved comment
-diffx watch                       # Stream comment/reply/submitted events as JSON
                                   # lines on stdout (exits 0 when the user clicks
                                   # Done reviewing, 2 on disconnect, 130 on Ctrl+C)
 diffx wait-for-submit             # Block until the user clicks Done reviewing
 ```
 
-`diffx watch` is the integration point for an agent that wants to respond to comments as the user writes them — each new comment or user reply emits one JSON line; the agent's own `diffx reply` calls don't echo back, so there's no self-feedback loop.
+The WebSocket endpoint `ws://<host>:<port>/api/events-ws` is the integration point for an agent that wants to respond to comments as the user writes them — each new comment or user reply arrives as one JSON frame; the agent's own `diffx reply` calls don't echo back, so there's no self-feedback loop.
 
 ## Features
 
@@ -68,7 +67,7 @@ diffx wait-for-submit             # Block until the user clicks Done reviewing
 - **Conversation threads** — Reply to any comment from the browser. Agents reply via the `diffx reply` subcommand or the API; agent replies render with a bot avatar in violet, user replies in blue. Replying to a resolved comment auto-reopens it.
 - **Expandable context** — Once both file versions have loaded, you can expand unedited lines above, below, and between hunks. Contents are fetched lazily as each file scrolls into view; files over 5 MB require an explicit "Load anyway" opt-in.
 - **Comment status tracker** — Sidebar widget showing open / replied / resolved counts with click-to-navigate links
-- **Done reviewing** — Submit pulse fires when you're finished; a connected `diffx watch` watcher exits cleanly
+- **Done reviewing** — Submit pulse fires when you're finished; connected event subscribers see it and wind down cleanly
 - **Copy comments** — One-click copy all comments as structured XML for an offline agent
 - **Image preview** — Side-by-side comparison for added, modified, and deleted images
 - **Viewed tracking** — Mark files as reviewed to track progress
@@ -110,7 +109,7 @@ Install the diffx skill to use diffx directly from your AI coding agent:
 npx skills add wong2/diffx
 ```
 
-The skill is a single streaming entrypoint: **`/diffx`**. The agent launches `diffx` (which opens the browser tab and waits for your comments), attaches a `diffx watch` monitor, and processes each comment / user reply as it arrives. The session ends when you click **Done reviewing** in the toolbar.
+The skill is a single streaming entrypoint: **`/diffx`**. The agent launches `diffx` (which opens the browser tab and waits for your comments), subscribes to the `/api/events-ws` WebSocket, and processes each comment / user reply as it arrives. The session ends when you click **Done reviewing** in the toolbar.
 
 If you'd rather work batch-style without an attached agent, just click **Copy** in the toolbar and paste the XML into a chat — every consumer that parses the format above will still work.
 
