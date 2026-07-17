@@ -135,7 +135,8 @@ the loop. Stages are independently shippable in this order.
 
 ## Decisions
 
-Implemented through Stage 4 (partial); Stages 5-8 not started. See branch
+Implemented: Stages 1-5, 7, 8 (Stage 4 partial — see its entry below).
+Stage 6 not started (see its own entry below for why). See branch
 `kmosher/glowup` for commit-by-commit detail.
 
 - **Stage 1 — file-set changes still fully remount.** `CodeViewHandle` (the
@@ -186,6 +187,42 @@ Implemented through Stage 4 (partial); Stages 5-8 not started. See branch
   Stage 3/4 presence and re-anchoring signals — it just isn't a native `ws:`
   Monitor source yet. The "agent connected" toolbar dot from the design (tied
   to a ws subscriber's `role:'agent'`) is deferred with it.
-- **Stages 5-8 — not started.** Draft comments, character-level
-  selection/delete, the suggest-edit event-isolation fix, and durability +
-  skill updates remain as designed above with no implementation yet.
+- **Stage 5 — drafts are opt-in, not opt-out, at the read boundary.**
+  `GET /api/comments` filters out drafts unless the caller passes
+  `?includeDrafts=true`, which only the browser UI's fetch sends. This
+  wasn't explicitly called out in the design ("the watcher/ws stream
+  suppresses them" only mentions the push side) but was necessary:
+  `diffx comments` reads this same endpoint directly, and without the
+  filter it would leak drafts the reviewer hadn't posted yet, bypassing the
+  SSE-level suppression entirely.
+- **Stage 5 — no per-draft "post one" affordance.** Only batch posting
+  exists (`POST /api/drafts/post`, wired to the toolbar's "Post drafts"
+  button and to Submit). A reviewer wanting to post a single draft ahead of
+  the rest currently has to post all of them; scoped out to keep the surface
+  small, since the server-side PUT path (`status: 'open'` on one comment)
+  already exists and could grow a dedicated button later without a schema
+  change.
+- **Stage 6 — not started.** The core of this stage — mapping a native DOM
+  text selection inside CodeView's rendered lines to (line, column) offsets,
+  and positioning a floating selection pill relative to that selection — is
+  UI geometry that has to be verified by actually dragging a selection in a
+  running browser. That kind of verification was out of scope for this pass
+  (server smoke-testing via curl only, no browser driving), and shipping the
+  selection-pill/character-range/direct-delete/undo-buffer stack unverified
+  risked landing something that *looks* complete in a diff review but is
+  subtly broken in ways only a live interaction would surface — worse than
+  not landing it. Implementing only the server half (delete-splice endpoint,
+  undo buffer, `user-edit` event, schema v3 fields) was considered and
+  rejected: with no UI trigger, it would sit as unused surface area adding
+  review burden without a usable feature behind it. Comment schema v3 changes
+  and everything in Stage 6 remain exactly as designed above, unimplemented.
+- **Stage 7 — event-guard scope is every annotation, not just the CM
+  editor.** The design calls out "the CodeMirror suggest editor" as the
+  fix's target; the implementation (`AnnotationEventGuard` in
+  `CodeViewWrapper.tsx`) wraps the whole annotation render — comment form,
+  suggest editor, *and* `CommentBubble`'s reply form — since all three sit
+  inside the same annotation surface Pierre's gutter-drag listeners can
+  hijack, and one wrapper covers all of them for the same cost as one.
+- **Stage 8 — no undo-buffer persistence.** The design's "persist ...
+  undo buffer" doesn't apply: no undo buffer exists (that's Stage 6's, not
+  built this pass). Only comments (including drafts) persist.
