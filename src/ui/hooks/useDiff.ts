@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import type { RefreshMode } from './useSettings'
 
 export interface BinaryFileInfo {
   path: string
@@ -33,9 +34,25 @@ interface DiffData {
 // and `patch` is just that file's fragment ('' if it has no pending diff).
 type FileDiffData = DiffData
 
+// Toolbar's staged/untracked toggle shape — kept narrow (and exported under
+// its original name) because Toolbar's onDiffOptionsChange round-trips this
+// exact shape through updateSettings. useDiff's own options are broader; see
+// UseDiffOptions below.
 export interface DiffOptions {
   staged: boolean
   untracked: boolean
+}
+
+export interface UseDiffOptions extends DiffOptions {
+  // Governs how ambient fs-watcher `file-changed` events get applied. Does
+  // NOT gate `file-written` (an explicit save via the in-browser editor) or
+  // the path:null `diffx refresh` signal — both of those are the user or
+  // agent asking directly, so they always apply immediately regardless of mode.
+  refreshMode: RefreshMode
+  // Files the user is currently "in" (open draft/suggest form, file-editor
+  // modal) — only consulted in 'live-unless-active' mode. An identity change
+  // here does not need to be cheap; it's read from a ref, not an effect dep.
+  activeFiles: Set<string>
 }
 
 // Replace (or remove, or append) one file's fragment within a full unified
@@ -66,15 +83,27 @@ function spliceFilePatch(fullPatch: string, filePath: string, fragment: string):
   return [...lines.slice(0, start), ...fragLines, ...lines.slice(end)].join('\n')
 }
 
-export function useDiff(options: DiffOptions) {
+export function useDiff(options: UseDiffOptions) {
   const [data, setData] = useState<DiffData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Files a `file-changed` event named but that refreshMode deferred instead
+  // of applying — surfaced to the UI as a "N files changed" toast / file-tree
+  // badge. Never populated by `file-written` (always applies immediately).
+  const [staleFiles, setStaleFiles] = useState<Set<string>>(() => new Set())
+
   // Mirrors `data` for the merge path below, which runs inside an event
   // handler closure that would otherwise see a stale `data` from the render
   // that registered the EventSource listener.
   const dataRef = useRef<DiffData | null>(null)
   dataRef.current = data
+  // refreshMode/activeFiles are read from refs (not effect deps) so a
+  // setting change or an active-file toggle doesn't tear down and
+  // reconnect the EventSource.
+  const refreshModeRef = useRef(options.refreshMode)
+  refreshModeRef.current = options.refreshMode
+  const activeFilesRef = useRef(options.activeFiles)
+  activeFilesRef.current = options.activeFiles
 
   const load = useCallback(() => {
     setLoading(true)
@@ -124,25 +153,85 @@ export function useDiff(options: DiffOptions) {
     [options.staged, options.untracked, load],
   )
 
+  const markStale = useCallback((path: string) => {
+    setStaleFiles((prev) => (prev.has(path) ? prev : new Set(prev).add(path)))
+  }, [])
+
+  const applyStaleFile = useCallback(
+    (path: string) => {
+      setStaleFiles((prev) => {
+        if (!prev.has(path)) return prev
+        const next = new Set(prev)
+        next.delete(path)
+        return next
+      })
+      void loadFile(path)
+    },
+    [loadFile],
+  )
+
+  const applyAllStale = useCallback(() => {
+    const paths = [...staleFiles]
+    if (paths.length === 0) return
+    setStaleFiles(new Set())
+    for (const path of paths) void loadFile(path)
+  }, [staleFiles, loadFile])
+
   useEffect(() => {
     void load()
   }, [load])
 
-  // SSE: re-fetch diff when a file changes. `path: null` (the `diffx
-  // refresh` / batch fallback) triggers a full reload; a concrete path goes
-  // through the scoped per-file refetch above.
+  // SSE: react to file-written (explicit save, always applies immediately)
+  // and file-changed (ambient fs-watcher discovery, gated by refreshMode).
+  // `path: null` is the `diffx refresh` / batch fallback and always does a
+  // full reload — both refresh signals are the user/agent asking directly,
+  // so they bypass refreshMode entirely.
   useEffect(() => {
     const es = new EventSource('/api/events')
     es.addEventListener('message', (ev) => {
       try {
         const parsed = JSON.parse(ev.data)
         if (parsed.type !== 'file-written' && parsed.type !== 'file-changed') return
-        if (parsed.path) void loadFile(parsed.path)
-        else void load()
+        const path: string | undefined = parsed.path ?? undefined
+        if (!path) {
+          void load()
+          return
+        }
+        if (parsed.type === 'file-written') {
+          void loadFile(path)
+          return
+        }
+        // file-changed: gate on refreshMode.
+        const mode = refreshModeRef.current
+        if (mode === 'ultra') {
+          void loadFile(path)
+        } else if (mode === 'manual') {
+          markStale(path)
+        } else if (activeFilesRef.current.has(path)) {
+          markStale(path)
+        } else {
+          void loadFile(path)
+        }
       } catch {}
     })
     return () => es.close()
-  }, [load, loadFile])
+  }, [load, loadFile, markStale])
+
+  // live-unless-active: once a deferred file stops being "active" (draft
+  // closed, editor modal closed), apply the queued change automatically —
+  // this is the "applies on close/submit" half of the mode.
+  useEffect(() => {
+    if (options.refreshMode !== 'live-unless-active' || staleFiles.size === 0) return
+    const toApply = [...staleFiles].filter((p) => !options.activeFiles.has(p))
+    if (toApply.length === 0) return
+    setStaleFiles((prev) => {
+      const next = new Set(prev)
+      for (const p of toApply) next.delete(p)
+      return next
+    })
+    for (const p of toApply) void loadFile(p)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.activeFiles, options.refreshMode, staleFiles, loadFile])
 
   return {
     patch: data?.patch ?? null,
@@ -161,5 +250,8 @@ export function useDiff(options: DiffOptions) {
     initialLoading: loading && data === null,
     error,
     reload: load,
+    staleFiles,
+    applyStaleFile,
+    applyAllStale,
   }
 }

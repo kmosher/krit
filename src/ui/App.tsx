@@ -16,9 +16,39 @@ import { FileEditorModal } from './components/FileEditorModal'
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
-  const { patch, repoName, branch, customMode, binaryFiles, fileContents, untrackedFiles, initialLoading, error } = useDiff({
+  // Active file editor: path + the working-tree contents loaded for editing.
+  // Loaded lazily on Edit click (small fetch) rather than carrying every
+  // file's contents through React state.
+  const [editingFile, setEditingFile] = useState<{ path: string; contents: string } | null>(null)
+  // Files with an open draft (comment/suggest form) — merged with
+  // editingFile below into the "active" set that gates 'live-unless-active'.
+  const [activeDraftFiles, setActiveDraftFiles] = useState<Set<string>>(() => new Set())
+  const activeFiles = useMemo(() => {
+    if (!editingFile) return activeDraftFiles
+    const next = new Set(activeDraftFiles)
+    next.add(editingFile.path)
+    return next
+  }, [activeDraftFiles, editingFile])
+
+  const {
+    patch,
+    repoName,
+    branch,
+    customMode,
+    binaryFiles,
+    fileContents,
+    untrackedFiles,
+    initialLoading,
+    error,
+    reload,
+    staleFiles,
+    applyStaleFile,
+    applyAllStale,
+  } = useDiff({
     staged: settings.staged,
     untracked: settings.untracked,
+    refreshMode: settings.refreshMode,
+    activeFiles,
   })
   const { comments, addComment, removeComment, replyToComment, copyAllComments } =
     useComments()
@@ -33,10 +63,6 @@ export function App() {
   })
   const { viewedFiles, setViewed } = useViewed()
   const diffViewerRef = useRef<CodeViewWrapperHandle>(null)
-  // Active file editor: path + the working-tree contents loaded for editing.
-  // Loaded lazily on Edit click (small fetch) rather than carrying every
-  // file's contents through React state.
-  const [editingFile, setEditingFile] = useState<{ path: string; contents: string } | null>(null)
 
   const handleEditFile = useCallback(async (filePath: string) => {
     // Pull current working-tree contents fresh — fileContents bundled in
@@ -242,6 +268,10 @@ export function App() {
         watcherCount={reviewState.watcherCount}
         submittedAt={reviewState.submittedAt}
         onSubmitReview={submitReview}
+        refreshMode={settings.refreshMode}
+        onRefreshModeChange={(refreshMode) => updateSettings({ refreshMode })}
+        staleCount={staleFiles.size}
+        onRefresh={() => (staleFiles.size > 0 ? applyAllStale() : reload())}
       />
       <div className="app-body">
         <aside className={`sidebar ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
@@ -252,6 +282,8 @@ export function App() {
             fileStatsMap={fileStatsMap}
             viewedFiles={viewedFiles}
             untrackedFiles={untrackedSet}
+            staleFiles={staleFiles}
+            onApplyStale={applyStaleFile}
             onFileClick={handleFileClick}
             collapsed={sidebarCollapsed}
             onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
@@ -292,6 +324,7 @@ export function App() {
             onReplyComment={replyToComment}
             onActiveFileChange={setActiveFile}
             onEditFile={handleEditFile}
+            onActiveDraftsChange={setActiveDraftFiles}
           />
         </main>
       </div>

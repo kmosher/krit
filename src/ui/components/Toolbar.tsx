@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import { GitBranch, Send, Settings } from 'lucide-react'
+import { GitBranch, Send, Settings, RefreshCw } from 'lucide-react'
 import type { DiffOptions } from '../hooks/useDiff'
+import type { RefreshMode } from '../hooks/useSettings'
 
 interface ToolbarProps {
   repoName: string
@@ -24,6 +25,12 @@ interface ToolbarProps {
   /** Timestamp the user clicked Submit on this page, or null. */
   submittedAt: number | null
   onSubmitReview: () => Promise<void>
+  refreshMode: RefreshMode
+  onRefreshModeChange: (mode: RefreshMode) => void
+  /** Files with a background change deferred by refreshMode, waiting to be applied. */
+  staleCount: number
+  /** Manual escape hatch: applies any deferred files, or does a full reload if none. */
+  onRefresh: () => void
 }
 
 export function Toolbar({
@@ -46,6 +53,10 @@ export function Toolbar({
   watcherCount,
   submittedAt,
   onSubmitReview,
+  refreshMode,
+  onRefreshModeChange,
+  staleCount,
+  onRefresh,
 }: ToolbarProps) {
   const [copied, setCopied] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -127,6 +138,18 @@ export function Toolbar({
             Unified
           </button>
         </div>
+        <button
+          className={`btn btn-sm ${staleCount > 0 ? 'btn-refresh-stale' : ''}`}
+          onClick={onRefresh}
+          title={
+            staleCount > 0
+              ? `${staleCount} file${staleCount === 1 ? '' : 's'} changed on disk — click to refresh`
+              : 'Refresh the diff'
+          }
+        >
+          <RefreshCw size={12} style={{ marginRight: staleCount > 0 ? 4 : 0, verticalAlign: -1 }} />
+          {staleCount > 0 ? `${staleCount} changed` : null}
+        </button>
         <div className="settings-wrapper" ref={settingsRef}>
           <button
             className={`btn btn-sm settings-btn ${settingsOpen ? 'btn-active' : ''}`}
@@ -161,6 +184,19 @@ export function Toolbar({
                   </label>
                 </>
               )}
+              <div className="settings-item settings-item-spaced">
+                <span>Live refresh</span>
+                <select
+                  className="settings-select"
+                  value={refreshMode}
+                  onChange={(e) => onRefreshModeChange(e.target.value as RefreshMode)}
+                  title="How background file changes (fs-watcher) get applied. Your own edits and `diffx refresh` always apply immediately regardless of this setting."
+                >
+                  <option value="live-unless-active">Live (pause while editing)</option>
+                  <option value="ultra">Always live</option>
+                  <option value="manual">Manual only</option>
+                </select>
+              </div>
               <div className="settings-item settings-item-spaced">
                 <span>Default tab size</span>
                 <select

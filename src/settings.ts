@@ -5,6 +5,15 @@ import { homedir } from 'node:os'
 const CONFIG_DIR = join(homedir(), '.config', 'diffx')
 const SETTINGS_FILE = join(CONFIG_DIR, 'settings.json')
 
+// Client-side policy for how fs-watcher / file-written changes get applied:
+//   - 'manual'             — never auto-apply; the UI surfaces a "N files
+//                             changed" toast and a staleness badge instead.
+//   - 'live-unless-active' — auto-apply, except a file the user is actively
+//                             editing (open draft, suggest-editor, or file
+//                             editor modal), which queues until they close out.
+//   - 'ultra'               — always apply immediately, no exceptions.
+export type RefreshMode = 'manual' | 'live-unless-active' | 'ultra'
+
 export interface Settings {
   staged: boolean
   untracked: boolean
@@ -14,6 +23,7 @@ export interface Settings {
   // Where a new review opens. 'browser' (default) opens a tab; 'app' fires a
   // diffx:// deep link that the desktop app turns into its own window.
   launcher?: 'browser' | 'app'
+  refreshMode: RefreshMode
 }
 
 const DEFAULTS: Settings = {
@@ -21,6 +31,7 @@ const DEFAULTS: Settings = {
   untracked: true,
   diffStyle: 'split',
   defaultTabSize: 4,
+  refreshMode: 'live-unless-active',
 }
 
 export function loadSettings(): Settings {

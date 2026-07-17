@@ -290,6 +290,16 @@ body {
     color: #ffffff;
 }
 
+/* Refresh button once refreshMode has deferred at least one file's change */
+.btn-refresh-stale {
+    border-color: var(--warning, #d97706);
+    color: var(--warning, #d97706);
+}
+
+.btn-refresh-stale:hover {
+    background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
+}
+
 /* Layout */
 .app-body {
     display: flex;
@@ -1315,6 +1325,22 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* Staleness dot — a change is waiting on disk, deferred by refreshMode.
+   Clickable: applies just this file's deferred change. */
+.ft-stale-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--warning, #d97706);
+    flex-shrink: 0;
+    margin-left: 4px;
+    cursor: pointer;
+}
+
+.ft-stale-dot:hover {
+    transform: scale(1.4);
 }
 
 /* Comment count */

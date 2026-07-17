@@ -3,7 +3,6 @@ import {
   ChevronRight,
   Folder,
   FolderOpen,
-  File,
   FilePlus,
   FileMinus,
   FileDiff,
@@ -24,10 +23,19 @@ interface FileTreeProps {
   fileStatsMap: Record<string, { additions: number; deletions: number }>
   viewedFiles: Set<string>
   untrackedFiles: Set<string>
+  // Files with a change deferred by refreshMode ('manual', or
+  // 'live-unless-active' while the file is active) — rendered as a small dot
+  // so the reviewer knows a background edit is waiting to be applied.
+  staleFiles?: Set<string>
+  // Clicking the stale dot applies just that file's deferred change,
+  // instead of the toolbar's refresh-everything escape hatch.
+  onApplyStale?: (filePath: string) => void
   onFileClick: (filePath: string) => void
   collapsed?: boolean
   onToggleCollapse?: () => void
 }
+
+const EMPTY_STALE: Set<string> = new Set()
 
 interface TreeNode {
   name: string
@@ -112,6 +120,8 @@ function TreeDir({
   fileStatsMap,
   viewedFiles,
   untrackedFiles,
+  staleFiles,
+  onApplyStale,
   onFileClick,
   depth,
   defaultExpanded,
@@ -122,6 +132,8 @@ function TreeDir({
   fileStatsMap: Record<string, { additions: number; deletions: number }>
   viewedFiles: Set<string>
   untrackedFiles: Set<string>
+  staleFiles: Set<string>
+  onApplyStale?: (filePath: string) => void
   onFileClick: (filePath: string) => void
   depth: number
   defaultExpanded: boolean
@@ -158,6 +170,8 @@ function TreeDir({
                 fileStatsMap={fileStatsMap}
                 viewedFiles={viewedFiles}
                 untrackedFiles={untrackedFiles}
+                staleFiles={staleFiles}
+                onApplyStale={onApplyStale}
                 onFileClick={onFileClick}
                 depth={depth + 1}
                 defaultExpanded={true}
@@ -171,6 +185,8 @@ function TreeDir({
                 stats={fileStatsMap[child.file?.name ?? '']}
                 viewed={viewedFiles.has(child.file?.name ?? '')}
                 untrackedFiles={untrackedFiles}
+                stale={staleFiles.has(child.file?.name ?? '')}
+                onApplyStale={onApplyStale}
                 onFileClick={onFileClick}
                 depth={depth + 1}
               />
@@ -189,6 +205,8 @@ function TreeFile({
   stats,
   viewed,
   untrackedFiles,
+  stale,
+  onApplyStale,
   onFileClick,
   depth,
 }: {
@@ -198,6 +216,8 @@ function TreeFile({
   stats: { additions: number; deletions: number } | undefined
   viewed: boolean
   untrackedFiles: Set<string>
+  stale: boolean
+  onApplyStale?: (filePath: string) => void
   onFileClick: (filePath: string) => void
   depth: number
 }) {
@@ -210,10 +230,21 @@ function TreeFile({
         className={`ft-row ft-file ${isActive ? 'ft-file-active' : ''} ${viewed ? 'ft-file-viewed' : ''}`}
         style={{ paddingLeft: `${12 + depth * 16 + 20}px` }}
         onClick={() => onFileClick(filePath)}
-        title={filePath}
+        title={stale ? `${filePath} — changed on disk, click the dot to refresh just this file` : filePath}
       >
         {getFileIcon(node.file, viewed, untrackedFiles)}
         <span className="ft-file-name">{node.name}</span>
+        {stale && (
+          <span
+            className="ft-stale-dot"
+            role="button"
+            title="Changed on disk — click to refresh"
+            onClick={(e) => {
+              e.stopPropagation()
+              onApplyStale?.(filePath)
+            }}
+          />
+        )}
         {stats && (stats.additions > 0 || stats.deletions > 0) && (
           <span className="ft-stats">
             {stats.additions > 0 && <span className="ft-stat-add">+{stats.additions}</span>}
@@ -231,7 +262,7 @@ function TreeFile({
   )
 }
 
-export function FileTree({ files, activeFile, commentCounts, fileStatsMap, viewedFiles, untrackedFiles, onFileClick, collapsed, onToggleCollapse }: FileTreeProps) {
+export function FileTree({ files, activeFile, commentCounts, fileStatsMap, viewedFiles, untrackedFiles, staleFiles = EMPTY_STALE, onApplyStale, onFileClick, collapsed, onToggleCollapse }: FileTreeProps) {
   const [filter, setFilter] = useState('')
 
   const filteredFiles = useMemo(() => {
@@ -296,6 +327,8 @@ export function FileTree({ files, activeFile, commentCounts, fileStatsMap, viewe
               fileStatsMap={fileStatsMap}
               viewedFiles={viewedFiles}
               untrackedFiles={untrackedFiles}
+              staleFiles={staleFiles}
+              onApplyStale={onApplyStale}
               onFileClick={onFileClick}
               depth={0}
               defaultExpanded={true}
@@ -309,6 +342,8 @@ export function FileTree({ files, activeFile, commentCounts, fileStatsMap, viewe
               stats={fileStatsMap[node.file?.name ?? '']}
               viewed={viewedFiles.has(node.file?.name ?? '')}
               untrackedFiles={untrackedFiles}
+              stale={staleFiles.has(node.file?.name ?? '')}
+              onApplyStale={onApplyStale}
               onFileClick={onFileClick}
               depth={0}
             />

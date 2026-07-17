@@ -20,6 +20,7 @@ interface DiffViewerProps {
   onReplyComment: (id: string, body: string) => void
   onActiveFileChange?: (filePath: string | null) => void
   onEditFile?: (filePath: string) => void
+  onActiveDraftsChange?: (files: Set<string>) => void
 }
 
 export const DiffViewer = memo(
@@ -39,6 +40,7 @@ export const DiffViewer = memo(
       onReplyComment,
       onActiveFileChange,
       onEditFile,
+      onActiveDraftsChange,
     },
     ref,
   ) {
@@ -115,6 +117,7 @@ export const DiffViewer = memo(
             onReplyComment={onReplyComment}
             onActiveFileChange={onActiveFileChange}
             onEditFile={onEditFile}
+            onActiveDraftsChange={onActiveDraftsChange}
           />
         )}
       </div>

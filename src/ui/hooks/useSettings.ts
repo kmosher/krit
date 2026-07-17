@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 
+export type RefreshMode = 'manual' | 'live-unless-active' | 'ultra'
+
 export interface Settings {
   staged: boolean
   untracked: boolean
   diffStyle: 'split' | 'unified'
   defaultTabSize: number
   browser?: string
+  refreshMode: RefreshMode
 }
 
 const DEFAULTS: Settings = {
@@ -13,6 +16,7 @@ const DEFAULTS: Settings = {
   untracked: true,
   diffStyle: 'split',
   defaultTabSize: 4,
+  refreshMode: 'live-unless-active',
 }
 
 export function useSettings() {

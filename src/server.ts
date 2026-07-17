@@ -3,11 +3,12 @@ import { join, extname, resolve } from 'node:path'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { streamSSE, type SSEStreamingApi } from 'hono/streaming'
-import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, getFileContentAtRef, resolveDiffRefs, WORKING_TREE_REF, getUntrackedFilePaths, writeWorkingTreeFile } from './git.js'
+import { getGitDiff, getCustomGitDiff, getRepoName, getBranchName, getFileContent, getFileContentAtRef, getRepoRoot, resolveDiffRefs, WORKING_TREE_REF, getUntrackedFilePaths, writeWorkingTreeFile } from './git.js'
 import { loadSettings, saveSettings } from './settings.js'
 import { InMemoryCommentStore } from './comments.js'
 import type { CommentStore } from './comments.js'
 import { isSafePath } from './path.js'
+import { watchRepo, type RepoWatcher } from './watcher.js'
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -138,6 +139,14 @@ export function createApp(
     await Promise.all([...subscribers].map((s) => sendTo(s, payload)))
   }
   const broadcastState = () => broadcast({ type: 'state', ...snapshotState() })
+
+  // Always-on fs-watcher: catches changes made outside the in-browser editor
+  // (an agent's own Edit tool, `git checkout`, a build step) without relying
+  // on the agent to remember to call `diffx refresh`. Content-hashed and
+  // debounced in watchRepo() so it stays quiet on mtime-only churn.
+  const repoWatcher: RepoWatcher = watchRepo(getRepoRoot(), (path) => {
+    void broadcast({ type: 'file-changed', path })
+  })
 
   // Bundle both file sides into /api/diff so CodeView can render with full
   // metadata (isPartial:false) and enable hunk-context expansion. Files over
@@ -468,7 +477,7 @@ export function createApp(
     }
   })
 
-  return app
+  return { app, closeWatcher: () => repoWatcher.close() }
 }
 
 // Grace period after the last subscriber (browser tab or `diffx watch`)
@@ -500,11 +509,12 @@ export function startServer(options: {
     }
     if (!everHadSubscriber || idleTimer) return
     idleTimer = setTimeout(() => {
+      void closeWatcher()
       server.close(() => process.exit(0))
     }, IDLE_SHUTDOWN_MS)
   }
 
-  const app = createApp(options.clientDir, options.customDiffArgs, undefined, onSubscriberCountChange)
+  const { app, closeWatcher } = createApp(options.clientDir, options.customDiffArgs, undefined, onSubscriberCountChange)
 
   return new Promise((resolve) => {
     server = serve({
