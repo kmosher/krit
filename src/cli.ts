@@ -175,6 +175,9 @@ process.on('SIGINT', () => {
   process.exit(0)
 })
 process.on('SIGTERM', () => {
+  // Log before dying: an external kill (task manager, harness, OS) is
+  // otherwise indistinguishable from a crash when reading the output later.
+  console.log('Received SIGTERM — shutting down.')
   cleanup()
   process.exit(0)
 })

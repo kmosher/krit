@@ -755,7 +755,18 @@ export function startServer(options: {
   // down once createApp decides it's time.
   const onShutdown = () => {
     void closeWatcher()
+    console.log('Idle shutdown: no browser connected.')
     server.close(() => process.exit(0))
+    // server.close() only resolves once every open connection ends — and a
+    // still-attached `diffx watch` SSE stream never ends on its own (it waits
+    // for the server), which would deadlock the shutdown with the watcher and
+    // server each waiting on the other. The review-ended broadcast has already
+    // been flushed by the time we get here, so sever whatever's left.
+    const s = server as unknown as { closeAllConnections?: () => void }
+    s.closeAllConnections?.()
+    // Belt and suspenders: if anything still keeps the event loop alive
+    // (a connection type closeAllConnections missed), exit anyway.
+    setTimeout(() => process.exit(0), 2_000).unref()
   }
 
   const commentStore = options.commentsFilePath ? new FileBackedCommentStore(options.commentsFilePath) : undefined

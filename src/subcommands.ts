@@ -221,7 +221,6 @@ const CLIENTS_DEBOUNCE_MS = 4000
 export async function cmdWatch(): Promise<void> {
   console.error('watch: connected — streaming comment events.')
   let submitted = false
-  let reviewEnded = false
   let lastEmittedBrowsers = -1
   let pendingBrowsers: number | null = null
   let clientsDebounce: NodeJS.Timeout | undefined
@@ -239,9 +238,14 @@ export async function cmdWatch(): Promise<void> {
       submitted = true
       process.stdout.write(JSON.stringify(ev) + '\n')
     } else if (ev.type === 'review-ended') {
-      reviewEnded = true
+      // Terminal event — exit now instead of waiting for the connection to
+      // close. The server tears itself down right after broadcasting this,
+      // and holding our SSE stream open only delays (older builds: deadlocks)
+      // that shutdown.
       if (clientsDebounce) clearTimeout(clientsDebounce)
       process.stdout.write(JSON.stringify(ev) + '\n')
+      console.error('watch: reviewer left without submitting.')
+      process.exit(3)
     } else if (ev.type === 'state') {
       // Was previously swallowed entirely; now debounced into a `clients`
       // presence line so the agent can tell whether anyone's still reviewing.
@@ -256,10 +260,6 @@ export async function cmdWatch(): Promise<void> {
   if (submitted) {
     console.error('watch: server shut down after Done reviewing.')
     process.exit(0)
-  }
-  if (reviewEnded) {
-    console.error('watch: reviewer left without submitting.')
-    process.exit(3)
   }
   console.error('watch: server closed the connection before Done reviewing.')
   process.exit(2)
