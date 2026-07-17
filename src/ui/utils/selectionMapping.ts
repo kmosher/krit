@@ -23,6 +23,11 @@
 //    start to the selection point and take `.toString().length` — that
 //    concatenates all text content in document order regardless of markup,
 //    matching what the reviewer visually selected.
+// 3. Range.toString() has no concept of line boundaries either — for a
+//    multi-line selection it silently drops the line break (see
+//    reconstructSelectedText below), so the final selectedText is rebuilt
+//    from the range's cloned per-line DOM structure instead of trusting
+//    Range.toString() directly.
 
 export interface SelectionAnchor {
   startLine: number
@@ -74,6 +79,30 @@ function columnWithinLine(lineEl: HTMLElement, node: Node, offset: number): numb
   }
 }
 
+// Range.toString() concatenates every text node's content in document
+// order with nothing inserted at element boundaries — it has no concept of
+// "these two chunks were on different lines," so a selection spanning a
+// line break comes back with the line break silently dropped (in practice
+// replaced by whatever incidental whitespace text node sits between the
+// rendered line's DOM blocks, which is how this showed up as stray spaces
+// instead of newlines). Reconstruct multi-line text properly by cloning
+// the range's contents (which preserves the per-line [data-line]
+// structure, including partial clones of the first/last lines) and
+// joining each line block's own text with real '\n's.
+function reconstructSelectedText(range: Range, fallback: string): string {
+  let fragment: DocumentFragment
+  try {
+    fragment = range.cloneContents()
+  } catch {
+    return fallback
+  }
+  const lineBlocks = fragment.querySelectorAll('[data-line]')
+  if (lineBlocks.length === 0) return fallback // single-line selection: no line boundary to reconstruct
+  return Array.from(lineBlocks)
+    .map((el) => el.textContent ?? '')
+    .join('\n')
+}
+
 // Maps a Range to a character anchor. Returns null if either endpoint
 // isn't inside a rendered code line (data-line ancestor missing) or the
 // mapping is otherwise inconsistent — callers should treat that as "don't
@@ -94,7 +123,7 @@ export function mapRangeToAnchor(range: Range): SelectionAnchor | null {
   const endColumn = columnWithinLine(endLineEl, range.endContainer, range.endOffset)
   if (startColumn === null || endColumn === null) return null
 
-  const selectedText = range.toString()
+  const selectedText = reconstructSelectedText(range, range.toString())
   if (selectedText.length === 0) return null
 
   // Range should already be start-before-end (Selection.getRangeAt(0)

@@ -580,17 +580,28 @@ export const CodeViewWrapper = memo(
           const anchor = mapRangeToAnchor(range)
           if (!anchor) return
           const hovered = lastHoveredRef.current
-          // Without a known hovered line we don't have a reliable file/side
-          // to anchor the comment to -- skip rather than guess. In practice
-          // the pointer has always crossed a line (firing onLineEnter)
-          // before a mouseup could end a same-surface drag.
-          if (!hovered) return
+          // onLineEnter (which populates lastHoveredRef) only fires when
+          // the pointer *crosses into* a line. Right after a per-file
+          // remount (e.g. a delete's file-changed refetch) the pointer can
+          // already be resting inside the line the user is about to drag
+          // over, so onLineEnter never re-fires and hovered is stale null
+          // -- bailing here made the pill flaky on exactly that first
+          // drag. Fall back to the scroll-tracked "active" file (already
+          // maintained independent of hover, see handleScroll below) with
+          // side defaulting to 'additions', the same fallback used
+          // elsewhere in this file (handleGutterClick) when the side can't
+          // be determined precisely -- an imprecise guess beats no pill at
+          // all, and this path is only reached when hover tracking hasn't
+          // caught up yet.
+          const filePath = hovered?.filePath ?? lastActiveFileRef.current
+          if (!filePath) return
+          const side = hovered?.side ?? 'additions'
           const rect = range.getBoundingClientRect()
           setTextSelection({
             x: rect.right,
             y: rect.bottom + 6,
-            filePath: hovered.filePath,
-            side: hovered.side,
+            filePath,
+            side,
             anchor,
           })
         })
