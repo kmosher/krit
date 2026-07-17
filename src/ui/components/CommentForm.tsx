@@ -95,7 +95,11 @@ export function CommentForm({
   useEffect(() => {
     if (suggestMode) {
       // Focus the CodeMirror editor as soon as it mounts so the user can start
-      // typing the rewrite immediately.
+      // typing the rewrite immediately. Kept as an rAF (rather than a plain
+      // synchronous .focus()) even after the AnnotationEventGuard propagation
+      // fix — the underlying reason is CM mounting its DOM one tick after this
+      // effect runs (react-codemirror wires up the view in its own effect),
+      // not the drag/focus-stealing bug that guard fixes.
       requestAnimationFrame(() => cmRef.current?.view?.focus())
     }
   }, [suggestMode])
@@ -105,6 +109,10 @@ export function CommentForm({
   // values instead of a stale snapshot.
   const submitRef = useRef<() => void>(() => {})
   const cancelRef = useRef<() => void>(onCancel)
+  // Same staleness problem for the Escape handler's "is there a non-trivial
+  // edit to lose" check.
+  const suggestionDirtyRef = useRef(false)
+  suggestionDirtyRef.current = suggestionText !== originalLines && suggestionText.trim() !== ''
 
   // Shared by both "Comment"/"Suggest rewrite" (dispatch=onSubmit) and "Save
   // as draft" (dispatch=onSaveDraft) — same validation and suggestion-payload
@@ -147,8 +155,14 @@ export function CommentForm({
   // Memoized so the extensions array reference is stable across renders —
   // CodeMirror reconfigures on prop change, and a fresh array every render
   // both wastes work and can lose intermediate language loads.
-  // - Mod-Enter / Escape are wired at Prec.high so they win over CM's
-  //   defaults (Escape would otherwise just clear focus).
+  // - Mod-Enter is wired at Prec.high so it wins over CM's defaults.
+  // - Escape is scoped: if CM itself has something to do with it (more than
+  //   one selection range — the standard "Escape collapses multi-cursor"
+  //   behavior), we return false and let CM's own keymap handle it first,
+  //   rather than discarding the whole form on the very first Escape press.
+  //   Only once CM has nothing left to do with Escape do we treat it as
+  //   "cancel" — and if the rewrite has actually been edited, confirm before
+  //   discarding it.
   // - syntaxHighlighting(defaultHighlightStyle) is included explicitly because
   //   basicSetup's copy uses fallback:true, which can no-op when a language
   //   extension reconfigures in after mount.
@@ -157,7 +171,17 @@ export function CommentForm({
       Prec.high(
         keymap.of([
           { key: 'Mod-Enter', run: () => { submitRef.current(); return true } },
-          { key: 'Escape', run: () => { cancelRef.current(); return true } },
+          {
+            key: 'Escape',
+            run: (view) => {
+              if (view.state.selection.ranges.length > 1) return false
+              if (suggestionDirtyRef.current && !window.confirm('Discard your suggested rewrite?')) {
+                return true // handled — swallow the key, but don't cancel
+              }
+              cancelRef.current()
+              return true
+            },
+          },
         ]),
       ),
       pierreSyntaxHighlighting(scheme),
