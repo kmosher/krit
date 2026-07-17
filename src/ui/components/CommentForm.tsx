@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react'
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror'
 import { Prec } from '@codemirror/state'
 import { keymap } from '@codemirror/view'
@@ -85,8 +85,23 @@ export function CommentForm({
   }
   const bodyRef = useRef<HTMLTextAreaElement>(null)
   const cmRef = useRef<ReactCodeMirrorRef>(null)
+  const formRef = useRef<HTMLDivElement>(null)
   const langExt = useLanguageExtension(filePath)
   const scheme = useColorScheme()
+
+  // This form is portaled into CodeView's shadow root, and CodeMirror must be
+  // told about that via its `root` option or it assumes `document`. With the
+  // wrong root, WebKit breaks in two ways: root.activeElement retargets to the
+  // shadow host so CM thinks it's never focused (and then skips writing cursor
+  // moves back to the DOM — arrow keys appear dead), and selection reads come
+  // back host-retargeted. CM's own Safari shadow-DOM workarounds
+  // (getComposedRanges) only engage when view.root IS the shadow root.
+  // Resolved from the mounted DOM pre-paint; the editor render is gated on it.
+  const [cmRoot, setCmRoot] = useState<ShadowRoot | Document | null>(null)
+  useLayoutEffect(() => {
+    const rootNode = formRef.current?.getRootNode()
+    setCmRoot(rootNode instanceof ShadowRoot ? rootNode : document)
+  }, [])
 
   useEffect(() => {
     bodyRef.current?.focus()
@@ -217,7 +232,7 @@ export function CommentForm({
     />
   )
 
-  const suggestionField = suggestMode ? (
+  const suggestionField = suggestMode && cmRoot ? (
     <div className="comment-suggestion-cm">
       <CodeMirror
         ref={cmRef}
@@ -225,6 +240,7 @@ export function CommentForm({
         onChange={(v) => setSuggestionText(v)}
         extensions={cmExtensions}
         theme={scheme}
+        root={cmRoot}
         basicSetup={{
           lineNumbers: false,
           foldGutter: false,
@@ -241,7 +257,7 @@ export function CommentForm({
   ) : null
 
   return (
-    <div className="comment-form">
+    <div className="comment-form" ref={formRef}>
       {/* In suggest mode the rewrite is the primary input — render it first
           and demote the body to a small "optional description" below. */}
       {suggestMode ? (
