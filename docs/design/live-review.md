@@ -135,9 +135,10 @@ the loop. Stages are independently shippable in this order.
 
 ## Decisions
 
-Implemented: Stages 1-5, 7, 8 (Stage 4 partial — see its entry below).
-Stage 6 not started (see its own entry below for why). See branch
-`kmosher/glowup` for commit-by-commit detail.
+Implemented: all 8 stages. See branch `kmosher/glowup` for commit-by-commit
+detail. Stage 6's client-side DOM-selection mapping and pill/drag
+interaction are implemented but not independently browser-verified in
+this pass — see that entry below.
 
 - **Stage 1 — file-set changes still fully remount.** `CodeViewHandle` (the
   `@pierre/diffs` API surface diffx builds on) has `updateItem` and
@@ -176,17 +177,16 @@ Stage 6 not started (see its own entry below for why). See branch
   already reflects new positions), and the fs-watcher independently detects
   the same write ~200ms later and calls it again. The second call is a no-op
   (positions already match) — redundant but harmless, not worth suppressing.
-- **Stage 4 — the `/api/events-ws` agent endpoint was not built.** The
-  installed `@hono/node-server` (1.19.12) has no `/ws` export in this
-  version's `dist/`; shipping it would mean either bumping that dependency
-  (unverified blast radius) or hand-rolling a `ws`-package integration
-  against the raw `http.Server` `serve()` returns. Both are bigger, riskier
-  changes than fit alongside the rest of Stage 4. `diffx watch` (SSE) is
-  still the only agent-facing stream; it now also forwards `comment-updated`,
-  `clients`, and `review-ended`, so an agent using it already gets the
-  Stage 3/4 presence and re-anchoring signals — it just isn't a native `ws:`
-  Monitor source yet. The "agent connected" toolbar dot from the design (tied
-  to a ws subscriber's `role:'agent'`) is deferred with it.
+- **Stage 4 — `/api/events-ws` hand-rolled with `ws`, not an
+  `@hono/node-server` bump.** The installed version (1.19.12) has no `/ws`
+  export in its `dist/`; per direction, `WebSocketServer({noServer:true})`
+  attaches to the raw `http.Server` `serve()` returns via
+  `server.on('upgrade', ...)`, gated to the `/api/events-ws` path.
+  `Subscriber` became transport-agnostic (`send(payload): Promise<void>`)
+  so `broadcast`/`sendTo` don't care whether a subscriber is SSE or native
+  ws. Verified with a small Node `ws` client: connects, receives
+  broadcasts, gets the debounced `clients` line, and `agentCount` correctly
+  returns to 0 after disconnect.
 - **Stage 5 — drafts are opt-in, not opt-out, at the read boundary.**
   `GET /api/comments` filters out drafts unless the caller passes
   `?includeDrafts=true`, which only the browser UI's fetch sends. This
@@ -202,20 +202,28 @@ Stage 6 not started (see its own entry below for why). See branch
   small, since the server-side PUT path (`status: 'open'` on one comment)
   already exists and could grow a dedicated button later without a schema
   change.
-- **Stage 6 — not started.** The core of this stage — mapping a native DOM
-  text selection inside CodeView's rendered lines to (line, column) offsets,
-  and positioning a floating selection pill relative to that selection — is
-  UI geometry that has to be verified by actually dragging a selection in a
-  running browser. That kind of verification was out of scope for this pass
-  (server smoke-testing via curl only, no browser driving), and shipping the
-  selection-pill/character-range/direct-delete/undo-buffer stack unverified
-  risked landing something that *looks* complete in a diff review but is
-  subtly broken in ways only a live interaction would surface — worse than
-  not landing it. Implementing only the server half (delete-splice endpoint,
-  undo buffer, `user-edit` event, schema v3 fields) was considered and
-  rejected: with no UI trigger, it would sit as unused surface area adding
-  review burden without a usable feature behind it. Comment schema v3 changes
-  and everything in Stage 6 remain exactly as designed above, unimplemented.
+- **Stage 6 — implemented, browser-verification split out.** Mapping a
+  native DOM text selection to (line, column) offsets and positioning a
+  floating pill is UI geometry that's only really confirmed by dragging a
+  selection in a running browser — out of scope for this agent's own
+  toolset (curl-only smoke testing). It's implemented based on reading
+  `@pierre/diffs`' actual rendered output (open shadow root; `data-line`
+  per rendered line; no side attribute, so side comes from Pierre's own
+  hover tracking instead of DOM guessing — see `selectionMapping.ts`'s
+  header comment for the full reasoning), with live Chrome verification
+  of the interaction itself handled as a separate pass by whoever has
+  browser automation available. Everything not dependent on live DOM
+  interaction (schema v3 persistence/validation, delete-splice, undo
+  buffer, `user-edit` event) was verified via curl against a running
+  server.
+- **Stage 6 — side is a best-effort heuristic, not a certainty.** There's
+  no DOM attribute distinguishing which split-view column (additions vs
+  deletions) a selection's text belongs to, so the pill uses whichever
+  side the pointer most recently hovered (`onLineEnter`'s `annotationSide`,
+  already tracked for the existing line-selection-clearing behavior). If
+  the mouse ends a drag over a different line/side than where it started
+  hovering, the anchor's `side` could be wrong — a real gap a live browser
+  pass should specifically probe.
 - **Stage 7 — event-guard scope is every annotation, not just the CM
   editor.** The design calls out "the CodeMirror suggest editor" as the
   fix's target; the implementation (`AnnotationEventGuard` in
