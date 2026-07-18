@@ -802,6 +802,25 @@ async fn api_events_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> R
     ws.on_upgrade(move |socket| agent_ws(state, socket))
 }
 
+/// Events the agent stream forwards. Agents only hear *human-originated*
+/// signals: every ws frame is a Monitor wake-up costing the agent tokens, and
+/// the ambient events (fs-watcher file-changed, the agent's own `krit
+/// refresh` echo, comment-updated re-anchor fallout) are usually caused by
+/// the agent's own edits — it would be paying to listen to itself work. The
+/// UI keeps receiving all of these over SSE; the agent sees current comment
+/// positions/outdated flags via the CLI whenever it acts on a comment.
+fn agent_visible(event: &Event) -> bool {
+    match event {
+        Event::FileChanged { .. } => false,
+        Event::FileWritten { path: None } => false, // agent's own refresh
+        Event::CommentUpdated { .. } => false,
+        // file-written{path} = krit editor save; user-edit = direct
+        // delete/undo. Both provably human — they only flow through UI
+        // endpoints.
+        _ => true,
+    }
+}
+
 async fn agent_ws(state: AppState, mut socket: WebSocket) {
     let (mut rx, _guard) = state.hub.subscribe(Role::Agent);
     // Agent subscribers never see raw `state` snapshots — they get the
@@ -845,6 +864,9 @@ async fn agent_ws(state: AppState, mut socket: WebSocket) {
                         ));
                     }
                     Ok(event) => {
+                        if !agent_visible(&event) {
+                            continue;
+                        }
                         let terminal = matches!(event, Event::ReviewEnded { .. });
                         let frame = serde_json::to_string(&event).unwrap_or_default();
                         if socket.send(Message::Text(frame.into())).await.is_err() {
