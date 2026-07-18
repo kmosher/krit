@@ -84,6 +84,42 @@ Vertical slices, each leaving a runnable demo — never an 80%-done valley:
 - Known v1 gaps to revisit under 1.3.0: file add/remove full-remount (no
   `removeItem`), `FileDiffContentsLoader` for perf.
 
+## Roadmap: ideas adopted from crit.md
+
+[crit](https://github.com/tomasz-tomczyk/crit) is a same-niche tool (Go
+single-binary, round-based batch protocol, framework-free vanilla-JS diff
+renderer — the opposite bets from ours on both interaction model and frontend).
+Ideas worth adopting, roughly in order:
+
+1. **Drift tri-state on comment anchors.** Alongside `selectedText`, carry
+   `quote`/`anchor`/`drifted` semantics: agent instructions prefer the quoted
+   text over line numbers, and `drifted` explicitly means "relocation failed,
+   line numbers approximate" rather than v1's binary `outdated`. Design into
+   the protocol enum from the start. Their relocation appears to build on
+   diff-match-patch — consider a fuzzy-match primitive of that family for
+   re-anchoring instead of bespoke heuristics.
+2. **Plan-mode review.** Line-anchored margin comments on a markdown document
+   (a plan, a design doc) — same store, same events, renderer swaps to
+   markdown. Argument auto-detection picks the mode: `krit plan.md`,
+   `krit -- <git-args>`, bare = branch diff.
+3. **Round-to-round diff.** "What changed since your last look" as a
+   first-class view composed with live refresh: snapshot on each
+   submit/refresh boundary, offer current-vs-last-round.
+4. **Lifecycle hooks, with crit's security posture.** Opt-in
+   `on_finish_*` shell hooks with JSON stdin payload; project-level hooks
+   gated behind an explicit trust step; anything that executes configured
+   commands is global-config-only so a cloned repo can never run code.
+5. **Resolution etiquette toggle.** Keep v1's default (agent resolves what it
+   believes it addressed) but add a mode where resolving is reserved to the
+   reviewer and the agent only replies.
+6. **`krit status`.** State-file info plus daemon liveness in one command.
+7. **Story mode.** Optional generated narrative layer over a large diff —
+   prologue + thematic chapters grouping hunks; an explainer, never a judge.
+   Our live agent connection could generate it in-session.
+
+Explicitly not adopted: their round-based blocking protocol (we keep the live
+event stream), and the share/self-host server (out of scope).
+
 ## Name
 
 `krit` — review-flavored (critique), four letters, personal-k prefix.
