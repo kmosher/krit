@@ -914,6 +914,19 @@ async fn serve_ui(uri: axum::http::Uri) -> Response {
     }
 }
 
+/// KRIT_LOG=1 traces every request — debugging aid for embedded-webview
+/// clients where devtools aren't reachable.
+async fn log_requests(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if std::env::var("KRIT_LOG").is_err() {
+        return next.run(req).await;
+    }
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let res = next.run(req).await;
+    eprintln!("krit: {method} {uri} -> {}", res.status());
+    res
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/diff", get(api_diff))
@@ -940,5 +953,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/events", get(api_events))
         .route("/api/events-ws", get(api_events_ws))
         .fallback(serve_ui)
+        .layer(axum::middleware::from_fn(log_requests))
         .with_state(state)
 }
