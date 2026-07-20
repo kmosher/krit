@@ -288,11 +288,60 @@ fn print_manual_url_hint(url: &str) {
     );
 }
 
+/// Percent-encode a query-param value (RFC 3986 unreserved set kept bare).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+// Best-effort window title for the desktop app — repo + branch. Cosmetic, so a
+// git hiccup just drops it; the review still opens.
+fn review_window_title() -> Option<String> {
+    let repo = git::repo_name();
+    if repo.is_empty() {
+        return None;
+    }
+    let branch = git::branch_name();
+    if branch.is_empty() {
+        Some(repo)
+    } else {
+        Some(format!("{repo} · {branch}"))
+    }
+}
+
 fn launch_review_ui(url: &str) {
+    let settings = settings::load_settings();
+
+    if settings["launcher"].as_str() == Some("app") {
+        // The desktop app claims the diffx:// scheme; this deep link routes to
+        // the running instance (cold-starting it if needed), which reads `url`
+        // and spawns a window pointed at this review's server.
+        let mut deep_link = format!("diffx://review?url={}", urlencode(url));
+        if let Some(title) = review_window_title() {
+            deep_link.push_str(&format!("&title={}", urlencode(&title)));
+        }
+        match open::that(&deep_link) {
+            Ok(()) => println!(
+                "Opened the diffx app. It's now waiting for you to leave inline comments."
+            ),
+            Err(err) => eprintln!(
+                "Could not reach the diffx app ({err}); is it installed? Falling back to the URL."
+            ),
+        }
+        print_manual_url_hint(url);
+        return;
+    }
+
     // settings.browser, when set, names a specific browser app.
-    let browser = settings::load_settings()["browser"]
-        .as_str()
-        .map(|s| s.to_string());
+    let browser = settings["browser"].as_str().map(|s| s.to_string());
     let result = match &browser {
         Some(app) => open::with(url, app),
         None => open::that(url),
