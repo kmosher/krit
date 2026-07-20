@@ -65,6 +65,19 @@ Vertical slices, each leaving a runnable demo — never an 80%-done valley:
 5. **Polish**: drafts, char-anchored comments, suggest-edit apply — contract
    parity checklist against v1.
 
+**Status: all five slices are live-verified.** Beyond the skeleton, krit also
+carries: a `.gitignore`-aware watcher (`git check-ignore` per changed path),
+a human-only agent event stream (agents don't hear their own edits), the
+`launcher: "app"` deep-link path (reuses the `diffx://` scheme the desktop
+app claims — a `krit://` identity would be an app-side change), and
+`KRIT_LOG=1` request tracing for debugging embedded-webview clients. krit is
+now in field use; remaining work is bugfixes from real sessions plus the
+tracks below.
+
+Contract quirk preserved deliberately: `clients {browsers}` counts `role:ui`
+subscribers, and the v1 UI opens two EventSources per tab (`useDiff` +
+`useReviewState`), so one tab reports `browsers: 2` — identical to v1.
+
 ## Coexistence with v1
 
 - v1 (`diffx`, Node) stays installed and untouched on `main`; krit lives on
