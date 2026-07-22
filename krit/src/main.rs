@@ -200,16 +200,6 @@ async fn serve(
         custom_diff_args,
     );
 
-    // Always-on fs-watcher; sync callback (broadcast::send is sync), safe
-    // from the watcher thread. Kept alive until shutdown by binding.
-    let watcher_state = app_state.clone();
-    let _watcher = watcher::watch_repo(repo_root.clone(), move |path| {
-        server::reanchor_and_broadcast(&watcher_state, &path);
-        watcher_state
-            .hub
-            .broadcast(types::Event::FileChanged { path });
-    });
-
     let bind_addr = format!("{}:{}", host, port_arg.unwrap_or(0));
     let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
@@ -315,6 +305,26 @@ async fn serve(
         });
     } else {
         print_manual_url_hint(&local_url);
+    }
+
+    // Always-on fs-watcher; sync callback (broadcast::send is sync), safe
+    // from the watcher thread. Setup runs on a blocking thread because the
+    // debouncer's file-ID cache scans the whole repo tree — long enough on a
+    // large repo to look like a hung server if it gates startup or serving.
+    // The watcher is deliberately leaked: it must live for the whole process,
+    // and every exit path goes through process::exit anyway.
+    {
+        let watcher_state = app_state.clone();
+        let watcher_root = repo_root.clone();
+        tokio::task::spawn_blocking(move || {
+            let watcher = watcher::watch_repo(watcher_root, move |path| {
+                server::reanchor_and_broadcast(&watcher_state, &path);
+                watcher_state
+                    .hub
+                    .broadcast(types::Event::FileChanged { path });
+            });
+            std::mem::forget(watcher);
+        });
     }
 
     let router = server::build_router(app_state);
