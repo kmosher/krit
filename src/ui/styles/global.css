@@ -729,7 +729,8 @@ body {
     opacity: 1;
 }
 
-/* Comment form */
+/* Comment form. 600px keeps prose comments readable; suggest mode lifts
+   the cap — a code rewrite wants the code's width, not prose width. */
 .comment-form {
     max-width: 600px;
     padding: 12px 16px;
@@ -737,6 +738,10 @@ body {
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
+}
+
+.comment-form-suggest {
+    max-width: none;
 }
 
 .comment-form textarea {

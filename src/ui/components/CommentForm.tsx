@@ -260,7 +260,7 @@ export function CommentForm({
   ) : null
 
   return (
-    <div className="comment-form" ref={formRef}>
+    <div className={`comment-form ${suggestMode ? 'comment-form-suggest' : ''}`} ref={formRef}>
       {/* In suggest mode the rewrite is the primary input — render it first
           and demote the body to a small "optional description" below. */}
       {suggestMode ? (
