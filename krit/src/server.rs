@@ -120,10 +120,14 @@ fn mime_for(path: &str) -> &'static str {
 // ---------- diff assembly ----------
 
 fn parse_file_paths(patch: &str) -> Vec<String> {
+    // Order-preserving dedup: the Vec keeps first-seen order (the response
+    // orders file contents by it), a HashSet does the membership check so a
+    // several-thousand-file review isn't O(files²) in `Vec::contains`.
     let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for line in patch.lines() {
         if let Some(p) = diff_header_path(line)
-            && !paths.contains(&p)
+            && seen.insert(p.clone())
         {
             paths.push(p);
         }
@@ -988,6 +992,16 @@ mod tests {
             parse_file_paths(PATCH),
             vec!["src/a.rs", "img.png", "b.txt"]
         );
+    }
+
+    #[test]
+    fn parse_file_paths_dedupes_keeping_first_seen_order() {
+        // A repeated header for an already-seen file collapses to one entry,
+        // and first-seen order is preserved (the response orders by it).
+        let patch = "diff --git a/z.rs b/z.rs\n@@ -1 +1 @@\n-a\n+b\n\
+                     diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-c\n+d\n\
+                     diff --git a/z.rs b/z.rs\n@@ -2 +2 @@\n-e\n+f";
+        assert_eq!(parse_file_paths(patch), vec!["z.rs", "a.rs"]);
     }
 
     #[test]
