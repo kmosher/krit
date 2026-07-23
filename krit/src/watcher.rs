@@ -24,6 +24,12 @@ const DEBOUNCE_MS: u64 = 200;
 /// read still covers everything a human is actually reviewing.
 const HASH_SIZE_CAP: u64 = 8 * 1024 * 1024;
 
+/// Bytes sampled from each end of an oversized file to build its content
+/// signature. Large enough to catch the header/footer churn a real edit almost
+/// always touches (an append, a re-serialized preamble), small enough that the
+/// read stays negligible however large the file is.
+const HASH_SAMPLE_BYTES: usize = 8 * 1024;
+
 /// Fast-path filter, checked before the git-aware one: cheap enough to run on
 /// every post-debounce path so the highest-churn directories never spawn a
 /// `git check-ignore` subprocess (a `pnpm install` / `cargo build` under the
@@ -80,20 +86,34 @@ pub struct RepoWatcher {
 }
 
 fn content_hash(path: &Path) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
     let meta = std::fs::metadata(path).ok()?;
     let mut h = DefaultHasher::new();
-    // Oversized files (build artifacts, checkout debris) hash a cheap signature
-    // — length + mtime — instead of their bytes. This trades one property of
-    // the byte hash: a genuinely byte-identical rewrite of a >8 MiB file whose
-    // mtime moved will now emit a spurious change (mtime churn we'd otherwise
-    // swallow). We accept that at this size — such files are almost always
-    // ignored build output that never reaches `on_change` anyway — because the
-    // property we must not lose, "never miss a real change", still holds, and
-    // we never read gigabytes to learn it.
+    // Oversized files (build artifacts, checkout debris) are never read whole —
+    // pulling a multi-hundred-MB file into RAM just to hash it is the observed
+    // ~2 GB RSS spike. The signature is instead length plus a bounded sample of
+    // the head and tail bytes. Like the small-file path it stays content-based,
+    // not mtime-based, so an mtime-only touch (checkout/rebase) is still
+    // swallowed rather than emitting a spurious change. The one thing it cannot
+    // see is a change that keeps the exact length AND leaves both sampled ends
+    // byte-identical — an edit buried in the middle of a >8 MiB file. That is
+    // vanishingly unlikely for anything a human reviews, and such files are
+    // almost always ignored build output the filters above drop before we hash.
     if meta.len() >= HASH_SIZE_CAP {
         meta.len().hash(&mut h);
-        if let Ok(mtime) = meta.modified() {
-            mtime.hash(&mut h);
+        if let Ok(mut f) = std::fs::File::open(path) {
+            let mut head = [0u8; HASH_SAMPLE_BYTES];
+            if f.read_exact(&mut head).is_ok() {
+                head.hash(&mut h);
+            }
+            // `len >= HASH_SIZE_CAP` (8 MiB) far exceeds the 8 KiB sample, so
+            // the tail seek lands past the head and reads a full sample.
+            let mut tail = [0u8; HASH_SAMPLE_BYTES];
+            if f.seek(SeekFrom::End(-(HASH_SAMPLE_BYTES as i64))).is_ok()
+                && f.read_exact(&mut tail).is_ok()
+            {
+                tail.hash(&mut h);
+            }
         }
         return Some(h.finish());
     }
@@ -237,35 +257,84 @@ mod tests {
     }
 
     #[test]
-    fn oversized_files_use_the_size_signature_not_their_bytes() {
-        let dir = scratch("big-hash");
-        // Two files above the cap, identical length but different bytes. Under
-        // the signature path they hash the same (len+mtime dominates); that
-        // collision is the proof the cap short-circuits the full byte read.
-        let big = (HASH_SIZE_CAP + 4096) as usize;
-        let x = dir.join("x");
-        let y = dir.join("y");
-        std::fs::write(&x, vec![b'a'; big]).unwrap();
-        std::fs::write(&y, vec![b'b'; big]).unwrap();
-        // Pin both mtimes equal so only the byte difference could distinguish
-        // them; above the cap the signature ignores bytes, so the hashes match.
-        let t = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    fn oversized_files_hash_a_bounded_signature_not_the_whole_file() {
+        let dir = scratch("big-hash-middle");
+        // Two files above the cap, equal length, differing only deep in the
+        // middle — far from either sampled end. They collide: that's the proof
+        // the signature samples bounded head+tail bytes rather than reading the
+        // whole file into RAM. (The unsampled-middle miss is the documented,
+        // accepted edge — see content_hash.)
+        let big = (HASH_SIZE_CAP as usize) + 4096;
+        let mut a = vec![b'a'; big];
+        let mut b = vec![b'a'; big];
+        let mid = big / 2;
+        a[mid] = b'X';
+        b[mid] = b'Y';
+        let pa = dir.join("a");
+        let pb = dir.join("b");
+        std::fs::write(&pa, &a).unwrap();
+        std::fs::write(&pb, &b).unwrap();
+        assert_eq!(
+            content_hash(&pa).unwrap(),
+            content_hash(&pb).unwrap(),
+            "a middle-only change at equal length is below the signature's resolution"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_files_detect_edits_at_either_end() {
+        let dir = scratch("big-hash-ends");
+        // The common real change (an append, a rewritten preamble) lands in the
+        // sampled head or tail and must still move the hash.
+        let big = (HASH_SIZE_CAP as usize) + 4096;
+        let base = vec![b'a'; big];
+        let p = dir.join("f");
+        std::fs::write(&p, &base).unwrap();
+        let h0 = content_hash(&p).unwrap();
+
+        let mut head_edit = base.clone();
+        head_edit[0] = b'Z';
+        std::fs::write(&p, &head_edit).unwrap();
+        assert_ne!(
+            h0,
+            content_hash(&p).unwrap(),
+            "an edit in the head sample must change the hash"
+        );
+
+        let mut tail_edit = base.clone();
+        let last = big - 1;
+        tail_edit[last] = b'Z';
+        std::fs::write(&p, &tail_edit).unwrap();
+        assert_ne!(
+            h0,
+            content_hash(&p).unwrap(),
+            "an edit in the tail sample must change the hash"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_files_swallow_mtime_only_churn() {
+        let dir = scratch("big-hash-mtime");
+        // Consistency with the small-file path: an mtime bump over identical
+        // bytes is not a change. (The old len+mtime signature emitted a
+        // spurious event here; the content signature does not.)
+        let big = (HASH_SIZE_CAP as usize) + 4096;
+        let p = dir.join("f");
+        std::fs::write(&p, vec![b'a'; big]).unwrap();
+        let h0 = content_hash(&p).unwrap();
+        let t = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
         std::fs::File::options()
             .write(true)
-            .open(&x)
-            .unwrap()
-            .set_modified(t)
-            .unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&y)
+            .open(&p)
             .unwrap()
             .set_modified(t)
             .unwrap();
         assert_eq!(
-            content_hash(&x).unwrap(),
-            content_hash(&y).unwrap(),
-            "above the cap, differing bytes at equal len+mtime hash the same"
+            h0,
+            content_hash(&p).unwrap(),
+            "mtime-only churn on an oversized file must not change the hash"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
