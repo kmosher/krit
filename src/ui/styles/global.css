@@ -18,6 +18,11 @@
     --success: #1a7f37;
     --comment-bg: #fff8c5;
     --comment-border: #d4a72c;
+    /* Several rules reference --surface-2 with a hardcoded light fallback;
+       it was never defined, so they all rendered light even in dark mode.
+       Alias it to the palette's secondary surface — the dark-mode override
+       of --bg-secondary below propagates through automatically. */
+    --surface-2: var(--bg-secondary);
 }
 
 @media (prefers-color-scheme: dark) {
