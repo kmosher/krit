@@ -49,6 +49,18 @@ impl CommentStore {
         self.comments.clone()
     }
 
+    /// Comments on one file, cloned. The re-anchor hot path runs per changed
+    /// file per watcher tick; cloning only the file's comments (not the whole
+    /// store, as `get_all` would) keeps a churn burst from cloning every
+    /// comment once per changed path.
+    pub fn for_file(&self, file_path: &str) -> Vec<ReviewComment> {
+        self.comments
+            .iter()
+            .filter(|c| c.file_path == file_path)
+            .cloned()
+            .collect()
+    }
+
     pub fn get(&self, id: &str) -> Option<&ReviewComment> {
         self.comments.iter().find(|c| c.id == id)
     }
@@ -155,6 +167,20 @@ mod tests {
         assert!(s.remove("a"));
         assert!(!s.remove("a"));
         assert_eq!(s.get_all().len(), 1);
+    }
+
+    #[test]
+    fn for_file_returns_only_the_matching_files_comments() {
+        let mut s = CommentStore::new(None);
+        s.add(comment("a", "on f.rs")); // comment() files everything at f.rs
+        let mut other = comment("b", "on g.rs");
+        other.file_path = "g.rs".into();
+        s.add(other);
+
+        let f = s.for_file("f.rs");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].id, "a");
+        assert!(s.for_file("nope.rs").is_empty());
     }
 
     #[test]

@@ -81,9 +81,9 @@ pub fn reanchor_file_comments(
     };
 
     let targets: Vec<ReviewComment> = store
-        .get_all()
+        .for_file(file_path)
         .into_iter()
-        .filter(|c| c.file_path == file_path && c.status != "resolved" && c.side == "additions")
+        .filter(|c| c.status != "resolved" && c.side == "additions")
         .collect();
     let mut changed = Vec::new();
 
