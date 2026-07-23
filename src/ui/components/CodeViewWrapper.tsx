@@ -898,9 +898,9 @@ export const CodeViewWrapper = memo(
           :host { --diffs-tab-size: ${defaultTabSize}; }
           [data-diffs-header] {
             container-type: scroll-state;
-            container-name: diffx-sticky-header;
+            container-name: krit-sticky-header;
           }
-          @container diffx-sticky-header scroll-state(stuck: top) {
+          @container krit-sticky-header scroll-state(stuck: top) {
             [data-diffs-header]::after {
               position: absolute;
               bottom: -1px;

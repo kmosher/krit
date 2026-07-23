@@ -17,10 +17,9 @@ pub struct KritState {
     pub host: String,
     pub url: String,
     pub started_at: u64,
-    /// Contract version marker: 2 = krit. Defaults to 0 on read so a v1
-    /// diffx state file (no `v`) still parses — the subcommands are
-    /// wire-compatible with a running v1 server, and KRIT_STATE_FILE pointed
-    /// at diffx-state.json is a legitimate migration move.
+    /// Contract version marker: 2 = krit. Tolerant default on read (v1
+    /// diffx state files had no `v`; v1 is retired, but a lenient parse
+    /// here costs nothing and keeps hand-written stubs working).
     #[serde(default)]
     pub v: u8,
 }

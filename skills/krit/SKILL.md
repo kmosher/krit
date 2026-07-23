@@ -1,13 +1,13 @@
 ---
 name: krit
-description: "End-to-end code review with krit (the Rust diffx v2): launch the UI, stream the user's inline comments as they're written, reply/resolve in real time, finish when the user clicks Done reviewing. Use when the user invokes /krit or asks to review changes with krit. For /diffx (the v1 fallback), use the diffx skill instead."
+description: "End-to-end code review with krit: launch the UI, stream the user's inline comments as they're written, reply/resolve in real time, finish when the user clicks Done reviewing. Use when the user invokes /krit or asks to review local changes."
 ---
 
 # Krit-driven code review
 
 Streaming flow: launch krit, watch the user's comments arrive one at a time, reply (and optionally resolve) each one as it comes in, finish when the user clicks **Done reviewing**.
 
-krit is wire-compatible with diffx v1 but is a single Rust binary with no `watch` subcommand — event streaming attaches straight to the server's WebSocket endpoint (Step 2).
+krit is a single Rust binary — event streaming attaches straight to the server's WebSocket endpoint (Step 2).
 
 ## Step 1: Launch the server (background)
 

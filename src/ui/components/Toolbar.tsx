@@ -83,7 +83,7 @@ export function Toolbar({
 
   // Either subscriber kind counts as "someone is listening": role:'cli'
   // (wait-for-submit over SSE) or role:'agent' (the /api/events-ws Monitor,
-  // the streaming flow's transport now that `diffx watch` is retired).
+  // the streaming flow's transport now that v1 diffx's `watch` is retired).
   const hasWatcher = watcherCount > 0 || agentCount > 0
   const isSubmitted = submittedAt !== null
   const submitDisabled = submitting || isSubmitted || !hasWatcher || commentCount === 0

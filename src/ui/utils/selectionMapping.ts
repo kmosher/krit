@@ -1,5 +1,5 @@
 // Maps a native browser text selection made inside @pierre/diffs' rendered
-// code surface to a (line, column) character anchor diffx can persist.
+// code surface to a (line, column) character anchor krit can persist.
 //
 // Two things make this non-obvious rather than "just use Range APIs":
 //

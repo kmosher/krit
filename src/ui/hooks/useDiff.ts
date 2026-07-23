@@ -46,7 +46,7 @@ export interface DiffOptions {
 export interface UseDiffOptions extends DiffOptions {
   // Governs how ambient fs-watcher `file-changed` events get applied. Does
   // NOT gate `file-written` (an explicit save via the in-browser editor) or
-  // the path:null `diffx refresh` signal — both of those are the user or
+  // the path:null `krit refresh` signal — both of those are the user or
   // agent asking directly, so they always apply immediately regardless of mode.
   refreshMode: RefreshMode
   // Files the user is currently "in" (open draft/suggest form, file-editor
@@ -183,7 +183,7 @@ export function useDiff(options: UseDiffOptions) {
 
   // SSE: react to file-written (explicit save, always applies immediately)
   // and file-changed (ambient fs-watcher discovery, gated by refreshMode).
-  // `path: null` is the `diffx refresh` / batch fallback and always does a
+  // `path: null` is the `krit refresh` / batch fallback and always does a
   // full reload — both refresh signals are the user/agent asking directly,
   // so they bypass refreshMode entirely.
   useEffect(() => {
@@ -243,7 +243,7 @@ export function useDiff(options: UseDiffOptions) {
     fileContents: data?.fileContents ?? {},
     loading,
     // True only before the first successful load. A background refetch
-    // (SSE file-written, `diffx refresh`) still flips `loading`, but the
+    // (SSE file-written, `krit refresh`) still flips `loading`, but the
     // caller already has `data` to render from — distinguishing the two
     // lets the UI keep the diff mounted (and its scroll position intact)
     // instead of unmounting to a full-page spinner on every refresh.

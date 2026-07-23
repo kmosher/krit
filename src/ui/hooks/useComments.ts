@@ -42,7 +42,7 @@ const renderCodeBlock = (c: ReviewComment): string[] => {
 async function fetchComments(): Promise<ReviewComment[]> {
   // includeDrafts=true: the browser is the only caller allowed to see
   // draft comments (rendered with a Draft badge). Every other caller of
-  // this endpoint — notably `diffx comments` — gets the agent-visible view.
+  // this endpoint — notably `krit comments` — gets the agent-visible view.
   const res = await fetch('/api/comments?includeDrafts=true')
   return res.json()
 }
