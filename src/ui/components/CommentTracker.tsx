@@ -11,6 +11,7 @@ import { timeAgo, truncate, fileName } from '../utils'
 interface CommentTrackerProps {
   comments: ReviewComment[]
   onJump?: (comment: ReviewComment) => void
+  onDelete?: (id: string) => void
 }
 
 type CommentStatus = 'draft' | 'open' | 'replied' | 'resolved'
@@ -51,7 +52,7 @@ function StatusBadge({ status }: { status: CommentStatus }) {
   }
 }
 
-export function CommentTracker({ comments, onJump }: CommentTrackerProps) {
+export function CommentTracker({ comments, onJump, onDelete }: CommentTrackerProps) {
   if (comments.length === 0) return null
 
   const sorted = [...comments].sort((a, b) => b.createdAt - a.createdAt)
@@ -101,6 +102,20 @@ export function CommentTracker({ comments, onJump }: CommentTrackerProps) {
                 </div>
                 <div className="ct-item-body">{truncate(comment.body, 80)}</div>
               </a>
+              {onDelete && (
+                <button
+                  className="ct-item-delete"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    onDelete(comment.id)
+                  }}
+                  title="Delete comment"
+                  aria-label="Delete comment"
+                >
+                  &times;
+                </button>
+              )}
             </li>
           )
         })}

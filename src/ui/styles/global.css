@@ -918,15 +918,19 @@ body {
     font-size: 14px;
     cursor: pointer;
     border-radius: 4px;
-    opacity: 0;
+    /* Faintly present at rest so the affordance is discoverable without a
+       hover hunt; hovering the bubble or the button itself brings it up. */
+    opacity: 0.4;
     transition: opacity 0.1s;
 }
 
-.comment-bubble:hover .comment-bubble-delete {
+.comment-bubble:hover .comment-bubble-delete,
+.comment-bubble-delete:focus-visible {
     opacity: 1;
 }
 
 .comment-bubble-delete:hover {
+    opacity: 1;
     background: #ffebe9;
     color: var(--danger);
 }
@@ -1492,6 +1496,7 @@ body {
 }
 
 .ct-item {
+    position: relative;
     border-bottom: 1px solid var(--border);
 }
 
@@ -1520,6 +1525,50 @@ body {
     align-items: center;
     gap: 6px;
     margin-bottom: 4px;
+    /* Leave the top-right corner clear for the delete button. */
+    padding-right: 20px;
+}
+
+/* Mirrors .comment-bubble-delete: same faint-at-rest, brighten-on-hover
+   affordance so dismissing from the list matches dismissing from a bubble.
+   Sits outside the row's <a> (as a sibling) to avoid a nested interactive
+   element and any jump-on-click. */
+.ct-item-delete {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 4px;
+    opacity: 0.4;
+    transition: opacity 0.1s;
+}
+
+.ct-item:hover .ct-item-delete,
+.ct-item-delete:focus-visible {
+    opacity: 1;
+}
+
+.ct-item-delete:hover {
+    opacity: 1;
+    background: #ffebe9;
+    color: var(--danger);
+}
+
+@media (prefers-color-scheme: dark) {
+    .ct-item-delete:hover {
+        background: #2d1214;
+    }
 }
 
 .ct-status {

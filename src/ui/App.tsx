@@ -341,6 +341,7 @@ export function App() {
           {!sidebarCollapsed && (
             <CommentTracker
               comments={comments}
+              onDelete={removeComment}
               onJump={(comment) => {
                 setActiveFile(comment.filePath)
                 diffViewerRef.current?.scrollToLine(
