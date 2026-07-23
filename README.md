@@ -2,7 +2,7 @@
 
 A local code review tool designed for the coding-agent workflow. Review AI-generated changes in a GitHub-PR-like web UI, leave inline comments, and have your agent respond to them live as you write them — reply, resolve, and rewrite without leaving the review.
 
-krit is a single static Rust binary with the web UI embedded. It started as a fork of [wong2/diffx](https://www.npmjs.com/package/diffx-cli), whose Node CLI this repo grew well past the original — the live agent event stream, suggested edits, drafts, re-anchoring, the desktop app — before freezing that evolved API and reimplementing the server in Rust.
+krit is a single static Rust binary with the web UI embedded.
 
 ![screenshot](screenshot.png)
 
