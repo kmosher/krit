@@ -24,7 +24,22 @@ Run in any git repository:
 krit
 ```
 
-This starts a local server on a random available port and opens the review UI (the desktop app if installed, otherwise your browser). The server waits for inline comments; click **Done reviewing** when finished (Ctrl+C to abort).
+This starts a local server on a random available port and opens the review UI — a browser tab by default, or the desktop app (below). The server waits for inline comments; click **Done reviewing** when finished (Ctrl+C to abort).
+
+### Desktop app
+
+`desktop/` is a thin [Tauri](https://v2.tauri.app/) shell (krit.app) that gives each review its own window under one dock icon instead of a browser tab. Build and wire it up:
+
+```bash
+cargo install tauri-cli --version "^2"       # one time
+cd desktop/src-tauri && cargo tauri build    # → target/release/bundle/macos/krit.app
+```
+
+Move `krit.app` to `/Applications`, launch it once so macOS registers the `krit://` scheme, then set `{ "launcher": "app" }` in `~/.config/krit/settings.json`. See `desktop/README.md` for details.
+
+### Settings
+
+`~/.config/krit/settings.json` persists preferences across sessions, including `launcher` (`"browser"` default, or `"app"`), `diffStyle` (`"split"` / `"unified"`), `defaultTabSize`, the `staged` / `untracked` toggles, and `refreshMode`. The in-UI settings panel writes the same file.
 
 ### Options
 
