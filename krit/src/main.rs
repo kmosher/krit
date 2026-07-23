@@ -53,11 +53,13 @@ Examples:
   krit reply abc-123 "Done."   Reply to a comment
 
 Session model:
-  krit writes a state file so subcommands can find the running server.
+  krit writes a state file so subcommands can find the running server, and its
+  comments live alongside it. Both are keyed to the review (git worktree +
+  branch), so different repos/worktrees/branches never share a store.
   Location priority:
     1. $KRIT_STATE_FILE
-    2. $CLAUDE_TMPDIR/krit-state.json    (one krit per Claude Code session)
-    3. ~/.krit/state-<hash(cwd)[:12]>.json"#;
+    2. $CLAUDE_TMPDIR/krit-state-<hash(worktree+branch)>.json
+    3. ~/.krit/state-<hash(worktree+branch)>.json"#;
 
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();

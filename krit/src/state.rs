@@ -1,9 +1,16 @@
 //! Session state file: how CLI subcommands and the Claude skill discover the
-//! running server. Same discovery scheme as v1 with krit's own namespace, so
-//! v1 and v2 sessions never collide:
+//! running server, and (via the sibling `.comments.json`) where a review's
+//! comments live. Both are keyed to the *review* — the git worktree plus its
+//! checked-out branch — so two krit sessions on different repos, worktrees, or
+//! branches never share a store:
 //!   1. $KRIT_STATE_FILE (explicit override)
-//!   2. $CLAUDE_TMPDIR/krit-state.json (one krit per Claude Code session)
-//!   3. ~/.krit/state-<hash(cwd)[:12]>.json (keyed by cwd for plain shells)
+//!   2. $CLAUDE_TMPDIR/krit-state-<hash(worktree+branch)>.json
+//!   3. ~/.krit/state-<hash(worktree+branch)>.json (no CLAUDE_TMPDIR)
+//!
+//! CLAUDE_TMPDIR alone is NOT a session discriminator: it is `/tmp/claude-<uid>`,
+//! shared by every Claude Code session for a user, so a bare `krit-state.json`
+//! there was one global file that pooled comments from every repo at once.
+//! Folding the worktree+branch hash into the filename is what scopes it.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -25,7 +32,7 @@ pub struct KritState {
 }
 
 // FNV-1a 64: stable across builds (unlike std's DefaultHasher), tiny, and
-// plenty for keying a state file by cwd.
+// plenty for keying a state file by review identity.
 fn fnv1a64_hex12(input: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in input.as_bytes() {
@@ -35,20 +42,32 @@ fn fnv1a64_hex12(input: &str) -> String {
     format!("{hash:016x}")[..12].to_string()
 }
 
+/// Identity of the review this krit process serves: the git worktree
+/// (`--show-toplevel`, distinct per worktree and stable across subdirectories)
+/// plus the checked-out branch. Outside a repo the cwd stands in for the
+/// worktree. The `\0` separator can't appear in either part, so distinct
+/// (worktree, branch) pairs never collide into one key.
+fn review_key() -> String {
+    let root = crate::git::repo_root().unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    format!("{root}\0{}", crate::git::branch_name())
+}
+
 pub fn default_state_path() -> PathBuf {
     if let Ok(p) = std::env::var("KRIT_STATE_FILE") {
         return PathBuf::from(p);
     }
+    let slug = fnv1a64_hex12(&review_key());
     if let Ok(tmp) = std::env::var("CLAUDE_TMPDIR") {
-        return PathBuf::from(tmp).join("krit-state.json");
+        return PathBuf::from(tmp).join(format!("krit-state-{slug}.json"));
     }
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home)
         .join(".krit")
-        .join(format!("state-{}.json", fnv1a64_hex12(&cwd)))
+        .join(format!("state-{slug}.json"))
 }
 
 /// A failed write must reach the caller: without the state file every
@@ -91,13 +110,29 @@ mod tests {
 
     #[test]
     fn state_hash_is_stable() {
-        // Pinned: a changed hash would orphan existing per-cwd state files.
+        // Pinned: a changed hash would orphan existing per-review state files.
         assert_eq!(
             fnv1a64_hex12("/Users/x/repo"),
             fnv1a64_hex12("/Users/x/repo")
         );
         assert_ne!(fnv1a64_hex12("/a"), fnv1a64_hex12("/b"));
         assert_eq!(fnv1a64_hex12("").len(), 12);
+    }
+
+    #[test]
+    fn same_worktree_different_branch_gets_a_distinct_slug() {
+        // The key that scopes the comment store: a branch switch in one
+        // worktree must not reuse another branch's store. The `\0` separator
+        // also keeps ("/a/b", "c") from colliding with ("/a", "b/c").
+        let root = "/Users/x/repo";
+        let main = fnv1a64_hex12(&format!("{root}\0main"));
+        let feature = fnv1a64_hex12(&format!("{root}\0feature"));
+        assert_ne!(main, feature);
+        assert_ne!(
+            fnv1a64_hex12("/a/b\0c"),
+            fnv1a64_hex12("/a\0b/c"),
+            "separator must disambiguate worktree/branch boundary"
+        );
     }
 
     #[test]
