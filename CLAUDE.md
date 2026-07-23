@@ -1,10 +1,11 @@
 # krit — agent notes
 
-Two implementations, one contract: `krit/` is the Rust server (primary);
-`src/` is the v1 TypeScript CLI (`diffx-cli`, published to npm as fallback).
-They share `src/ui/` (React, Pierre CodeView) and the HTTP/WS API — don't
-break v1 wire compatibility without treating it as a breaking change.
-`desktop/` is the Tauri app (krit.app) that claims the `krit://` scheme.
+`krit/` is the Rust server; `src/ui/` (React, Pierre CodeView) is the web
+UI it embeds; `src/types.ts` is the comment schema both share. `desktop/`
+is the Tauri app (krit.app) that claims the `krit://` scheme. The HTTP/WS
+API descends from v1 diffx (wong2's, later this repo's TS CLI — removed
+2026-07) — treat wire-contract changes as breaking, external consumers
+exist.
 
 ## Edit loops
 
@@ -32,7 +33,5 @@ break v1 wire compatibility without treating it as a breaking change.
 - Comment/suggest **drafts don't survive a page reload** (persistence is the
   planned "Stage 8" in docs/design/live-review.md). Warn before advising a
   refresh mid-review.
-- npm publishing of `diffx-cli` uses OIDC trusted publishing; the
-  npmjs.com trusted-publisher config must point at `kmosher/krit`
-  (it was originally registered for `kmosher/diffx`). Until repointed,
-  v1 releases will fail. Delete this note once fixed.
+- Nothing here publishes to npm. `diffx-cli` on npm is wong2's package,
+  not ours.

@@ -25,7 +25,3 @@ ui:
 # which serves dist/client from disk (rebuild with `just ui` to refresh)
 dev:
     pnpm exec vite
-
-# Full v1 CLI build (typecheck + vite + tsdown), same as CI/release
-build-v1:
-    pnpm run build

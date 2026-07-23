@@ -2,7 +2,7 @@
 
 A local code review tool designed for the coding-agent workflow. Review AI-generated changes in a GitHub-PR-like web UI, leave inline comments, and have your agent respond to them live as you write them — reply, resolve, and rewrite without leaving the review.
 
-krit is a single static Rust binary with the web UI embedded. It began life as a fork of [wong2/diffx](https://www.npmjs.com/package/diffx-cli) and preserves that API contract; the original Node implementation ships from this repo as `diffx-cli` (see [The v1 fallback](#the-v1-fallback)).
+krit is a single static Rust binary with the web UI embedded. It began life as a Rust rewrite of [wong2/diffx](https://www.npmjs.com/package/diffx-cli) and preserves that wire contract.
 
 ![screenshot](screenshot.png)
 
@@ -80,23 +80,13 @@ The WebSocket endpoint `ws://<host>:<port>/api/events-ws` is the integration poi
 
 ## Agent skills
 
-`skills/krit/` in this repo is a Claude Code skill exposing the streaming review loop as **`/krit`**: the agent launches the server, subscribes to the WebSocket, and replies/resolves as you comment; the session ends when you click **Done reviewing**. `skills/diffx/` is the same flow for the v1 CLI.
+`skills/krit/` in this repo is a Claude Code skill exposing the streaming review loop as **`/krit`**: the agent launches the server, subscribes to the WebSocket, and replies/resolves as you comment; the session ends when you click **Done reviewing**.
 
 Batch-style without an attached agent: click **Copy** in the toolbar and paste the XML into any chat.
 
 ## Comment output format
 
 "Copy comments" produces structured XML (`<code-review-comments version="2">`): one `<file>` per path, one `<comment>` per thread with `line`/`endLine` attributes and the commented code as `+`/`-`-prefixed diff lines inside `<code>`, XML-escaped. The `version` attribute lets consumers detect shape changes.
-
-## The v1 fallback
-
-The original TypeScript implementation is still here and published to npm:
-
-```bash
-npm install -g diffx-cli
-```
-
-`diffx` and `krit` implement the same HTTP/WS API contract and share the web UI, so skills and integrations work against either. New development happens on krit.
 
 ## Development
 
