@@ -276,17 +276,21 @@ export const CodeViewWrapper = memo(
       })
     }
 
-    // Per-keystroke updates from a draft's CommentForm. Cheap Map copy — draft
-    // counts are always small (one open form per line range a reviewer is
-    // actively commenting on).
-    const updateDraft = (key: string, patch: Partial<Pick<DraftMetadata, 'body' | 'suggestMode' | 'suggestionText'>>) => {
-      setPending((prev) => {
-        const existing = prev.get(key)
-        if (!existing) return prev
-        const next = new Map(prev)
-        next.set(key, { ...existing, ...patch })
-        return next
-      })
+    // Per-keystroke updates from a draft's CommentForm. Deliberately mutates
+    // the draft object in place instead of going through setPending: these
+    // fields don't affect where the annotation renders, and a state update
+    // here would ripple through the annotations effect into
+    // viewer.updateItem() — which rebuilds the file's entire annotation DOM
+    // on every keystroke, remounting every open form and bubble, stealing
+    // focus to another form's mount-autofocus and snapping scroll to it.
+    // The draft object is the same reference held by both the `pending` map
+    // and the annotation metadata, so a real remount (structural refetch)
+    // still seeds CommentForm with the freshest text via the initial* props.
+    const updateDraft = (
+      draft: DraftMetadata,
+      patch: Partial<Pick<DraftMetadata, 'body' | 'suggestMode' | 'suggestionText'>>,
+    ) => {
+      Object.assign(draft, patch)
     }
 
     useImperativeHandle(
@@ -693,9 +697,9 @@ export const CodeViewWrapper = memo(
                 initialBody={p.body}
                 initialSuggestMode={p.suggestMode}
                 initialSuggestionText={p.suggestionText}
-                onBodyChange={(body) => updateDraft(draftKey(p), { body })}
-                onSuggestModeChange={(suggestMode) => updateDraft(draftKey(p), { suggestMode })}
-                onSuggestionTextChange={(suggestionText) => updateDraft(draftKey(p), { suggestionText })}
+                onBodyChange={(body) => updateDraft(p, { body })}
+                onSuggestModeChange={(suggestMode) => updateDraft(p, { suggestMode })}
+                onSuggestionTextChange={(suggestionText) => updateDraft(p, { suggestionText })}
                 onSubmit={(body, suggestion) => {
                   const lineContent = getRangeContent(
                     item.fileDiff,
