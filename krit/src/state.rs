@@ -1,16 +1,24 @@
-//! Session state file: how CLI subcommands and the Claude skill discover the
-//! running server, and (via the sibling `.comments.json`) where a review's
-//! comments live. Both are keyed to the *review* — the git worktree plus its
-//! checked-out branch — so two krit sessions on different repos, worktrees, or
-//! branches never share a store:
-//!   1. $KRIT_STATE_FILE (explicit override)
-//!   2. $CLAUDE_TMPDIR/krit-state-<hash(worktree+branch)>.json
-//!   3. ~/.krit/state-<hash(worktree+branch)>.json (no CLAUDE_TMPDIR)
+//! Two on-disk files, both keyed to the *review* (git worktree + checked-out
+//! branch) so different repos/worktrees/branches never share state — but with
+//! deliberately different homes, because they have different lifetimes:
 //!
-//! CLAUDE_TMPDIR alone is NOT a session discriminator: it is `/tmp/claude-<uid>`,
-//! shared by every Claude Code session for a user, so a bare `krit-state.json`
-//! there was one global file that pooled comments from every repo at once.
-//! Folding the worktree+branch hash into the filename is what scopes it.
+//! - **State file** (`default_state_path`): server discovery — port/pid/url so
+//!   CLI subcommands and the Claude skill can find the running server. Ephemeral;
+//!   meaningless once the server dies. Lives in a temp dir:
+//!     1. $KRIT_STATE_FILE (explicit override)
+//!     2. $CLAUDE_TMPDIR/krit-state-<hash(worktree+branch)>.json
+//!     3. ~/.krit/state-<hash(worktree+branch)>.json (no CLAUDE_TMPDIR)
+//!
+//! - **Comment store** (`comments_store_path`): the reviewer's comments. Durable
+//!   — it must outlive the server process AND the Claude session, so it is NEVER
+//!   in a temp dir. Always `~/.krit/comments-<hash(worktree+branch)>.json`.
+//!
+//! Why not derive the comments path from the state path (as krit once did)?
+//! $CLAUDE_TMPDIR is `/tmp/claude-<uid>` — Claude Code's per-*user* base dir,
+//! not per-session (it isolates sessions via subdirs it nests itself). Comments
+//! parked there were both pooled across every session and liable to be swept
+//! out from under an in-progress review. Discovery state tolerates that; a
+//! comment store does not.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -97,11 +105,18 @@ pub fn remove_state_if_owned(pid: u32, path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// Comments persist next to the state file, same session identity.
-pub fn comments_file_path_for(state_path: &Path) -> PathBuf {
-    let s = state_path.to_string_lossy();
-    let base = s.strip_suffix(".json").unwrap_or(&s);
-    PathBuf::from(format!("{base}.comments.json"))
+/// Durable home for a review's comments — see the module header for why this
+/// is decoupled from `default_state_path` and never lives in a temp dir.
+/// Keyed by the same review identity as the state file.
+pub fn comments_store_path() -> PathBuf {
+    if let Ok(p) = std::env::var("KRIT_COMMENTS_FILE") {
+        return PathBuf::from(p);
+    }
+    let slug = fnv1a64_hex12(&review_key());
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home)
+        .join(".krit")
+        .join(format!("comments-{slug}.json"))
 }
 
 #[cfg(test)]

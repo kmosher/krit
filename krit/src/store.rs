@@ -1,7 +1,8 @@
 //! The comment store: a single Vec behind the server's one mutex, with
-//! best-effort persistence after every mutation. Comments are reviewer
-//! scratch state tied to a krit session — they live next to the state file,
-//! never in the repo.
+//! best-effort persistence after every mutation. Comments are durable reviewer
+//! state keyed to a review (worktree + branch); they live under `~/.krit`
+//! (see `state::comments_store_path`), never in a temp dir and never in the
+//! repo.
 
 use crate::types::{CommentReply, ReviewComment};
 use std::path::PathBuf;

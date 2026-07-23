@@ -16,7 +16,7 @@ mod types;
 mod watcher;
 
 use state::{
-    KritState, comments_file_path_for, default_state_path, remove_state_if_owned, write_state,
+    KritState, comments_store_path, default_state_path, remove_state_if_owned, write_state,
 };
 use std::path::PathBuf;
 
@@ -191,8 +191,7 @@ async fn serve(
     let repo_root = PathBuf::from(git::repo_root().expect("repo root (checked above)"));
 
     let state_path = default_state_path();
-    let comments_path = comments_file_path_for(&state_path);
-    let comment_store = store::CommentStore::new(Some(comments_path));
+    let comment_store = store::CommentStore::new(Some(comments_store_path()));
 
     let hub = hub::Hub::new();
     let app_state = server::new_state(
