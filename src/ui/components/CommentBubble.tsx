@@ -58,15 +58,14 @@ export function CommentBubble({ comment, onDelete, onReply }: CommentBubbleProps
             Outdated
           </span>
         )}
-        {!isResolved && (
-          <button
-            className="comment-bubble-delete"
-            onClick={() => onDelete(comment.id)}
-            title="Delete comment"
-          >
-            &times;
-          </button>
-        )}
+        <button
+          className="comment-bubble-delete"
+          onClick={() => onDelete(comment.id)}
+          title="Delete comment"
+          aria-label="Delete comment"
+        >
+          &times;
+        </button>
       </div>
       {comment.body && <div className="comment-bubble-body">{comment.body}</div>}
       {comment.suggestion && (
