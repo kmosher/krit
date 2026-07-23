@@ -211,7 +211,7 @@ const reviewWindowTitle = (): string | undefined => {
   }
 }
 
-// Hand this review's URL to the configured UI: the diffx desktop app (a diffx://
+// Hand this review's URL to the configured UI: the krit desktop app (a krit://
 // deep link, which the running app turns into a new window) or a browser tab.
 // Either way, any failure degrades to the manual-URL hint rather than aborting —
 // the server is already up, so a human can always just open the URL.
@@ -219,18 +219,18 @@ const launchReviewUI = async (openUrl: string, settings: Settings): Promise<void
   const openModule = await import('open')
 
   if (settings.launcher === 'app') {
-    // The desktop app claims the diffx:// scheme on first launch; this deep link
+    // The desktop app claims the krit:// scheme on first launch; this deep link
     // routes to the running instance (cold-starting it if needed), which reads
     // `url` and spawns a window pointed at this review's server.
     const params = new URLSearchParams({ url: openUrl })
     const title = reviewWindowTitle()
     if (title) params.set('title', title)
     try {
-      await openModule.default(`diffx://review?${params.toString()}`)
-      console.log(`Opened the diffx app. It's now waiting for you to leave inline comments.`)
+      await openModule.default(`krit://review?${params.toString()}`)
+      console.log(`Opened the krit app. It's now waiting for you to leave inline comments.`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      console.error(`Could not reach the diffx app (${msg}); is it installed? Falling back to the URL.`)
+      console.error(`Could not reach the krit app (${msg}); is it installed? Falling back to the URL.`)
     }
     printManualUrlHint(openUrl)
     return

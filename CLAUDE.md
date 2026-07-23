@@ -4,7 +4,7 @@ Two implementations, one contract: `krit/` is the Rust server (primary);
 `src/` is the v1 TypeScript CLI (`diffx-cli`, published to npm as fallback).
 They share `src/ui/` (React, Pierre CodeView) and the HTTP/WS API — don't
 break v1 wire compatibility without treating it as a breaking change.
-`desktop/` is the Tauri app that claims the `diffx://` scheme.
+`desktop/` is the Tauri app (krit.app) that claims the `krit://` scheme.
 
 ## Edit loops
 
@@ -23,10 +23,7 @@ break v1 wire compatibility without treating it as a breaking change.
   tokens per frame and shouldn't hear themselves work (`server.rs`,
   `agent_visible`). The UI's SSE stream (`/api/events`) carries everything.
   If a WS test "sees no events", check this before debugging the watcher.
-- The desktop app and deep link stay `diffx`-branded: the app claims
-  `diffx://` and a `krit://` identity would be an app-side change. Open
-  decision, not an oversight.
-- The launch message says "Asked the diffx app to open" because `open::that`
+- The launch message says "Asked the krit app to open" because `open::that`
   Ok only means the OS accepted the URL; a 10s post-launch check reports if
   no UI actually connected.
 

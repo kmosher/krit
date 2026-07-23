@@ -21,7 +21,7 @@ export interface Settings {
   defaultTabSize: number
   browser?: string
   // Where a new review opens. 'browser' (default) opens a tab; 'app' fires a
-  // diffx:// deep link that the desktop app turns into its own window.
+  // krit:// deep link that the desktop app turns into its own window.
   launcher?: 'browser' | 'app'
   refreshMode: RefreshMode
 }

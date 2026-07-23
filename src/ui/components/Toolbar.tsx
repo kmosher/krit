@@ -216,7 +216,7 @@ export function Toolbar({
                   className="settings-select"
                   value={refreshMode}
                   onChange={(e) => onRefreshModeChange(e.target.value as RefreshMode)}
-                  title="How background file changes (fs-watcher) get applied. Your own edits and `diffx refresh` always apply immediately regardless of this setting."
+                  title="How background file changes (fs-watcher) get applied. Your own edits and `krit refresh` always apply immediately regardless of this setting."
                 >
                   <option value="live-unless-active">Live (pause while editing)</option>
                   <option value="ultra">Always live</option>

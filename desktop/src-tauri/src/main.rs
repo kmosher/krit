@@ -1,6 +1,6 @@
-// diffx desktop — a thin window manager. It owns no UI of its own; each review
-// is a window pointed at that review's local diffx server. The diffx CLI hands
-// reviews over via a `diffx://review?url=...&title=...` deep link, so a single
+// krit desktop — a thin window manager. It owns no UI of its own; each review
+// is a window pointed at that review's local krit server. The krit CLI hands
+// reviews over via a `krit://review?url=...&title=...` deep link, so a single
 // app process collects every in-flight review as its own window under one dock
 // icon.
 //
@@ -36,7 +36,7 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building diffx desktop")
+        .expect("error while building krit desktop")
         .run(|app, event| {
             // macOS delivers a deep link to an already-running app as `Opened`.
             // This callback runs on the main thread *between* loop iterations, so
@@ -50,12 +50,12 @@ fn main() {
         });
 }
 
-// Open (or focus) a window for one review. Expects `diffx://review?url=<server>`
-// with an optional `title`. Anything that isn't a local http diffx server is
+// Open (or focus) a window for one review. Expects `krit://review?url=<server>`
+// with an optional `title`. Anything that isn't a local http krit server is
 // ignored — this app only ever frames localhost.
 fn open_review_window(app: &tauri::AppHandle, deep_link: &url::Url) {
     let mut target: Option<String> = None;
-    let mut title = String::from("diffx review");
+    let mut title = String::from("krit review");
     for (key, value) in deep_link.query_pairs() {
         match key.as_ref() {
             "url" => target = Some(value.into_owned()),
@@ -74,7 +74,7 @@ fn open_review_window(app: &tauri::AppHandle, deep_link: &url::Url) {
         _ => return,
     }
 
-    // One window per server port: re-running diffx for a review that's still open
+    // One window per server port: re-running krit for a review that's still open
     // focuses its window rather than stacking duplicates.
     let label = match parsed.port() {
         Some(port) => format!("review-{port}"),
@@ -90,6 +90,6 @@ fn open_review_window(app: &tauri::AppHandle, deep_link: &url::Url) {
         .inner_size(1400.0, 900.0)
         .build()
     {
-        eprintln!("diffx: failed to open review window: {e}");
+        eprintln!("krit: failed to open review window: {e}");
     }
 }

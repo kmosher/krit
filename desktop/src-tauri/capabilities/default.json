@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Review windows render the local diffx server as trusted remote content; they get the core defaults and nothing more — diffx exposes no custom IPC commands.",
+  "description": "Review windows render the local krit server as trusted remote content; they get the core defaults and nothing more — krit exposes no custom IPC commands.",
   "windows": ["review-*"],
   "permissions": ["core:default"]
 }

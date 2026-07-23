@@ -58,7 +58,7 @@ export function App() {
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
-      return localStorage.getItem('diffx-sidebar-collapsed') === 'true'
+      return localStorage.getItem('krit-sidebar-collapsed') === 'true'
     } catch {
       return false
     }
@@ -139,7 +139,7 @@ export function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('diffx-sidebar-collapsed', String(sidebarCollapsed))
+      localStorage.setItem('krit-sidebar-collapsed', String(sidebarCollapsed))
     } catch {}
   }, [sidebarCollapsed])
 

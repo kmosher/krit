@@ -1,7 +1,7 @@
 [package]
-name = "diffx-desktop"
+name = "krit-desktop"
 version = "0.1.0"
-description = "Desktop shell for diffx — one window per review"
+description = "Desktop shell for krit — one window per review"
 edition = "2021"
 
 [build-dependencies]

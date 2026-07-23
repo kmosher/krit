@@ -381,10 +381,10 @@ fn launch_review_ui(url: &str) {
     let settings = settings::load_settings();
 
     if settings["launcher"].as_str() == Some("app") {
-        // The desktop app claims the diffx:// scheme; this deep link routes to
+        // The desktop app claims the krit:// scheme; this deep link routes to
         // the running instance (cold-starting it if needed), which reads `url`
         // and spawns a window pointed at this review's server.
-        let mut deep_link = format!("diffx://review?url={}", urlencode(url));
+        let mut deep_link = format!("krit://review?url={}", urlencode(url));
         if let Some(title) = review_window_title() {
             deep_link.push_str(&format!("&title={}", urlencode(&title)));
         }
@@ -393,10 +393,10 @@ fn launch_review_ui(url: &str) {
             // running or may drop the deep link. Don't claim it opened; the
             // connect check in serve() reports whether a UI actually arrived.
             Ok(()) => {
-                println!("Asked the diffx app to open this review.")
+                println!("Asked the krit app to open this review.")
             }
             Err(err) => eprintln!(
-                "Could not reach the diffx app ({err}); is it installed? Falling back to the URL."
+                "Could not reach the krit app ({err}); is it installed? Falling back to the URL."
             ),
         }
         print_manual_url_hint(url);

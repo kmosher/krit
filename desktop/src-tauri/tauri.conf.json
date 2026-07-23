@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "diffx",
+  "productName": "krit",
   "version": "0.1.0",
-  "identifier": "dev.diffx.desktop",
+  "identifier": "dev.krit.desktop",
   "build": {
     "frontendDist": "../dist"
   },
@@ -26,7 +26,7 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["diffx"]
+        "schemes": ["krit"]
       }
     }
   }

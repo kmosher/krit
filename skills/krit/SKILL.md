@@ -44,7 +44,7 @@ If the user names a different base ("vs staging", "since the v2 tag"), swap it i
 
 Run with `run_in_background: true` so the server stays alive while the user reviews. krit writes a state file at `$KRIT_STATE_FILE`, falling back to `$CLAUDE_TMPDIR/krit-state.json`, so the other subcommands auto-discover it.
 
-**Always pass `dangerouslyDisableSandbox: true` on this Bash call.** krit hands the review to the UI via a spawned `open` (browser tab, or a `diffx://` deep link when `launcher: "app"` is set in `~/.config/krit/settings.json`); the Claude Bash sandbox blocks that child even though `krit` itself would run fine, and the window silently fails to open.
+**Always pass `dangerouslyDisableSandbox: true` on this Bash call.** krit hands the review to the UI via a spawned `open` (browser tab, or a `krit://` deep link when `launcher: "app"` is set in `~/.config/krit/settings.json`); the Claude Bash sandbox blocks that child even though `krit` itself would run fine, and the window silently fails to open.
 
 `krit` automatically opens the UI (desktop-app window or browser tab per settings). Once open, the server sits idle waiting for the user to leave inline comments — it is **not** doing any work in the background and will not proceed on its own. If no UI ever connects, the server exits itself after 3 minutes.
 
