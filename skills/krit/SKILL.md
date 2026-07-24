@@ -58,7 +58,7 @@ krit state    # prints JSON incl. "url": "http://127.0.0.1:<port>"
 
 Monitor with `ws: {url: "ws://localhost:<port>/api/events-ws"}` (use `localhost`, not `127.0.0.1` — sandbox host allowlists accept only the name). Each incoming text frame is one JSON event.
 
-The agent stream is **human-only**: the server filters out echoes of your own work (`file-changed` from the fs-watcher, your own `krit refresh`, `comment-updated` re-anchor fallout). Because `comment-updated` is filtered, comment line positions in your context can go stale after files change — run `krit comments` to get current positions before acting on a comment you received a while ago. Frames you will see:
+The agent stream is **human-only**: the server filters out echoes of your own work (`files-changed` — the fs-watcher's batched change event — and `file-changed` from a single direct edit, your own `krit refresh`, `comment-updated` re-anchor fallout). Because `comment-updated` is filtered, comment line positions in your context can go stale after files change — run `krit comments` to get current positions before acting on a comment you received a while ago. Frames you will see:
 
 ```json
 {"type":"comment-added","comment":{"id":"...","filePath":"...","lineNumber":42,"endLine":42,"body":"...", ...}}

@@ -19,9 +19,10 @@ exist.
 
 ## Non-obvious behavior (deliberate, don't "fix")
 
-- The agent WebSocket (`/api/events-ws`) filters out `file-changed`,
-  comment-reanchor fallout, and the agent's own reply echoes — agents pay
-  tokens per frame and shouldn't hear themselves work (`server.rs`,
+- The agent WebSocket (`/api/events-ws`) filters out `files-changed` (the
+  fs-watcher's batched change event) and `file-changed` (a single direct
+  edit/undo), comment-reanchor fallout, and the agent's own reply echoes —
+  agents pay tokens per frame and shouldn't hear themselves work (`server.rs`,
   `agent_visible`). The UI's SSE stream (`/api/events`) carries everything.
   If a WS test "sees no events", check this before debugging the watcher.
 - The launch message says "Asked the krit app to open" because `open::that`
