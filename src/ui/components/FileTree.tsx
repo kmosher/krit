@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef, useCallback, useLayoutEffect, memo } from 'react'
+import type { UIEvent } from 'react'
 import {
   ChevronRight,
   Folder,
@@ -81,6 +82,28 @@ function buildTree(files: FileDiffMetadata[]): TreeNode[] {
   return root
 }
 
+// Flattened row list — the tree is walked once per (tree, collapsedDirs)
+// change into the exact sequence of rows that would be visible if nothing
+// were windowed. Virtualization then slices this array instead of the
+// component tree, so directory expand/collapse state has to live here
+// (lifted out of TreeDir) rather than as local state per node.
+type FlatRow =
+  | { type: 'dir'; node: TreeNode; depth: number }
+  | { type: 'file'; node: TreeNode; depth: number }
+
+function flattenTree(nodes: TreeNode[], depth: number, collapsedDirs: Set<string>, out: FlatRow[]) {
+  for (const node of nodes) {
+    if (node.isDir) {
+      out.push({ type: 'dir', node, depth })
+      if (!collapsedDirs.has(node.path)) {
+        flattenTree(node.children, depth + 1, collapsedDirs, out)
+      }
+    } else {
+      out.push({ type: 'file', node, depth })
+    }
+  }
+}
+
 function inferChangeType(file: FileDiffMetadata, untrackedFiles: Set<string>): string {
   if (untrackedFiles.has(file.name)) return 'untracked'
   // parsePatchFiles doesn't always set changeType, infer from object IDs
@@ -113,39 +136,32 @@ function getFileIcon(file: FileDiffMetadata | undefined, viewed: boolean, untrac
   }
 }
 
-function TreeDir({
+// Fixed row height — matches `.ft-row`'s `min-height: 32px` (global.css),
+// which always wins over content height for this row's font-size/padding.
+// Windowing needs a constant to convert scrollTop into an index range
+// without measuring every row.
+const ROW_HEIGHT = 32
+const OVERSCAN = 12
+
+const TreeDirRow = memo(function TreeDirRow({
   node,
-  activeFile,
-  commentCounts,
-  fileStatsMap,
-  viewedFiles,
-  untrackedFiles,
-  staleFiles,
-  onApplyStale,
-  onFileClick,
   depth,
-  defaultExpanded,
+  expanded,
+  top,
+  onToggle,
 }: {
   node: TreeNode
-  activeFile: string | null
-  commentCounts: Record<string, number>
-  fileStatsMap: Record<string, { additions: number; deletions: number }>
-  viewedFiles: Set<string>
-  untrackedFiles: Set<string>
-  staleFiles: Set<string>
-  onApplyStale?: (filePath: string) => void
-  onFileClick: (filePath: string) => void
   depth: number
-  defaultExpanded: boolean
+  expanded: boolean
+  top: number
+  onToggle: (path: string) => void
 }) {
-  const [expanded, setExpanded] = useState(defaultExpanded)
-
   return (
-    <li>
+    <li style={{ position: 'absolute', top, left: 0, right: 0, height: ROW_HEIGHT }}>
       <div
         className="ft-row ft-dir"
         style={{ paddingLeft: `${12 + depth * 16}px` }}
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => onToggle(node.path)}
       >
         <ChevronRight
           size={14}
@@ -158,47 +174,11 @@ function TreeDir({
         )}
         <span className="ft-dir-name">{node.name}</span>
       </div>
-      {expanded && (
-        <ul className="ft-list">
-          {node.children.map((child) =>
-            child.isDir ? (
-              <TreeDir
-                key={child.path}
-                node={child}
-                activeFile={activeFile}
-                commentCounts={commentCounts}
-                fileStatsMap={fileStatsMap}
-                viewedFiles={viewedFiles}
-                untrackedFiles={untrackedFiles}
-                staleFiles={staleFiles}
-                onApplyStale={onApplyStale}
-                onFileClick={onFileClick}
-                depth={depth + 1}
-                defaultExpanded={true}
-              />
-            ) : (
-              <TreeFile
-                key={child.path}
-                node={child}
-                activeFile={activeFile}
-                commentCount={commentCounts[child.file?.name ?? ''] ?? 0}
-                stats={fileStatsMap[child.file?.name ?? '']}
-                viewed={viewedFiles.has(child.file?.name ?? '')}
-                untrackedFiles={untrackedFiles}
-                stale={staleFiles.has(child.file?.name ?? '')}
-                onApplyStale={onApplyStale}
-                onFileClick={onFileClick}
-                depth={depth + 1}
-              />
-            ),
-          )}
-        </ul>
-      )}
     </li>
   )
-}
+})
 
-function TreeFile({
+const TreeFileRow = memo(function TreeFileRow({
   node,
   activeFile,
   commentCount,
@@ -209,6 +189,7 @@ function TreeFile({
   onApplyStale,
   onFileClick,
   depth,
+  top,
 }: {
   node: TreeNode
   activeFile: string | null
@@ -220,12 +201,13 @@ function TreeFile({
   onApplyStale?: (filePath: string) => void
   onFileClick: (filePath: string) => void
   depth: number
+  top: number
 }) {
   const filePath = node.file?.name ?? node.path
   const isActive = activeFile === filePath
 
   return (
-    <li>
+    <li style={{ position: 'absolute', top, left: 0, right: 0, height: ROW_HEIGHT }}>
       <div
         className={`ft-row ft-file ${isActive ? 'ft-file-active' : ''} ${viewed ? 'ft-file-viewed' : ''}`}
         style={{ paddingLeft: `${12 + depth * 16 + 20}px` }}
@@ -260,10 +242,31 @@ function TreeFile({
       </div>
     </li>
   )
-}
+})
 
-export function FileTree({ files, activeFile, commentCounts, fileStatsMap, viewedFiles, untrackedFiles, staleFiles = EMPTY_STALE, onApplyStale, onFileClick, collapsed, onToggleCollapse }: FileTreeProps) {
+function FileTreeImpl({
+  files,
+  activeFile,
+  commentCounts,
+  fileStatsMap,
+  viewedFiles,
+  untrackedFiles,
+  staleFiles = EMPTY_STALE,
+  onApplyStale,
+  onFileClick,
+  collapsed,
+  onToggleCollapse,
+}: FileTreeProps) {
   const [filter, setFilter] = useState('')
+  // Directory expand/collapse used to be local state on each TreeDir
+  // instance; lifted here (keyed by path) so the row list can be flattened
+  // and virtualized instead of walked as a live component tree. Absent from
+  // the set == expanded, matching the old `defaultExpanded={true}` default.
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(() => new Set())
+
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(0)
 
   const filteredFiles = useMemo(() => {
     if (!filter) return files
@@ -272,6 +275,42 @@ export function FileTree({ files, activeFile, commentCounts, fileStatsMap, viewe
   }, [files, filter])
 
   const tree = useMemo(() => buildTree(filteredFiles), [filteredFiles])
+
+  const flatRows = useMemo(() => {
+    const out: FlatRow[] = []
+    flattenTree(tree, 0, collapsedDirs, out)
+    return out
+  }, [tree, collapsedDirs])
+
+  const toggleDir = useCallback((path: string) => {
+    setCollapsedDirs((prev) => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }, [])
+
+  const handleScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
+    setScrollTop(e.currentTarget.scrollTop)
+  }, [])
+
+  // Track the scroller's viewport height so the visible-row window can be
+  // computed. Re-measures on resize (e.g. window resize, sidebar toggle).
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setViewportHeight(el.clientHeight)
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => setViewportHeight(el.clientHeight))
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [collapsed])
+
+  const total = flatRows.length
+  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN)
+  const endIndex = Math.min(total, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN)
+  const visibleRows = flatRows.slice(startIndex, endIndex)
 
   if (collapsed) {
     return (
@@ -293,7 +332,7 @@ export function FileTree({ files, activeFile, commentCounts, fileStatsMap, viewe
   }
 
   return (
-    <div className="ft">
+    <>
       <div className="ft-search">
         {onToggleCollapse && (
           <button
@@ -316,40 +355,44 @@ export function FileTree({ files, activeFile, commentCounts, fileStatsMap, viewe
           />
         </div>
       </div>
-      <ul className="ft-list ft-root">
-        {tree.map((node) =>
-          node.isDir ? (
-            <TreeDir
-              key={node.path}
-              node={node}
-              activeFile={activeFile}
-              commentCounts={commentCounts}
-              fileStatsMap={fileStatsMap}
-              viewedFiles={viewedFiles}
-              untrackedFiles={untrackedFiles}
-              staleFiles={staleFiles}
-              onApplyStale={onApplyStale}
-              onFileClick={onFileClick}
-              depth={0}
-              defaultExpanded={true}
-            />
-          ) : (
-            <TreeFile
-              key={node.path}
-              node={node}
-              activeFile={activeFile}
-              commentCount={commentCounts[node.file?.name ?? ''] ?? 0}
-              stats={fileStatsMap[node.file?.name ?? '']}
-              viewed={viewedFiles.has(node.file?.name ?? '')}
-              untrackedFiles={untrackedFiles}
-              stale={staleFiles.has(node.file?.name ?? '')}
-              onApplyStale={onApplyStale}
-              onFileClick={onFileClick}
-              depth={0}
-            />
-          ),
-        )}
-      </ul>
-    </div>
+      <div className="ft" ref={scrollRef} onScroll={handleScroll}>
+        <ul className="ft-list ft-root" style={{ position: 'relative', height: total * ROW_HEIGHT }}>
+          {visibleRows.map((row, i) => {
+            const top = (startIndex + i) * ROW_HEIGHT
+            if (row.type === 'dir') {
+              return (
+                <TreeDirRow
+                  key={row.node.path}
+                  node={row.node}
+                  depth={row.depth}
+                  expanded={!collapsedDirs.has(row.node.path)}
+                  top={top}
+                  onToggle={toggleDir}
+                />
+              )
+            }
+            const filePath = row.node.file?.name ?? row.node.path
+            return (
+              <TreeFileRow
+                key={row.node.path}
+                node={row.node}
+                activeFile={activeFile}
+                commentCount={commentCounts[filePath] ?? 0}
+                stats={fileStatsMap[filePath]}
+                viewed={viewedFiles.has(filePath)}
+                untrackedFiles={untrackedFiles}
+                stale={staleFiles.has(filePath)}
+                onApplyStale={onApplyStale}
+                onFileClick={onFileClick}
+                depth={row.depth}
+                top={top}
+              />
+            )
+          })}
+        </ul>
+      </div>
+    </>
   )
 }
+
+export const FileTree = memo(FileTreeImpl)
