@@ -100,11 +100,13 @@ function spliceFilePatches(fullPatch: string, fragments: Map<string, string>): s
   return result.join('\n')
 }
 
-// Single-path convenience wrapper around spliceFilePatches, used by the
-// file-written / single file-changed paths below.
-function spliceFilePatch(fullPatch: string, filePath: string, fragment: string): string {
-  return spliceFilePatches(fullPatch, new Map([[filePath, fragment]]))
-}
+// Above this many paths in one tick, a batch refetch's request line (one
+// repeated file= param per path, tens of bytes each once URL-encoded) grows
+// into the tens of KB where proxies / h1 parsers start rejecting it — which
+// would fail the WHOLE batch. Past the cap we fall back to one full reload:
+// cheaper than a giant request, and it can't overflow the request line. This
+// is exactly the mass-checkout/rebase burst the coalescing targets.
+const BATCH_REFETCH_MAX = 40
 
 // Split a patch response scoped to a known set of paths (as returned by
 // GET /api/diff?file=...&file=...) into one fragment per file, keyed by the
@@ -167,52 +169,17 @@ export function useDiff(options: UseDiffOptions) {
       .finally(() => setLoading(false))
   }, [options.staged, options.untracked])
 
-  // Targeted refetch: pull just one file's diff and splice it into the
-  // current merged state, instead of re-fetching and re-parsing everything.
-  // Falls back to a full load() if we don't have a base diff to merge into
-  // yet (e.g. the file-written event races the initial load).
-  const loadFile = useCallback(
-    (path: string) => {
-      const base = dataRef.current
-      if (!base) return load()
-      return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}&file=${encodeURIComponent(path)}`)
-        .then((res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`)
-          return res.json()
-        })
-        .then((json: FileDiffData) => {
-          setData((prev) => {
-            const cur = prev ?? base
-            const patch = spliceFilePatch(cur.patch, path, json.patch)
-            const binaryFiles = [...cur.binaryFiles.filter((b) => b.path !== path), ...json.binaryFiles]
-            const untrackedFiles = json.untrackedFiles.length
-              ? [...new Set([...cur.untrackedFiles, ...json.untrackedFiles])]
-              : cur.untrackedFiles.filter((f) => f !== path)
-            const fileContents = { ...cur.fileContents }
-            if (path in json.fileContents) {
-              fileContents[path] = json.fileContents[path]
-            } else {
-              delete fileContents[path]
-            }
-            return { ...cur, patch, binaryFiles, untrackedFiles, fileContents }
-          })
-        })
-        .catch((err) => setError(err.message))
-    },
-    [options.staged, options.untracked, load],
-  )
-
-  // Batch refetch: pull several files' diffs in ONE request/ONE server-side
+  // Batch refetch: pull several files' diffs in ONE request / ONE server-side
   // git diff and splice every fragment into the current merged state via a
-  // single setData — the `files-changed` counterpart to loadFile's single-path
-  // case, used so a burst of N changed files costs one round trip instead of
-  // N. Same fallback-to-load() behavior as loadFile if there's no base diff
-  // to merge into yet.
+  // single setData, so a burst of N changed files (a `files-changed` tick)
+  // costs one round trip instead of N. loadFile below is the single-path case.
   const loadFiles = useCallback(
     (paths: string[]) => {
       if (paths.length === 0) return Promise.resolve()
       const base = dataRef.current
-      if (!base) return load()
+      // No base to merge into yet, or a burst too large to batch safely — one
+      // full reload instead (see BATCH_REFETCH_MAX).
+      if (!base || paths.length > BATCH_REFETCH_MAX) return load()
       const fileParams = paths.map((p) => `file=${encodeURIComponent(p)}`).join('&')
       return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}&${fileParams}`)
         .then((res) => {
@@ -253,6 +220,10 @@ export function useDiff(options: UseDiffOptions) {
     },
     [options.staged, options.untracked, load],
   )
+
+  // Single-path refetch (file-written, a single direct-edit file-changed) — the
+  // 1-element case of loadFiles, kept as one merge implementation.
+  const loadFile = useCallback((path: string) => loadFiles([path]), [loadFiles])
 
   const markStale = useCallback((path: string) => {
     setStaleFiles((prev) => (prev.has(path) ? prev : new Set(prev).add(path)))

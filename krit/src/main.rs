@@ -322,9 +322,20 @@ async fn serve(
                 // Reanchor every changed file (each pass persists its own
                 // moved comments once — see store::CommentStore::update_many),
                 // then broadcast the whole tick as ONE files-changed frame
-                // instead of one file-changed frame per path.
+                // instead of one file-changed frame per path. Isolate each
+                // path: coalescing means one panicking reanchor would otherwise
+                // drop the whole tick's broadcast AND kill this (leaked,
+                // never-restarted) watcher thread, silently ending live
+                // refresh. catch_unwind keeps the rest of the tick and the
+                // thread alive; no reanchor panic is reachable today, this
+                // guards a future edit from regressing that.
                 for path in &paths {
-                    server::reanchor_and_broadcast(&watcher_state, path);
+                    let reanchor = std::panic::AssertUnwindSafe(|| {
+                        server::reanchor_and_broadcast(&watcher_state, path);
+                    });
+                    if std::panic::catch_unwind(reanchor).is_err() {
+                        eprintln!("krit: reanchor panicked on '{path}', skipping it");
+                    }
                 }
                 watcher_state
                     .hub

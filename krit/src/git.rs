@@ -15,6 +15,14 @@ pub const INDEX_REF: &str = "INDEX";
 // (diff.external = difftastic, color.ui = always, etc).
 const DIFF_FLAGS: [&str; 2] = ["--no-ext-diff", "--no-color"];
 
+/// Prepended to every `git diff` we parse. `core.quotePath=false` makes git
+/// emit non-ASCII paths as raw UTF-8 in diff headers (`diff --git a/café.rs …`)
+/// instead of C-quoted-and-escaped (`"a/caf\303\251.rs"`). Both the client and
+/// server split a patch on the literal `diff --git a/` prefix; the quoted form
+/// doesn't start with it, so such a file's diff would be silently dropped or
+/// glued onto the preceding file. Off by default (`quotePath` defaults true).
+const QUOTE_PATH_OFF: [&str; 2] = ["-c", "core.quotePath=false"];
+
 /// Error carries git's own stderr — the diff paths surface it to the client
 /// so a typo'd ref reads as an error, not as an empty "no changes" review.
 fn git_output(args: &[&str]) -> Result<Vec<u8>, String> {
@@ -69,7 +77,8 @@ pub fn branch_name() -> String {
 }
 
 pub fn custom_git_diff(args: &[String]) -> Result<String, String> {
-    let mut cmd_args: Vec<&str> = vec!["diff"];
+    let mut cmd_args: Vec<&str> = QUOTE_PATH_OFF.to_vec();
+    cmd_args.push("diff");
     cmd_args.extend(DIFF_FLAGS);
     cmd_args.extend(args.iter().map(|s| s.as_str()));
     git_output(&cmd_args).map(|b| String::from_utf8_lossy(&b).into_owned())
@@ -120,14 +129,33 @@ fn diff_impl(
 ) -> Result<String, String> {
     let mut parts: Vec<String> = Vec::new();
 
-    let unstaged_args = scoped_args(&["diff", DIFF_FLAGS[0], DIFF_FLAGS[1]], paths);
+    let unstaged_args = scoped_args(
+        &[
+            QUOTE_PATH_OFF[0],
+            QUOTE_PATH_OFF[1],
+            "diff",
+            DIFF_FLAGS[0],
+            DIFF_FLAGS[1],
+        ],
+        paths,
+    );
     let unstaged =
         git_output_at(root, &unstaged_args).map(|b| String::from_utf8_lossy(&b).into_owned())?;
     if !unstaged.is_empty() {
         parts.push(unstaged);
     }
     if staged {
-        let staged_args = scoped_args(&["diff", DIFF_FLAGS[0], DIFF_FLAGS[1], "--staged"], paths);
+        let staged_args = scoped_args(
+            &[
+                QUOTE_PATH_OFF[0],
+                QUOTE_PATH_OFF[1],
+                "diff",
+                DIFF_FLAGS[0],
+                DIFF_FLAGS[1],
+                "--staged",
+            ],
+            paths,
+        );
         let s =
             git_output_at(root, &staged_args).map(|b| String::from_utf8_lossy(&b).into_owned())?;
         if !s.is_empty() {
@@ -372,6 +400,31 @@ mod tests {
 
         let full = git_diff(false, None, &root).unwrap();
         assert!(full.contains("a.rs") && full.contains("b.rs"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn non_ascii_paths_emit_unquoted_headers() {
+        // With core.quotePath on (git's default) the header would be
+        // `diff --git "a/café.rs" "b/café.rs"`, which the client/server patch
+        // splitters (both keyed on the literal `diff --git a/` prefix) can't
+        // see. QUOTE_PATH_OFF must keep the path raw UTF-8 so the header
+        // starts with `diff --git a/` and carries the real name.
+        let root = init_repo("non-ascii");
+        std::fs::write(root.join("café.rs"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("café.rs"), "two\n").unwrap();
+
+        let diff = git_diff(false, None, &root).unwrap();
+        assert!(
+            diff.contains("diff --git a/café.rs b/café.rs"),
+            "header must be raw UTF-8, not C-quoted: {diff}"
+        );
+        // And the scoped path must find it (the batch-refetch hot path).
+        let scoped = git_diff_paths(false, None, &root, &["café.rs".to_string()]).unwrap();
+        assert!(scoped.contains("diff --git a/café.rs b/café.rs"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
