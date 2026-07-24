@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { parsePatchFiles, parseDiffFromFile } from '@pierre/diffs'
 import type { FileDiffMetadata, FileContents } from '@pierre/diffs'
 import type { ReviewComment } from '../types'
-import { useDiff } from './hooks/useDiff'
+import { useDiff, type BinaryFileInfo, type FileContentsMap } from './hooks/useDiff'
 import { useComments } from './hooks/useComments'
 import { useReviewState, submitReview } from './hooks/useReviewState'
 import { useSettings } from './hooks/useSettings'
@@ -15,6 +15,115 @@ import { CommentTracker } from './components/CommentTracker'
 import { FileEditorModal } from './components/FileEditorModal'
 import { UndoToast } from './components/UndoToast'
 import type { SelectionAnchor } from './utils/selectionMapping'
+
+// Split a merged multi-file patch into one fragment per file, in patch
+// order. Matches the section-boundary rule useDiff's spliceFilePatches /
+// splitFilePatches use to splice/split fragments — a `diff --git a/... b/X`
+// line starts a new section that runs until the next one. Cheap string scan
+// (no diff parsing), so per-file re-parse below is the only place actual
+// parsing work happens.
+function splitPatchFragments(patch: string): { name: string; text: string }[] {
+  const lines = patch.split('\n')
+  const targetPrefix = 'diff --git a/'
+  const fragments: { name: string; text: string }[] = []
+  let name: string | null = null
+  let start = 0
+  const flush = (end: number) => {
+    if (name !== null) fragments.push({ name, text: lines.slice(start, end).join('\n') })
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith(targetPrefix)) continue
+    flush(i)
+    const match = lines[i].match(/^diff --git a\/.+ b\/(.+)$/)
+    name = match?.[1] ?? null
+    start = i
+  }
+  flush(lines.length)
+  return fragments
+}
+
+// +/- counts for one file's patch fragment. Split out of the old whole-patch
+// walk (previously a second full pass over `patch`) so it folds into the
+// same per-file pass as parseFileFragment below instead of re-walking the
+// merged patch a second time.
+function computeFileStats(text: string): { additions: number; deletions: number } {
+  let additions = 0
+  let deletions = 0
+  for (const line of text.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions++
+    else if (line.startsWith('-') && !line.startsWith('---')) deletions++
+  }
+  return { additions, deletions }
+}
+
+// A stub FileDiffMetadata for a path with no real hunks to show yet (a
+// binary-only entry with no diff --git section of its own, or a fragment
+// that failed to parse). Shape matches what parsePatchFiles would otherwise
+// produce for an empty/patch-only file.
+function stubFile(name: string, type: FileDiffMetadata['type']): FileDiffMetadata {
+  return {
+    name,
+    type,
+    hunks: [],
+    splitLineCount: 0,
+    unifiedLineCount: 0,
+    isPartial: true,
+    deletionLines: [],
+    additionLines: [],
+  }
+}
+
+// Parse one file's patch fragment, upgrading it from patch-only
+// (isPartial:true) to full-file (isPartial:false) by re-running it through
+// parseDiffFromFile when both sides' contents are bundled in fileContents —
+// full-file metadata is what CodeView needs to render the expand-context UI
+// between hunks. Scoped to one file's fragment text (not the whole patch),
+// so it only costs O(this file) rather than O(the whole review).
+function parseFileFragment(
+  name: string,
+  text: string,
+  contentsEntry: FileContentsMap[string] | undefined,
+): FileDiffMetadata {
+  let parsedFile: FileDiffMetadata | undefined
+  try {
+    parsedFile = parsePatchFiles(text).flatMap((p) => p.files)[0]
+  } catch {
+    parsedFile = undefined
+  }
+  if (!parsedFile) return stubFile(name, 'change')
+  if (!contentsEntry || !('contents' in contentsEntry.old) || !('contents' in contentsEntry.new)) {
+    // Oversize, binary, or missing on one side — patch-only it stays.
+    return parsedFile
+  }
+  const oldFile: FileContents = { name: parsedFile.name, contents: contentsEntry.old.contents }
+  const newFile: FileContents = { name: parsedFile.name, contents: contentsEntry.new.contents }
+  try {
+    const upgraded = parseDiffFromFile(oldFile, newFile)
+    // Belt-and-suspenders: if old/new contents end up identical (e.g. a
+    // ref/patch mismatch slipped through), the upgrade returns zero hunks
+    // and CodeView would render headers with empty bodies. Fall back to the
+    // patch-parsed file so something always shows.
+    if (!upgraded.hunks || upgraded.hunks.length === 0) return parsedFile
+    return upgraded
+  } catch {
+    return parsedFile
+  }
+}
+
+// Per-file cache entry: the inputs a file's FileDiffMetadata was derived
+// from (so the next render can tell, per file, whether it needs to be
+// re-derived) plus the derived result itself. `fragmentText` is null for a
+// binary-only synthetic entry (no diff --git section of its own); such
+// entries are keyed on `binaryRef` (the BinaryFileInfo object identity)
+// instead, which useDiff's splice logic keeps stable for every path that
+// wasn't part of a given refetch (see loadFile/loadFiles).
+interface FileCacheEntry {
+  fragmentText: string | null
+  contentsEntry: FileContentsMap[string] | undefined
+  binaryRef: BinaryFileInfo | undefined
+  file: FileDiffMetadata
+  stats: { additions: number; deletions: number }
+}
 
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
@@ -145,95 +254,76 @@ export function App() {
 
   const untrackedSet = useMemo(() => new Set(untrackedFiles), [untrackedFiles])
 
-  const files = useMemo(() => {
-    if (!patch) return []
-    try {
-      const parsed = parsePatchFiles(patch)
-      const parsedFiles = parsed.flatMap((p) => p.files)
+  // Per-file cache keyed by path, persisted across renders. A file's cached
+  // entry is reused (same FileDiffMetadata object, same stats) whenever its
+  // patch fragment and bundled contents are unchanged from last render, so
+  // only files whose fragment or fileContents[path] entry actually changed
+  // get re-parsed — useDiff already replaces `fileContents` per-file (see
+  // loadFile/loadFiles), so an unrelated file's refetch doesn't force a
+  // whole-review re-parse here. Unchanged files keep stable object identity,
+  // which CodeViewWrapper (see its per-file `lastFileRef` comparison) relies
+  // on to skip its own patch-in-place work too.
+  const fileCacheRef = useRef<Map<string, FileCacheEntry>>(new Map())
 
-      // Upgrade each file's FileDiffMetadata from patch-only (isPartial:true)
-      // to full-file (isPartial:false) by re-running it through
-      // parseDiffFromFile when both sides' contents are bundled in the
-      // /api/diff response. Full-file metadata is what CodeView needs to
-      // render the expand-context UI between hunks.
-      const upgraded = parsedFiles.map((file) => {
-        const entry = fileContents[file.name]
-        if (!entry) return file
-        if (!('contents' in entry.old) || !('contents' in entry.new)) {
-          // Oversize, binary, or missing on one side — patch-only it stays.
-          return file
-        }
-        const oldFile: FileContents = { name: file.name, contents: entry.old.contents }
-        const newFile: FileContents = { name: file.name, contents: entry.new.contents }
-        try {
-          const upgraded = parseDiffFromFile(oldFile, newFile)
-          // Belt-and-suspenders: if old/new contents end up identical (e.g. a
-          // ref/patch mismatch slipped through), the upgrade returns zero
-          // hunks and CodeView would render headers with empty bodies. Fall
-          // back to the patch-parsed file so something always shows.
-          if (!upgraded.hunks || upgraded.hunks.length === 0) {
-            return file
-          }
-          return upgraded
-        } catch {
-          return file
-        }
-      })
+  // `files`, `diffStats`, and `fileStatsMap` all come out of one per-file
+  // pass over `patch` — folding stats into the same walk that reparses a
+  // file avoids a second full-patch scan (previously a separate memo here).
+  const { files, diffStats, fileStatsMap } = useMemo(() => {
+    const prevCache = fileCacheRef.current
+    const nextCache = new Map<string, FileCacheEntry>()
+    const orderedFiles: FileDiffMetadata[] = []
+    const fileStatsMap: Record<string, { additions: number; deletions: number }> = {}
+    let totalAdditions = 0
+    let totalDeletions = 0
 
-      // Add synthetic entries for binary files not already in parsed output
-      const existingNames = new Set(upgraded.map((f) => f.name))
-      for (const bf of binaryFiles) {
-        if (!existingNames.has(bf.path)) {
-          const syntheticFile: FileDiffMetadata = {
-            name: bf.path,
-            type: bf.type === 'added' || bf.type === 'untracked' ? 'new' : bf.type === 'deleted' ? 'deleted' : 'change',
-            hunks: [],
-            splitLineCount: 0,
-            unifiedLineCount: 0,
-            isPartial: true,
-            deletionLines: [],
-            additionLines: [],
-          }
-          upgraded.push(syntheticFile)
+    if (patch) {
+      for (const { name, text } of splitPatchFragments(patch)) {
+        const contentsEntry = fileContents[name]
+        const prev = prevCache.get(name)
+        let file: FileDiffMetadata
+        let stats: { additions: number; deletions: number }
+        if (prev && prev.fragmentText === text && prev.contentsEntry === contentsEntry) {
+          file = prev.file
+          stats = prev.stats
+        } else {
+          file = parseFileFragment(name, text, contentsEntry)
+          stats = computeFileStats(text)
         }
+        nextCache.set(name, { fragmentText: text, contentsEntry, binaryRef: undefined, file, stats })
+        orderedFiles.push(file)
+        fileStatsMap[name] = stats
+        totalAdditions += stats.additions
+        totalDeletions += stats.deletions
       }
 
-      return upgraded
-    } catch {
-      return []
+      // Add synthetic entries for binary files not already covered by a
+      // patch fragment of their own.
+      const existingNames = new Set(orderedFiles.map((f) => f.name))
+      for (const bf of binaryFiles) {
+        if (existingNames.has(bf.path)) continue
+        const prev = prevCache.get(bf.path)
+        const file =
+          prev && prev.fragmentText === null && prev.binaryRef === bf
+            ? prev.file
+            : stubFile(bf.path, bf.type === 'added' || bf.type === 'untracked' ? 'new' : bf.type === 'deleted' ? 'deleted' : 'change')
+        nextCache.set(bf.path, {
+          fragmentText: null,
+          contentsEntry: undefined,
+          binaryRef: bf,
+          file,
+          stats: { additions: 0, deletions: 0 },
+        })
+        orderedFiles.push(file)
+      }
+    }
+
+    fileCacheRef.current = nextCache
+    return {
+      files: orderedFiles,
+      diffStats: { additions: totalAdditions, deletions: totalDeletions },
+      fileStatsMap,
     }
   }, [patch, binaryFiles, fileContents])
-
-  // Per-file +/- counts derived from the patch text. We compute these here
-  // (not from FileDiffMetadata.hunks) because parseDiffFromFile-upgraded files
-  // produce hunks without +/- line counts. Walking the patch is O(n) once and
-  // shared by Toolbar totals, FileTree rows, and CodeView header metadata.
-  const { diffStats, fileStatsMap } = useMemo(() => {
-    if (!patch) return { diffStats: { additions: 0, deletions: 0 }, fileStatsMap: {} as Record<string, { additions: number; deletions: number }> }
-    const stats: Record<string, { additions: number; deletions: number }> = {}
-    let totalAdd = 0
-    let totalDel = 0
-    let current: { additions: number; deletions: number } | null = null
-    for (const line of patch.split('\n')) {
-      if (line.startsWith('diff --git ')) {
-        // "diff --git a/path b/path" — pull the new-side path
-        const match = line.match(/ b\/(.+)$/)
-        if (match) {
-          current = { additions: 0, deletions: 0 }
-          stats[match[1]] = current
-        } else {
-          current = null
-        }
-      } else if (line.startsWith('+') && !line.startsWith('+++')) {
-        if (current) current.additions++
-        totalAdd++
-      } else if (line.startsWith('-') && !line.startsWith('---')) {
-        if (current) current.deletions++
-        totalDel++
-      }
-    }
-    return { diffStats: { additions: totalAdd, deletions: totalDel }, fileStatsMap: stats }
-  }, [patch])
 
   const binaryFileMap = useMemo(() => {
     const map = new Map<string, (typeof binaryFiles)[number]>()

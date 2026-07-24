@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { RefreshMode } from './useSettings'
+import type { FilesChangedEvent } from '../../types'
 
 export interface BinaryFileInfo {
   path: string
@@ -29,9 +30,13 @@ interface DiffData {
   fileContents: FileContentsMap
 }
 
-// Scoped shape returned by GET /api/diff?file=<path> — same fields, but
-// binaryFiles/untrackedFiles/fileContents only ever mention that one path,
-// and `patch` is just that file's fragment ('' if it has no pending diff).
+// Scoped shape returned by GET /api/diff?file=<path>[&file=<path>...] — same
+// fields, but binaryFiles/untrackedFiles/fileContents only ever mention the
+// requested path(s), and `patch` is just the concatenation of those files'
+// fragments (in request order; '' for a path with no pending diff). One
+// `file=` param is the single-file case; repeated `file=` params (one per
+// path, not a delimited list — repo-relative paths can contain commas) are
+// the batch case used by loadFiles below.
 type FileDiffData = DiffData
 
 // Toolbar's staged/untracked toggle shape — kept narrow (and exported under
@@ -44,10 +49,11 @@ export interface DiffOptions {
 }
 
 export interface UseDiffOptions extends DiffOptions {
-  // Governs how ambient fs-watcher `file-changed` events get applied. Does
-  // NOT gate `file-written` (an explicit save via the in-browser editor) or
-  // the path:null `krit refresh` signal — both of those are the user or
-  // agent asking directly, so they always apply immediately regardless of mode.
+  // Governs how ambient fs-watcher `files-changed` (batched) and direct-edit
+  // `file-changed` (single-file) events get applied. Does NOT gate
+  // `file-written` (an explicit save via the in-browser editor) or the
+  // path:null `krit refresh` signal — both of those are the user or agent
+  // asking directly, so they always apply immediately regardless of mode.
   refreshMode: RefreshMode
   // Files the user is currently "in" (open draft/suggest form, file-editor
   // modal) — only consulted in 'live-unless-active' mode. An identity change
@@ -55,41 +61,84 @@ export interface UseDiffOptions extends DiffOptions {
   activeFiles: Set<string>
 }
 
-// Replace (or remove, or append) one file's fragment within a full unified
-// patch. Mirrors the server's extractFilePatch boundary logic so a
-// per-file refetch can be spliced back into the client's merged patch
-// without re-fetching every other file.
-function spliceFilePatch(fullPatch: string, filePath: string, fragment: string): string {
+// Replace (or remove, or append) several files' fragments within a full
+// unified patch, in a single pass over `fullPatch`'s lines. Mirrors the
+// server's extractFilePatch boundary logic so a batch refetch can be
+// spliced back into the client's merged patch without re-fetching every
+// other file, and without re-scanning the whole patch once per path.
+function spliceFilePatches(fullPatch: string, fragments: Map<string, string>): string {
   const lines = fullPatch ? fullPatch.split('\n') : []
   const targetPrefix = 'diff --git a/'
-  let start = -1
-  let end = lines.length
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].startsWith(targetPrefix)) continue
-    const match = lines[i].match(/^diff --git a\/.+ b\/(.+)$/)
-    if (start === -1) {
-      if (match?.[1] === filePath) start = i
+  const remaining = new Set(fragments.keys())
+  const result: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    if (!lines[i].startsWith(targetPrefix)) {
+      result.push(lines[i])
+      i++
       continue
     }
-    end = i
-    break
+    const match = lines[i].match(/^diff --git a\/.+ b\/(.+)$/)
+    const path = match?.[1]
+    let end = i + 1
+    while (end < lines.length && !lines[end].startsWith(targetPrefix)) end++
+    if (path !== undefined && fragments.has(path)) {
+      const fragment = fragments.get(path)!
+      if (fragment) result.push(...fragment.split('\n'))
+      remaining.delete(path)
+    } else {
+      result.push(...lines.slice(i, end))
+    }
+    i = end
   }
-  const fragLines = fragment ? fragment.split('\n') : []
-  if (start === -1) {
-    // Not previously in the patch. Nothing to remove; append if there's
-    // something to add.
-    return fragment ? [...lines, ...fragLines].join('\n') : fullPatch
+  // Any fragment whose path wasn't previously in the patch — nothing to
+  // remove; append if there's something to add.
+  for (const path of remaining) {
+    const fragment = fragments.get(path)!
+    if (fragment) result.push(...fragment.split('\n'))
   }
-  return [...lines.slice(0, start), ...fragLines, ...lines.slice(end)].join('\n')
+  return result.join('\n')
+}
+
+// Single-path convenience wrapper around spliceFilePatches, used by the
+// file-written / single file-changed paths below.
+function spliceFilePatch(fullPatch: string, filePath: string, fragment: string): string {
+  return spliceFilePatches(fullPatch, new Map([[filePath, fragment]]))
+}
+
+// Split a patch response scoped to a known set of paths (as returned by
+// GET /api/diff?file=...&file=...) into one fragment per file, keyed by the
+// file's b/-side path — the inverse of spliceFilePatches. Used to distribute
+// a single batch response across each path's slot in the merged patch.
+function splitFilePatches(patch: string): Map<string, string> {
+  const fragments = new Map<string, string>()
+  if (!patch) return fragments
+  const lines = patch.split('\n')
+  const targetPrefix = 'diff --git a/'
+  let path: string | null = null
+  let start = 0
+  const flush = (end: number) => {
+    if (path !== null) fragments.set(path, lines.slice(start, end).join('\n'))
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith(targetPrefix)) continue
+    flush(i)
+    const match = lines[i].match(/^diff --git a\/.+ b\/(.+)$/)
+    path = match?.[1] ?? null
+    start = i
+  }
+  flush(lines.length)
+  return fragments
 }
 
 export function useDiff(options: UseDiffOptions) {
   const [data, setData] = useState<DiffData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  // Files a `file-changed` event named but that refreshMode deferred instead
-  // of applying — surfaced to the UI as a "N files changed" toast / file-tree
-  // badge. Never populated by `file-written` (always applies immediately).
+  // Files a `files-changed`/`file-changed` event named but that refreshMode
+  // deferred instead of applying — surfaced to the UI as a "N files changed"
+  // toast / file-tree badge. Never populated by `file-written` (always
+  // applies immediately).
   const [staleFiles, setStaleFiles] = useState<Set<string>>(() => new Set())
 
   // Mirrors `data` for the merge path below, which runs inside an event
@@ -153,6 +202,58 @@ export function useDiff(options: UseDiffOptions) {
     [options.staged, options.untracked, load],
   )
 
+  // Batch refetch: pull several files' diffs in ONE request/ONE server-side
+  // git diff and splice every fragment into the current merged state via a
+  // single setData — the `files-changed` counterpart to loadFile's single-path
+  // case, used so a burst of N changed files costs one round trip instead of
+  // N. Same fallback-to-load() behavior as loadFile if there's no base diff
+  // to merge into yet.
+  const loadFiles = useCallback(
+    (paths: string[]) => {
+      if (paths.length === 0) return Promise.resolve()
+      const base = dataRef.current
+      if (!base) return load()
+      const fileParams = paths.map((p) => `file=${encodeURIComponent(p)}`).join('&')
+      return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}&${fileParams}`)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          return res.json()
+        })
+        .then((json: FileDiffData) => {
+          // The response's `patch` is the concatenation of just these paths'
+          // fragments (server contract) — split it back into per-path
+          // fragments so each one can be spliced into its own slot in the
+          // merged patch. A requested path absent from the response has no
+          // pending diff (reverted between event and request); splice ''
+          // for it, mirroring the single-file semantics.
+          const fragments = splitFilePatches(json.patch)
+          for (const p of paths) {
+            if (!fragments.has(p)) fragments.set(p, '')
+          }
+          setData((prev) => {
+            const cur = prev ?? base
+            const patch = spliceFilePatches(cur.patch, fragments)
+            const pathSet = new Set(paths)
+            const binaryFiles = [...cur.binaryFiles.filter((b) => !pathSet.has(b.path)), ...json.binaryFiles]
+            const untrackedFiles = new Set(cur.untrackedFiles)
+            for (const p of paths) untrackedFiles.delete(p)
+            for (const f of json.untrackedFiles) untrackedFiles.add(f)
+            const fileContents = { ...cur.fileContents }
+            for (const p of paths) {
+              if (p in json.fileContents) {
+                fileContents[p] = json.fileContents[p]
+              } else {
+                delete fileContents[p]
+              }
+            }
+            return { ...cur, patch, binaryFiles, untrackedFiles: [...untrackedFiles], fileContents }
+          })
+        })
+        .catch((err) => setError(err.message))
+    },
+    [options.staged, options.untracked, load],
+  )
+
   const markStale = useCallback((path: string) => {
     setStaleFiles((prev) => (prev.has(path) ? prev : new Set(prev).add(path)))
   }, [])
@@ -174,23 +275,51 @@ export function useDiff(options: UseDiffOptions) {
     const paths = [...staleFiles]
     if (paths.length === 0) return
     setStaleFiles(new Set())
-    for (const path of paths) void loadFile(path)
-  }, [staleFiles, loadFile])
+    void loadFiles(paths)
+  }, [staleFiles, loadFiles])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  // SSE: react to file-written (explicit save, always applies immediately)
-  // and file-changed (ambient fs-watcher discovery, gated by refreshMode).
-  // `path: null` is the `krit refresh` / batch fallback and always does a
-  // full reload — both refresh signals are the user/agent asking directly,
-  // so they bypass refreshMode entirely.
+  // SSE: react to file-written (explicit save, always applies immediately),
+  // file-changed (a single direct edit/undo — see api_edits_delete/undo in
+  // server.rs — gated by refreshMode same as before), and files-changed (the
+  // ambient fs-watcher's batched replacement for the old per-file
+  // file-changed fanout — one event per debounced tick, 1..N paths, gated by
+  // refreshMode per path). `path: null` on file-written is the `krit
+  // refresh` fallback and always does a full reload — both file-written and
+  // that fallback are the user/agent asking directly, so they bypass
+  // refreshMode entirely.
   useEffect(() => {
     const es = new EventSource('/api/events')
     es.addEventListener('message', (ev) => {
       try {
         const parsed = JSON.parse(ev.data)
+        if (parsed.type === 'files-changed') {
+          const paths = (parsed as FilesChangedEvent).paths
+          if (!Array.isArray(paths) || paths.length === 0) return
+          const mode = refreshModeRef.current
+          if (mode === 'manual') {
+            for (const p of paths) markStale(p)
+            return
+          }
+          if (mode === 'ultra') {
+            void loadFiles(paths)
+            return
+          }
+          // live-unless-active: defer the subset the user is currently "in"
+          // (open draft/suggest form, file-editor modal); apply the rest in
+          // one batch refetch.
+          const active = activeFilesRef.current
+          const toApply: string[] = []
+          for (const p of paths) {
+            if (active.has(p)) markStale(p)
+            else toApply.push(p)
+          }
+          void loadFiles(toApply)
+          return
+        }
         if (parsed.type !== 'file-written' && parsed.type !== 'file-changed') return
         const path: string | undefined = parsed.path ?? undefined
         if (!path) {
@@ -215,7 +344,7 @@ export function useDiff(options: UseDiffOptions) {
       } catch {}
     })
     return () => es.close()
-  }, [load, loadFile, markStale])
+  }, [load, loadFile, loadFiles, markStale])
 
   // live-unless-active: once a deferred file stops being "active" (draft
   // closed, editor modal closed), apply the queued change automatically —
@@ -229,9 +358,9 @@ export function useDiff(options: UseDiffOptions) {
       for (const p of toApply) next.delete(p)
       return next
     })
-    for (const p of toApply) void loadFile(p)
+    void loadFiles(toApply)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [options.activeFiles, options.refreshMode, staleFiles, loadFile])
+  }, [options.activeFiles, options.refreshMode, staleFiles, loadFiles])
 
   return {
     patch: data?.patch ?? null,

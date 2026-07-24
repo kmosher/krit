@@ -179,25 +179,6 @@ function bumpVersion(item: CodeViewItem<Metadata>): number {
   return v + 1
 }
 
-// Cheap identity for "did this file's diff content actually change" across a
-// refetch, since every FileDiffMetadata is a fresh object per parse. `hunks`
-// only carries line ranges/offsets — for a full-file (isPartial:false) diff
-// the actual line text lives in additionLines/deletionLines, so a signature
-// built from hunks alone misses every edit that doesn't shift line counts
-// (e.g. rewording a single line).
-function fileContentSignature(file: FileDiffMetadata): string {
-  return JSON.stringify([
-    file.hunks,
-    file.additionLines,
-    file.deletionLines,
-    file.type,
-    file.prevName,
-    file.splitLineCount,
-    file.unifiedLineCount,
-    file.isPartial,
-  ])
-}
-
 // File change-type → short label. CodeView's FileDiffMetadata.type uses the
 // patch-parser's vocabulary; we squash rename-pure/rename-changed since the
 // distinction isn't useful at a glance.
@@ -334,35 +315,36 @@ export const CodeViewWrapper = memo(
       [files],
     )
 
-    // `files` is re-parsed from scratch on every diff refetch (see App.tsx),
-    // so every FileDiffMetadata is a brand-new object even when its content
-    // is unchanged — reference equality can't tell us what actually changed.
-    // A file whose content signature changed gets patched in place via
-    // `viewer.updateItem()` — replacing item.fileDiff and bumping its version
-    // marks just that item's layout dirty and re-renders it, without
-    // disturbing any other file's scroll position, collapse state, or
-    // in-progress annotations. Only a change to the *set* of files (one
-    // added or removed — e.g. a new untracked file appears, or a revert
-    // drops one back to identical) forces a full remount via
-    // `structuralRevision`: CodeViewHandle has no removeItem, so shrinking
-    // the item list can't be done in place.
-    const lastFileSigRef = useRef<Map<string, string> | null>(null)
+    // App.tsx now memoizes `files` per file (see its fileCacheRef) — a file
+    // whose patch fragment and bundled contents haven't changed keeps the
+    // exact same FileDiffMetadata object across renders, so a plain
+    // reference-equality check here is enough to tell what changed, no
+    // per-file content serialization needed. A file whose identity changed
+    // gets patched in place via `viewer.updateItem()` — replacing
+    // item.fileDiff and bumping its version marks just that item's layout
+    // dirty and re-renders it, without disturbing any other file's scroll
+    // position, collapse state, or in-progress annotations. Only a change to
+    // the *set* of files (one added or removed — e.g. a new untracked file
+    // appears, or a revert drops one back to identical) forces a full
+    // remount via `structuralRevision`: CodeViewHandle has no removeItem, so
+    // shrinking the item list can't be done in place.
+    const lastFileRef = useRef<Map<string, FileDiffMetadata> | null>(null)
     const pendingScrollRestoreRef = useRef<number | null>(null)
     const [structuralRevision, setStructuralRevision] = useState(0)
     useEffect(() => {
-      const prevSig = lastFileSigRef.current
-      const nextSig = new Map<string, string>()
-      for (const file of files) nextSig.set(file.name, fileContentSignature(file))
+      const prevFiles = lastFileRef.current
+      const nextFiles = new Map<string, FileDiffMetadata>()
+      for (const file of files) nextFiles.set(file.name, file)
 
-      if (prevSig === null) {
+      if (prevFiles === null) {
         // First mount — initialItems already reflects `files`; nothing to patch.
-        lastFileSigRef.current = nextSig
+        lastFileRef.current = nextFiles
         return
       }
 
       const sameFileSet =
-        prevSig.size === nextSig.size && [...prevSig.keys()].every((name) => nextSig.has(name))
-      lastFileSigRef.current = nextSig
+        prevFiles.size === nextFiles.size && [...prevFiles.keys()].every((name) => nextFiles.has(name))
+      lastFileRef.current = nextFiles
 
       if (!sameFileSet) {
         pendingScrollRestoreRef.current = scrollRef.current?.scrollTop ?? null
@@ -373,7 +355,7 @@ export const CodeViewWrapper = memo(
       const viewer = viewerRef.current
       if (!viewer) return
       for (const file of files) {
-        if (prevSig.get(file.name) === nextSig.get(file.name)) continue
+        if (prevFiles.get(file.name) === file) continue
         const item = viewer.getItem(file.name)
         if (!item || item.type !== 'diff') continue
         item.fileDiff = file

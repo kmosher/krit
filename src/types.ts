@@ -1,3 +1,13 @@
+// SSE `/api/events` frame: a debounced fs-watcher tick found one or more
+// changed files and is delivering them as a single batch (replaces the old
+// per-file `file-changed` fanout on the watcher path — see
+// docs/design/reactive-loop-perf.md). Mirrors Rust's `Event::FilesChanged`
+// (krit/src/types.rs), `#[serde(rename_all = "kebab-case")]`.
+export interface FilesChangedEvent {
+  type: 'files-changed'
+  paths: string[]
+}
+
 export interface CommentReply {
   id: string
   body: string
