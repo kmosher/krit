@@ -91,6 +91,12 @@ function parseFileFragment(
     parsedFile = undefined
   }
   if (!parsedFile) return stubFile(name, 'change')
+  // Use our own unquoted fragment name for display, not the parser's. For a
+  // non-ASCII path @pierre/diffs re-emits `.name` in git's C-quoted octal form
+  // ("src/caf\303\251.rs"), which then diverges from the unquoted key every
+  // other map here uses (fileContents, the file cache, comment association),
+  // and the FileTree splits the embedded quotes into a bogus folder node.
+  parsedFile.name = name
   if (!contentsEntry || !('contents' in contentsEntry.old) || !('contents' in contentsEntry.new)) {
     // Oversize, binary, or missing on one side — patch-only it stays.
     return parsedFile
@@ -104,6 +110,7 @@ function parseFileFragment(
     // and CodeView would render headers with empty bodies. Fall back to the
     // patch-parsed file so something always shows.
     if (!upgraded.hunks || upgraded.hunks.length === 0) return parsedFile
+    upgraded.name = name
     return upgraded
   } catch {
     return parsedFile
