@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// The built React UI, embedded at compile time — the whole artifact is one
 /// binary; there is no dist/ to go stale. Debug builds read the folder from
@@ -31,6 +32,14 @@ struct Assets;
 
 const FILE_TEXT_CAP_BYTES: usize = 5 * 1024 * 1024;
 const UNDO_BUFFER_CAP: usize = 20;
+
+/// `branch_name()` forks `git rev-parse`. A full `/api/diff` refetch (no
+/// `file` params) always recomputes it fresh AND refreshes this cache — the
+/// watcher can't see `.git/HEAD` change, so nothing here lives forever — but
+/// a path-scoped refetch (the hot path a files-changed burst drives) reads
+/// the cache instead of forking again. Short enough that a mid-review branch
+/// switch is never stale for more than a beat.
+const BRANCH_CACHE_TTL: Duration = Duration::from_secs(2);
 
 /// Debounce for the state→clients transform sent to agent (ws) subscribers —
 /// long enough that a browser tab reload doesn't read as a leave-then-rejoin.
@@ -51,6 +60,8 @@ pub struct Inner {
     pub custom_diff_args: Option<Vec<String>>,
     viewed: Mutex<HashSet<String>>,
     undo: Mutex<Vec<UndoEntry>>,
+    // (value, fetched_at) — see BRANCH_CACHE_TTL.
+    branch_cache: Mutex<Option<(String, Instant)>>,
 }
 
 pub type AppState = Arc<Inner>;
@@ -76,7 +87,38 @@ pub fn new_state(
         custom_diff_args,
         viewed: Mutex::new(HashSet::new()),
         undo: Mutex::new(Vec::new()),
+        branch_cache: Mutex::new(None),
     })
+}
+
+/// `state.repo_root`'s own basename — the repo name without forking `git`
+/// (the old `git::repo_name()` re-derived it via `rev-parse --show-toplevel`
+/// every call; the server already knows its root at startup).
+fn repo_name_from_root(state: &AppState) -> String {
+    state
+        .repo_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Fresh `git::branch_name()`, also refreshing the cache for the next scoped
+/// request that reads `cached_branch_name`.
+fn refreshed_branch_name(state: &AppState) -> String {
+    let name = git::branch_name();
+    *lock(&state.branch_cache) = Some((name.clone(), Instant::now()));
+    name
+}
+
+/// The scoped hot path's branch lookup: reuses a fresh cache entry, only
+/// forking `git` if the cache is empty or past `BRANCH_CACHE_TTL`.
+fn cached_branch_name(state: &AppState) -> String {
+    if let Some((name, fetched_at)) = lock(&state.branch_cache).clone()
+        && fetched_at.elapsed() < BRANCH_CACHE_TTL
+    {
+        return name;
+    }
+    refreshed_branch_name(state)
 }
 
 /// Re-anchors non-resolved additions-side comments on `path` after a
@@ -224,14 +266,37 @@ fn read_side(root: &std::path::Path, path: &str, git_ref: &str) -> Value {
 
 async fn api_diff(
     State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<Vec<(String, String)>>,
 ) -> Response {
     let is_custom = state.custom_diff_args.is_some();
-    let staged = params.get("staged").map(|v| v == "true").unwrap_or(false);
-    let untracked = params
-        .get("untracked")
-        .map(|v| v == "true")
-        .unwrap_or(false);
+    let param = |key: &str| {
+        params
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    };
+    let staged = param("staged") == Some("true");
+    let untracked = param("untracked") == Some("true");
+    // Repeated `file=` params, in request order — repeated keys rather than a
+    // delimited list, so a repo-relative path containing a comma or newline
+    // never needs escaping. A single `file=` is the pre-existing one-path
+    // case: just the 1-element case of the same scoped path below.
+    let files: Vec<String> = params
+        .iter()
+        .filter(|(k, _)| k == "file")
+        .map(|(_, v)| v.clone())
+        .collect();
+
+    // Computed once regardless of scoping, and threaded into git_diff /
+    // git_diff_paths below instead of letting either recompute it — the
+    // previous version forked `ls-files` a second time just to re-derive the
+    // same list this response already needed.
+    let untracked_files: Vec<String> = if untracked {
+        git::untracked_file_paths(&state.repo_root)
+    } else {
+        Vec::new()
+    };
+    let untracked_arg = untracked.then_some(untracked_files.as_slice());
 
     let patch_result = if let Some(args) = &state.custom_diff_args {
         git::custom_git_diff(args).map(|p| (p, git::resolve_diff_refs(Some(args))))
@@ -248,7 +313,15 @@ async fn api_diff(
                 git::WORKING_TREE_REF.to_string(),
             )
         };
-        git::git_diff(staged, untracked, &state.repo_root).map(|p| (p, refs))
+        // A scoped request (one or more file= params) runs a path-scoped
+        // `git diff -- <paths>` instead of diffing the whole repo just to
+        // slice fragments back out of it below.
+        let diffed = if files.is_empty() {
+            git::git_diff(staged, untracked_arg, &state.repo_root)
+        } else {
+            git::git_diff_paths(staged, untracked_arg, &state.repo_root, &files)
+        };
+        diffed.map(|p| (p, refs))
     };
     // A failed git diff (typo'd ref, unreadable object) is an error the
     // reviewer must see — not an empty "no changes" review (v1 threw a 500).
@@ -263,13 +336,19 @@ async fn api_diff(
         }
     };
 
-    let repo_name = git::repo_name();
-    let branch = git::branch_name();
-    let untracked_files: Vec<String> = if untracked {
-        git::untracked_file_paths(&state.repo_root)
+    // No fork: the server already knows its own root, so the basename is
+    // free — `git::repo_name()` re-derived the same answer via
+    // `rev-parse --show-toplevel` on every single request.
+    let repo_name = repo_name_from_root(&state);
+    // A full refetch (no file= params) recomputes AND refreshes the branch
+    // cache; a scoped refetch — the hot path a files-changed burst drives —
+    // reads the cache instead of forking `git` again (see BRANCH_CACHE_TTL).
+    let branch = if files.is_empty() {
+        refreshed_branch_name(&state)
     } else {
-        Vec::new()
+        cached_branch_name(&state)
     };
+
     let untracked_set: HashSet<String> = untracked_files.iter().cloned().collect();
     let binary_files = parse_binary_files(&patch, &untracked_set);
     let binary_set: HashSet<String> = binary_files
@@ -277,26 +356,44 @@ async fn api_diff(
         .filter_map(|b| b["path"].as_str().map(|s| s.to_string()))
         .collect();
 
-    // ?file=<path> scopes to one file for targeted refetches.
-    if let Some(file_filter) = params.get("file") {
-        let fragment = extract_file_patch(&patch, file_filter);
-        let file_contents = if binary_set.contains(file_filter) {
-            json!({})
-        } else {
-            json!({
-                file_filter.clone(): {
-                    "old": read_side(&state.repo_root, file_filter, &refs.0),
-                    "new": read_side(&state.repo_root, file_filter, &refs.1),
-                }
-            })
-        };
+    // One or more `file=` params scope the response to just those paths.
+    // `patch` (from git_diff_paths / custom_git_diff above) may already
+    // cover only the requested files, but extract_file_patch per path still
+    // gives request-order concatenation and the "no pending diff for this
+    // path" empty-fragment case — one implementation for 1 file and N alike.
+    if !files.is_empty() {
+        let fragments: Vec<String> = files
+            .iter()
+            .map(|f| extract_file_patch(&patch, f))
+            .filter(|f| !f.is_empty())
+            .collect();
+        let mut file_contents = serde_json::Map::new();
+        for f in &files {
+            if binary_set.contains(f) {
+                continue;
+            }
+            file_contents.insert(
+                f.clone(),
+                json!({
+                    "old": read_side(&state.repo_root, f, &refs.0),
+                    "new": read_side(&state.repo_root, f, &refs.1),
+                }),
+            );
+        }
+        let files_set: HashSet<&str> = files.iter().map(|s| s.as_str()).collect();
         return axum::Json(json!({
-            "patch": fragment,
+            "patch": fragments.join("\n"),
             "repoName": repo_name,
             "branch": branch,
             "customMode": is_custom,
-            "binaryFiles": binary_files.iter().filter(|b| b["path"].as_str() == Some(file_filter)).collect::<Vec<_>>(),
-            "untrackedFiles": untracked_files.iter().filter(|f| *f == file_filter).collect::<Vec<_>>(),
+            "binaryFiles": binary_files
+                .iter()
+                .filter(|b| b["path"].as_str().map(|p| files_set.contains(p)).unwrap_or(false))
+                .collect::<Vec<_>>(),
+            "untrackedFiles": untracked_files
+                .iter()
+                .filter(|f| files_set.contains(f.as_str()))
+                .collect::<Vec<_>>(),
             "fileContents": file_contents,
         }))
         .into_response();
@@ -827,7 +924,7 @@ async fn api_events_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> R
 
 /// Events the agent stream forwards. Agents only hear *human-originated*
 /// signals: every ws frame is a Monitor wake-up costing the agent tokens, and
-/// the ambient events (fs-watcher file-changed, the agent's own `krit
+/// the ambient events (fs-watcher files-changed, the agent's own `krit
 /// refresh` echo, comment-updated re-anchor fallout) are usually caused by
 /// the agent's own edits — it would be paying to listen to itself work. The
 /// UI keeps receiving all of these over SSE; the agent sees current comment
@@ -835,6 +932,7 @@ async fn api_events_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> R
 fn agent_visible(event: &Event) -> bool {
     match event {
         Event::FileChanged { .. } => false,
+        Event::FilesChanged { .. } => false,
         Event::FileWritten { path: None } => false, // agent's own refresh
         Event::CommentUpdated { .. } => false,
         // file-written{path} = krit editor save; user-edit = direct

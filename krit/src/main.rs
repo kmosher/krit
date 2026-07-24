@@ -318,11 +318,17 @@ async fn serve(
         let watcher_state = app_state.clone();
         let watcher_root = repo_root.clone();
         tokio::task::spawn_blocking(move || {
-            let watcher = watcher::watch_repo(watcher_root, move |path| {
-                server::reanchor_and_broadcast(&watcher_state, &path);
+            let watcher = watcher::watch_repo(watcher_root, move |paths| {
+                // Reanchor every changed file (each pass persists its own
+                // moved comments once — see store::CommentStore::update_many),
+                // then broadcast the whole tick as ONE files-changed frame
+                // instead of one file-changed frame per path.
+                for path in &paths {
+                    server::reanchor_and_broadcast(&watcher_state, path);
+                }
                 watcher_state
                     .hub
-                    .broadcast(types::Event::FileChanged { path });
+                    .broadcast(types::Event::FilesChanged { paths });
             });
             std::mem::forget(watcher);
         });

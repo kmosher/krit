@@ -72,6 +72,37 @@ impl CommentStore {
     }
 
     pub fn update(&mut self, id: &str, fields: UpdateFields) -> Option<ReviewComment> {
+        let result = self.apply_update(id, fields);
+        if result.is_some() {
+            self.persist();
+        }
+        result
+    }
+
+    /// Applies several updates in one store lock and persists **once**
+    /// afterward, instead of once per update — a reanchor pass over C moved
+    /// comments must not write the file C times. Returns the updated
+    /// comments in input order, skipping any id that no longer exists
+    /// (mirrors `update`'s `None` for a missing id).
+    pub fn update_many(
+        &mut self,
+        updates: impl IntoIterator<Item = (String, UpdateFields)>,
+    ) -> Vec<ReviewComment> {
+        let mut out = Vec::new();
+        let mut dirty = false;
+        for (id, fields) in updates {
+            if let Some(updated) = self.apply_update(&id, fields) {
+                dirty = true;
+                out.push(updated);
+            }
+        }
+        if dirty {
+            self.persist();
+        }
+        out
+    }
+
+    fn apply_update(&mut self, id: &str, fields: UpdateFields) -> Option<ReviewComment> {
         let comment = self.comments.iter_mut().find(|c| c.id == id)?;
         if let Some(body) = fields.body {
             comment.body = body;
@@ -91,9 +122,7 @@ impl CommentStore {
         if let Some(o) = fields.outdated {
             comment.outdated = Some(o);
         }
-        let cloned = comment.clone();
-        self.persist();
-        Some(cloned)
+        Some(comment.clone())
     }
 
     pub fn remove(&mut self, id: &str) -> bool {
@@ -234,6 +263,91 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].body, "persisted");
         assert_eq!(all[0].replies[0].body, "kept");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn update_many_applies_all_updates_in_one_write() {
+        let path = std::env::temp_dir().join(format!(
+            "krit-store-update-many-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut s = CommentStore::new(Some(path.clone()));
+        s.add(comment("a", "first"));
+        s.add(comment("b", "second"));
+        s.add(comment("c", "third"));
+
+        let updated = s.update_many([
+            (
+                "a".to_string(),
+                UpdateFields {
+                    body: Some("a2".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "missing".to_string(),
+                UpdateFields {
+                    body: Some("nope".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "c".to_string(),
+                UpdateFields {
+                    status: Some("resolved".into()),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        // Only the two real ids come back — the missing one is silently
+        // skipped, mirroring `update`'s None.
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[0].id, "a");
+        assert_eq!(updated[0].body, "a2");
+        assert_eq!(updated[1].id, "c");
+        assert_eq!(updated[1].status, "resolved");
+        // "b" is untouched.
+        assert_eq!(s.get("b").unwrap().body, "second");
+
+        // Reload from disk proves the batch was actually persisted, not just
+        // held in memory.
+        let reloaded = CommentStore::new(Some(path.clone()));
+        assert_eq!(reloaded.get("a").unwrap().body, "a2");
+        assert_eq!(reloaded.get("c").unwrap().status, "resolved");
+        assert_eq!(reloaded.get("b").unwrap().body, "second");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn update_many_with_no_hits_does_not_persist() {
+        let path = std::env::temp_dir().join(format!(
+            "krit-store-update-many-noop-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut s = CommentStore::new(Some(path.clone()));
+        s.add(comment("a", "first"));
+        assert!(path.exists(), "add() should have persisted once");
+        std::fs::remove_file(&path).unwrap();
+
+        let updated = s.update_many([(
+            "missing".to_string(),
+            UpdateFields {
+                body: Some("nope".into()),
+                ..Default::default()
+            },
+        )]);
+        assert!(updated.is_empty());
+        assert!(
+            !path.exists(),
+            "an all-miss batch must not touch the file at all"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

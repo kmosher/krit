@@ -25,6 +25,19 @@ fn git_output(args: &[&str]) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Same as `git_output`, pinned to `root` rather than the process's
+/// inherited cwd — the diff calls below already carry `root` as a parameter
+/// (for the untracked/content-read paths), so there's no reason to rely on
+/// the ambient cwd matching it, the way the rest of this file's git_string
+/// callers still do.
+fn git_output_at(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    match Command::new("git").args(args).current_dir(root).output() {
+        Ok(out) if out.status.success() => Ok(out.stdout),
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Err(err) => Err(format!("failed to run git: {err}")),
+    }
+}
+
 fn git_stdout(args: &[&str]) -> Option<Vec<u8>> {
     git_output(args).ok()
 }
@@ -62,23 +75,77 @@ pub fn custom_git_diff(args: &[String]) -> Result<String, String> {
     git_output(&cmd_args).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-pub fn git_diff(staged: bool, untracked: bool, root: &Path) -> Result<String, String> {
+/// Full-repo diff. `untracked_files`, when `Some`, is the caller's
+/// already-computed `untracked_file_paths(root)` list (never recomputed
+/// here) — see `git_diff_paths` for the path-scoped sibling both share.
+pub fn git_diff(
+    staged: bool,
+    untracked_files: Option<&[String]>,
+    root: &Path,
+) -> Result<String, String> {
+    diff_impl(staged, untracked_files, root, None)
+}
+
+/// Same as `git_diff`, but scoped to `paths` via a trailing `-- <paths>`
+/// pathspec on every `git diff` invocation, so a targeted refetch (one
+/// changed file, or the batch from a files-changed event) never pays for a
+/// whole-repo diff just to slice one fragment back out of it.
+/// `untracked_files` is filtered to the requested `paths` before synthesizing
+/// their patches.
+pub fn git_diff_paths(
+    staged: bool,
+    untracked_files: Option<&[String]>,
+    root: &Path,
+    paths: &[String],
+) -> Result<String, String> {
+    diff_impl(staged, untracked_files, root, Some(paths))
+}
+
+/// `-- <paths>` pathspec appended when scoping to specific files; omitted
+/// (whole-repo diff) when `paths` is `None`.
+fn scoped_args<'a>(base: &[&'a str], paths: Option<&'a [String]>) -> Vec<&'a str> {
+    let mut args: Vec<&str> = base.to_vec();
+    if let Some(paths) = paths {
+        args.push("--");
+        args.extend(paths.iter().map(|s| s.as_str()));
+    }
+    args
+}
+
+fn diff_impl(
+    staged: bool,
+    untracked_files: Option<&[String]>,
+    root: &Path,
+    paths: Option<&[String]>,
+) -> Result<String, String> {
     let mut parts: Vec<String> = Vec::new();
 
-    let unstaged = git_output(&["diff", DIFF_FLAGS[0], DIFF_FLAGS[1]])
-        .map(|b| String::from_utf8_lossy(&b).into_owned())?;
+    let unstaged_args = scoped_args(&["diff", DIFF_FLAGS[0], DIFF_FLAGS[1]], paths);
+    let unstaged =
+        git_output_at(root, &unstaged_args).map(|b| String::from_utf8_lossy(&b).into_owned())?;
     if !unstaged.is_empty() {
         parts.push(unstaged);
     }
     if staged {
-        let s = git_output(&["diff", DIFF_FLAGS[0], DIFF_FLAGS[1], "--staged"])
-            .map(|b| String::from_utf8_lossy(&b).into_owned())?;
+        let staged_args = scoped_args(&["diff", DIFF_FLAGS[0], DIFF_FLAGS[1], "--staged"], paths);
+        let s =
+            git_output_at(root, &staged_args).map(|b| String::from_utf8_lossy(&b).into_owned())?;
         if !s.is_empty() {
             parts.push(s);
         }
     }
-    if untracked {
-        let u = untracked_files_diff(root);
+    if let Some(untracked_files) = untracked_files {
+        // Scope the synthesized-patch set to the requested paths too, so a
+        // path-scoped request doesn't drag in every other untracked file.
+        let scoped: Vec<String> = match paths {
+            Some(paths) => untracked_files
+                .iter()
+                .filter(|f| paths.contains(f))
+                .cloned()
+                .collect(),
+            None => untracked_files.to_vec(),
+        };
+        let u = untracked_files_diff_for(root, &scoped);
         if !u.is_empty() {
             parts.push(u);
         }
@@ -138,9 +205,12 @@ fn synthesize_untracked_patch(file: &str, bytes: &[u8], unreadable: bool) -> Str
 
 // Untracked files have no git diff; synthesize a new-file patch per file so
 // they render like any other addition. The whole block gets a leading '\n'
-// so it joins onto the tracked-diff parts — matches v1 byte-for-byte.
-fn untracked_files_diff(root: &Path) -> String {
-    let files = untracked_file_paths(root);
+// so it joins onto the tracked-diff parts — matches v1 byte-for-byte. Takes
+// the file list rather than calling `untracked_file_paths` itself: the
+// caller (the diff endpoint) already computed it once for the response's
+// `untrackedFiles` field, and re-running `ls-files` here would fork git a
+// second time for the same answer.
+fn untracked_files_diff_for(root: &Path, files: &[String]) -> String {
     if files.is_empty() {
         return String::new();
     }
@@ -148,11 +218,11 @@ fn untracked_files_diff(root: &Path) -> String {
     for file in files {
         // An unreadable file must not vanish from the patch while still
         // listed in untrackedFiles — it renders as the binary placeholder.
-        let (bytes, unreadable) = match std::fs::read(root.join(&file)) {
+        let (bytes, unreadable) = match std::fs::read(root.join(file)) {
             Ok(b) => (b, false),
             Err(_) => (Vec::new(), true),
         };
-        patches.push(synthesize_untracked_patch(&file, &bytes, unreadable));
+        patches.push(synthesize_untracked_patch(file, &bytes, unreadable));
     }
     if patches.is_empty() {
         String::new()
@@ -253,6 +323,98 @@ pub fn resolve_diff_refs(custom_args: Option<&[String]>) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn init_repo(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("krit-git-test-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@test.test"]);
+        run(&["config", "user.name", "test"]);
+        dir
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn git_diff_paths_scopes_to_requested_files() {
+        let root = init_repo("scoped");
+        std::fs::write(root.join("a.rs"), "one\n").unwrap();
+        std::fs::write(root.join("b.rs"), "two\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        std::fs::write(root.join("a.rs"), "one-changed\n").unwrap();
+        std::fs::write(root.join("b.rs"), "two-changed\n").unwrap();
+
+        let scoped = git_diff_paths(false, None, &root, &["a.rs".to_string()]).unwrap();
+        assert!(scoped.contains("a.rs"));
+        assert!(
+            !scoped.contains("b.rs"),
+            "scoping to a.rs must not pull in b.rs's diff at all: {scoped}"
+        );
+
+        let full = git_diff(false, None, &root).unwrap();
+        assert!(full.contains("a.rs") && full.contains("b.rs"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_diff_paths_scopes_untracked_synthesis_to_requested_paths() {
+        let root = init_repo("scoped-untracked");
+        std::fs::write(root.join("tracked.rs"), "x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        std::fs::write(root.join("new1.rs"), "n1\n").unwrap();
+        std::fs::write(root.join("new2.rs"), "n2\n").unwrap();
+
+        let untracked = untracked_file_paths(&root);
+        assert_eq!(untracked.len(), 2, "both new files should be untracked");
+
+        let scoped =
+            git_diff_paths(false, Some(&untracked), &root, &["new1.rs".to_string()]).unwrap();
+        assert!(scoped.contains("new1.rs"));
+        assert!(
+            !scoped.contains("new2.rs"),
+            "untracked synthesis must be scoped to requested paths too: {scoped}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_single_file_param_routes_through_the_scoped_path() {
+        // The 1-element case IS git_diff_paths — no separate single-file
+        // code path.
+        let root = init_repo("single-file-equivalence");
+        std::fs::write(root.join("a.rs"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("a.rs"), "one-changed\n").unwrap();
+
+        let via_paths = git_diff_paths(false, None, &root, &["a.rs".to_string()]).unwrap();
+        assert!(via_paths.contains("one-changed"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn refs(args: &[&str]) -> (String, String) {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();

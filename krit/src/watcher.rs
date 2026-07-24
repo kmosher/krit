@@ -122,13 +122,17 @@ fn content_hash(path: &Path) -> Option<u64> {
     Some(h.finish())
 }
 
-/// Watches `root` and calls `on_change(relative_path)` for each file whose
-/// content actually changed (or that disappeared). Returns None (with a
-/// warning) if the watcher can't start — losing live refresh is degraded,
-/// not fatal; the rest of the server keeps working.
+/// Watches `root` and calls `on_change(paths)` once per debounce tick with
+/// every repo-relative path whose content actually changed (or that
+/// disappeared) — never per-path (that per-file fanout is exactly the
+/// amplification this batches away; see
+/// docs/design/reactive-loop-perf.md). Skipped entirely for a tick that
+/// resolves to no real changes (an all-ignored or all-mtime-churn burst).
+/// Returns None (with a warning) if the watcher can't start — losing live
+/// refresh is degraded, not fatal; the rest of the server keeps working.
 pub fn watch_repo(
     root: PathBuf,
-    on_change: impl Fn(String) + Send + 'static,
+    on_change: impl Fn(Vec<String>) + Send + 'static,
 ) -> Option<RepoWatcher> {
     let mut hashes: HashMap<String, u64> = HashMap::new();
     let handler_root = root.clone();
@@ -145,6 +149,9 @@ pub fn watch_repo(
             // A HashSet, not a Vec+contains: a churn burst is easily 10k paths,
             // and O(n²) membership there is 100M comparisons per tick.
             let mut seen: HashSet<PathBuf> = HashSet::new();
+            // The tick's actually-changed, filtered, deduped paths — collected
+            // and handed to on_change once, not per path.
+            let mut changed: Vec<String> = Vec::new();
             for event in events {
                 for path in &event.paths {
                     if !seen.insert(path.clone()) {
@@ -164,7 +171,7 @@ pub fn watch_repo(
                         None => {
                             // Deleted/unreadable: only an event if we'd seen it.
                             if hashes.remove(&rel_str).is_some() {
-                                on_change(rel_str);
+                                changed.push(rel_str);
                             }
                         }
                         Some(h) => {
@@ -172,10 +179,13 @@ pub fn watch_repo(
                                 continue; // mtime-only churn
                             }
                             hashes.insert(rel_str.clone(), h);
-                            on_change(rel_str);
+                            changed.push(rel_str);
                         }
                     }
                 }
+            }
+            if !changed.is_empty() {
+                on_change(changed);
             }
         },
     ) {
@@ -201,6 +211,7 @@ pub fn watch_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
@@ -335,6 +346,108 @@ mod tests {
             h0,
             content_hash(&p).unwrap(),
             "mtime-only churn on an oversized file must not change the hash"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_burst_of_changes_yields_one_batched_callback_invocation() {
+        // The whole point of A2: two files changed inside one debounce
+        // window must arrive as ONE Vec, not two per-path callbacks.
+        let dir = scratch("batch-callback");
+        std::fs::write(dir.join("a.txt"), b"a1").unwrap();
+        std::fs::write(dir.join("b.txt"), b"b1").unwrap();
+
+        let batches: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let batches_cb = batches.clone();
+        let watcher = watch_repo(dir.clone(), move |paths| {
+            batches_cb.lock().unwrap().push(paths);
+        })
+        .expect("watcher starts");
+
+        // Let the debouncer's startup file-ID scan settle before writing —
+        // otherwise the initial scan itself can race the burst below. Generous
+        // margin: this runs alongside whatever else is loading the box.
+        std::thread::sleep(Duration::from_millis(1500));
+
+        std::fs::write(dir.join("a.txt"), b"a2").unwrap();
+        std::fs::write(dir.join("b.txt"), b"b2").unwrap();
+
+        // Poll rather than one fixed sleep — robust to a loaded scheduler
+        // pushing the debounce tick out further than DEBOUNCE_MS.
+        for _ in 0..50 {
+            if !batches.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        drop(watcher);
+
+        let batches = batches.lock().unwrap();
+        assert_eq!(
+            batches.len(),
+            1,
+            "one burst of changes must produce exactly one callback invocation, not one per file: {batches:?}"
+        );
+        let mut got = batches[0].clone();
+        got.sort();
+        assert_eq!(got, vec!["a.txt".to_string(), "b.txt".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tick_with_no_real_changes_never_calls_back() {
+        // mtime-only churn (a touch) must not invoke on_change at all — an
+        // empty Vec is never a valid frame on the wire, so the watcher must
+        // suppress the call entirely rather than pass one through.
+        let dir = scratch("empty-tick-no-callback");
+        let f = dir.join("f.txt");
+        std::fs::write(&f, b"same").unwrap();
+
+        let calls: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let calls_cb = calls.clone();
+        let watcher = watch_repo(dir.clone(), move |_paths| {
+            *calls_cb.lock().unwrap() += 1;
+        })
+        .expect("watcher starts");
+
+        // The watcher only learns a path's baseline hash from events it
+        // observes AFTER it starts — a file written before `watch_repo` was
+        // called has no recorded baseline yet, so its first-ever observed
+        // event is unconditionally "new". Establish that baseline for real
+        // first (poll for it), THEN touch with unchanged bytes and confirm
+        // that second, content-identical event adds no further call.
+        std::fs::write(&f, b"baseline").unwrap();
+        for _ in 0..50 {
+            if *calls.lock().unwrap() >= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let after_baseline = *calls.lock().unwrap();
+        assert_eq!(
+            after_baseline, 1,
+            "the baseline-establishing write must itself call back once"
+        );
+
+        // Touch: same bytes as the baseline, new mtime — content_hash, now
+        // primed with a real baseline, must swallow this one.
+        let t = std::time::SystemTime::now() + Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(1500));
+        drop(watcher);
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            after_baseline,
+            "mtime-only churn over an already-known baseline must not call back again"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

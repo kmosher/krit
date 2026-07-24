@@ -85,7 +85,10 @@ pub fn reanchor_file_comments(
         .into_iter()
         .filter(|c| c.status != "resolved" && c.side == "additions")
         .collect();
-    let mut changed = Vec::new();
+    // Collect every mover's update first and apply them in one store write
+    // (CommentStore::update_many) — a reanchor pass over C moved comments
+    // must persist once, not C times.
+    let mut updates: Vec<(String, UpdateFields)> = Vec::new();
 
     for comment in targets {
         let block: Vec<&str> = comment.line_content.split('\n').collect();
@@ -97,15 +100,13 @@ pub fn reanchor_file_comments(
                 if comment.outdated == Some(true) {
                     continue;
                 }
-                if let Some(updated) = store.update(
-                    &comment.id,
+                updates.push((
+                    comment.id,
                     UpdateFields {
                         outdated: Some(true),
                         ..Default::default()
                     },
-                ) {
-                    changed.push(updated);
-                }
+                ));
             }
             Some(start) => {
                 let end_line = comment.end_line_or_start();
@@ -116,21 +117,19 @@ pub fn reanchor_file_comments(
                 {
                     continue;
                 }
-                if let Some(updated) = store.update(
-                    &comment.id,
+                updates.push((
+                    comment.id,
                     UpdateFields {
                         line_number: Some(start),
                         end_line: Some(new_end),
                         outdated: Some(false),
                         ..Default::default()
                     },
-                ) {
-                    changed.push(updated);
-                }
+                ));
             }
         }
     }
-    changed
+    store.update_many(updates)
 }
 
 #[cfg(test)]
@@ -248,6 +247,44 @@ mod tests {
         // Neither was flagged outdated.
         assert_eq!(store.get("resolved").unwrap().outdated, None);
         assert_eq!(store.get("deletion").unwrap().outdated, None);
+    }
+
+    #[test]
+    fn batches_multiple_movers_through_one_store_write() {
+        // Three comments move in the same file change — reanchor_file_comments
+        // must route them all through CommentStore::update_many (one persist),
+        // not one store.update per comment. Exercised end-to-end via a
+        // file-backed store: every mover's new position must land AND be
+        // durable after reload, proving the batch actually persisted.
+        let root = temp_root_with(
+            "batch-movers",
+            b"a\nx\nlet a = 1;\ny\nlet b = 2;\nz\nlet c = 3;",
+        );
+        let path = std::env::temp_dir().join(format!(
+            "krit-reanchor-batch-store-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut store = CommentStore::new(Some(path.clone()));
+        store.add(comment("c1", 1, "let a = 1;", "additions", "open"));
+        store.add(comment("c2", 1, "let b = 2;", "additions", "open"));
+        store.add(comment("c3", 1, "let c = 3;", "additions", "open"));
+
+        let changed = reanchor_file_comments("f.rs", &mut store, &root);
+        assert_eq!(changed.len(), 3);
+        let mut lines: Vec<u32> = changed.iter().map(|c| c.line_number).collect();
+        lines.sort();
+        assert_eq!(lines, vec![3, 5, 7]);
+
+        // Reload proves the batch was actually persisted (not just applied
+        // in memory), and every mover survived the same write.
+        let reloaded = CommentStore::new(Some(path.clone()));
+        assert_eq!(reloaded.get("c1").unwrap().line_number, 3);
+        assert_eq!(reloaded.get("c2").unwrap().line_number, 5);
+        assert_eq!(reloaded.get("c3").unwrap().line_number, 7);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

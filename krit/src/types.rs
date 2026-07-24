@@ -104,6 +104,13 @@ pub enum Event {
     FileChanged {
         path: String,
     },
+    /// Coalesced fs-watcher output: one frame per debounce tick covering every
+    /// file whose content actually changed, replacing the per-path
+    /// `FileChanged` fanout on that path (see docs/design/reactive-loop-perf.md).
+    /// `FileChanged` itself stays in the enum for other callers.
+    FilesChanged {
+        paths: Vec<String>,
+    },
     FileWritten {
         path: Option<String>,
     },
@@ -164,6 +171,18 @@ mod tests {
                 path: "a.rs".into()
             }),
             r#"{"type":"file-changed","path":"a.rs"}"#
+        );
+        assert_eq!(
+            js(&Event::FilesChanged {
+                paths: vec!["a.rs".into()]
+            }),
+            r#"{"type":"files-changed","paths":["a.rs"]}"#
+        );
+        assert_eq!(
+            js(&Event::FilesChanged {
+                paths: vec!["a.rs".into(), "b.rs".into()]
+            }),
+            r#"{"type":"files-changed","paths":["a.rs","b.rs"]}"#
         );
         assert_eq!(
             js(&Event::FileWritten { path: None }),
