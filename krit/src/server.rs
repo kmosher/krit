@@ -212,6 +212,43 @@ fn extract_file_patch(patch: &str, file_path: &str) -> String {
     }
 }
 
+/// Each requested path's fragment out of `patch`, in request order, empty
+/// ("no pending diff for this path") fragments dropped, joined into one
+/// patch string. Shared by the 1-file and N-file `?file=` cases in
+/// `api_diff` — one implementation, not "N-file logic plus a 1-file
+/// special case".
+fn join_requested_fragments(patch: &str, files: &[String]) -> String {
+    files
+        .iter()
+        .map(|f| extract_file_patch(patch, f))
+        .filter(|f| !f.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Scopes a `path`-keyed JSON array (the `binaryFiles` shape) down to just
+/// `files_set` — order preserved.
+fn filter_values_by_path<'a>(items: &'a [Value], files_set: &HashSet<&str>) -> Vec<&'a Value> {
+    items
+        .iter()
+        .filter(|v| {
+            v["path"]
+                .as_str()
+                .map(|p| files_set.contains(p))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Scopes a plain path list (the `untrackedFiles` shape) down to just
+/// `files_set` — order preserved.
+fn filter_paths_by_set<'a>(paths: &'a [String], files_set: &HashSet<&str>) -> Vec<&'a String> {
+    paths
+        .iter()
+        .filter(|p| files_set.contains(p.as_str()))
+        .collect()
+}
+
 fn parse_binary_files(patch: &str, untracked: &HashSet<String>) -> Vec<Value> {
     let lines: Vec<&str> = patch.split('\n').collect();
     let mut result = Vec::new();
@@ -362,11 +399,6 @@ async fn api_diff(
     // gives request-order concatenation and the "no pending diff for this
     // path" empty-fragment case — one implementation for 1 file and N alike.
     if !files.is_empty() {
-        let fragments: Vec<String> = files
-            .iter()
-            .map(|f| extract_file_patch(&patch, f))
-            .filter(|f| !f.is_empty())
-            .collect();
         let mut file_contents = serde_json::Map::new();
         for f in &files {
             if binary_set.contains(f) {
@@ -382,18 +414,12 @@ async fn api_diff(
         }
         let files_set: HashSet<&str> = files.iter().map(|s| s.as_str()).collect();
         return axum::Json(json!({
-            "patch": fragments.join("\n"),
+            "patch": join_requested_fragments(&patch, &files),
             "repoName": repo_name,
             "branch": branch,
             "customMode": is_custom,
-            "binaryFiles": binary_files
-                .iter()
-                .filter(|b| b["path"].as_str().map(|p| files_set.contains(p)).unwrap_or(false))
-                .collect::<Vec<_>>(),
-            "untrackedFiles": untracked_files
-                .iter()
-                .filter(|f| files_set.contains(f.as_str()))
-                .collect::<Vec<_>>(),
+            "binaryFiles": filter_values_by_path(&binary_files, &files_set),
+            "untrackedFiles": filter_paths_by_set(&untracked_files, &files_set),
             "fileContents": file_contents,
         }))
         .into_response();
@@ -1084,6 +1110,18 @@ mod tests {
 
     const PATCH: &str = "diff --git a/src/a.rs b/src/a.rs\nindex 111..222 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/img.png b/img.png\nnew file mode 100644\nBinary files /dev/null and b/img.png differ\ndiff --git a/b.txt b/b.txt\ndeleted file mode 100644\nBinary files a/b.txt and /dev/null differ";
 
+    /// In-memory state (no comment-store file, no custom diff args) rooted at
+    /// the crate's own cwd — good enough for the branch-cache tests below,
+    /// which only need `state.branch_cache` and a repo that `git` can read.
+    fn test_state() -> AppState {
+        new_state(
+            Hub::new(),
+            CommentStore::new(None),
+            std::env::current_dir().unwrap(),
+            None,
+        )
+    }
+
     #[test]
     fn parses_file_paths_in_order() {
         assert_eq!(
@@ -1118,5 +1156,92 @@ mod tests {
         assert_eq!(bins.len(), 2);
         assert_eq!(bins[0], json!({"path": "img.png", "type": "untracked"}));
         assert_eq!(bins[1], json!({"path": "b.txt", "type": "deleted"}));
+    }
+
+    // ---------- multi-file /api/diff assembly ----------
+    //
+    // `join_requested_fragments` / `filter_values_by_path` /
+    // `filter_paths_by_set` are the pure pieces `api_diff`'s `file=`-scoped
+    // branch is built from — tested directly rather than through a full
+    // axum handler.
+
+    #[test]
+    fn join_requested_fragments_pulls_only_the_requested_paths_in_request_order() {
+        // Request order (b.txt, then src/a.rs) is the reverse of PATCH's own
+        // header order — the joined result must follow the request, not the
+        // patch.
+        let files = vec!["b.txt".to_string(), "src/a.rs".to_string()];
+        let joined = join_requested_fragments(PATCH, &files);
+        assert!(joined.starts_with("diff --git a/b.txt"));
+        assert!(joined.contains("diff --git a/src/a.rs"));
+        assert!(!joined.contains("img.png"));
+    }
+
+    #[test]
+    fn join_requested_fragments_drops_paths_with_no_pending_diff() {
+        // "reverted between the watcher event and this request" — an absent
+        // path contributes nothing, not an empty fragment marker.
+        let files = vec!["src/a.rs".to_string(), "absent.rs".to_string()];
+        let joined = join_requested_fragments(PATCH, &files);
+        assert!(joined.starts_with("diff --git a/src/a.rs"));
+        assert!(joined.ends_with("+new"));
+    }
+
+    #[test]
+    fn join_requested_fragments_single_file_matches_the_multi_file_shape() {
+        // A single `file=` must produce the exact same fragment text as the
+        // same file requested alongside others — the 1-file case is not a
+        // separate code path.
+        let one = vec!["src/a.rs".to_string()];
+        let two = vec!["src/a.rs".to_string(), "b.txt".to_string()];
+        let single = join_requested_fragments(PATCH, &one);
+        let multi = join_requested_fragments(PATCH, &two);
+        assert!(!single.is_empty());
+        assert!(multi.starts_with(&single));
+    }
+
+    #[test]
+    fn filter_values_by_path_scopes_binary_files_to_the_requested_set() {
+        let untracked: HashSet<String> = ["img.png".to_string()].into();
+        let bins = parse_binary_files(PATCH, &untracked);
+        let files_set: HashSet<&str> = ["b.txt"].into_iter().collect();
+        let scoped = filter_values_by_path(&bins, &files_set);
+        assert_eq!(scoped, vec![&json!({"path": "b.txt", "type": "deleted"})]);
+    }
+
+    #[test]
+    fn filter_paths_by_set_scopes_untracked_files_to_the_requested_set() {
+        let untracked = vec!["img.png".to_string(), "other.png".to_string()];
+        let files_set: HashSet<&str> = ["img.png"].into_iter().collect();
+        let scoped = filter_paths_by_set(&untracked, &files_set);
+        assert_eq!(scoped, vec![&"img.png".to_string()]);
+    }
+
+    // ---------- branch-name TTL cache ----------
+
+    #[test]
+    fn cached_branch_name_returns_the_cached_value_within_ttl() {
+        let state = test_state();
+        // Seed a synthetic value that could never be `git`'s real answer —
+        // if `cached_branch_name` forked `git` instead of reading the cache,
+        // this assertion would fail.
+        *lock(&state.branch_cache) = Some(("sentinel-branch".to_string(), Instant::now()));
+        assert_eq!(cached_branch_name(&state), "sentinel-branch");
+    }
+
+    #[test]
+    fn cached_branch_name_refreshes_once_the_ttl_has_elapsed() {
+        let state = test_state();
+        let stale_at = Instant::now() - BRANCH_CACHE_TTL - Duration::from_millis(50);
+        *lock(&state.branch_cache) = Some(("sentinel-branch".to_string(), stale_at));
+        let refreshed = cached_branch_name(&state);
+        // A stale entry is not returned as-is; it's replaced by a fresh
+        // `git::branch_name()` call (this crate's own repo, so never equal
+        // to the sentinel).
+        assert_ne!(refreshed, "sentinel-branch");
+        // And the cache itself now holds the fresh value + a recent timestamp.
+        let (cached, fetched_at) = lock(&state.branch_cache).clone().unwrap();
+        assert_eq!(cached, refreshed);
+        assert!(fetched_at.elapsed() < BRANCH_CACHE_TTL);
     }
 }

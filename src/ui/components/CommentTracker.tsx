@@ -1,5 +1,4 @@
-import { useMemo, useRef, useState, useCallback, useLayoutEffect, memo } from 'react'
-import type { UIEvent } from 'react'
+import { useMemo, useRef, useState, useLayoutEffect, memo } from 'react'
 import {
   MessageSquare,
   CheckCircle2,
@@ -9,6 +8,7 @@ import {
 } from 'lucide-react'
 import type { ReviewComment } from '../../types'
 import { timeAgo, truncate, fileName } from '../utils'
+import { useVirtualRows } from '../hooks/useVirtualRows'
 
 interface CommentTrackerProps {
   comments: ReviewComment[]
@@ -118,10 +118,7 @@ const CommentRow = memo(function CommentRow({
 })
 
 function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps) {
-  const scrollRef = useRef<HTMLDivElement>(null)
   const headerRef = useRef<HTMLDivElement>(null)
-  const [scrollTop, setScrollTop] = useState(0)
-  const [viewportHeight, setViewportHeight] = useState(0)
   const [headerHeight, setHeaderHeight] = useState(0)
 
   // Sort + all four status counts in one memoized pass, recomputed only
@@ -151,25 +148,12 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
     return { sorted, draftCount, openCount, repliedCount, resolvedCount }
   }, [comments])
 
-  const handleScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
-    setScrollTop(e.currentTarget.scrollTop)
-  }, [])
-
-  // `.ct` (measured here) is the scroll container for BOTH the header and
-  // the row list — it scrolls as one region (unchanged from before
-  // virtualization). Track the header's rendered height separately so the
-  // row-window math below can subtract it out: scrollTop is relative to the
-  // top of the header, but row 0's true position is right after it.
-  useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    setViewportHeight(el.clientHeight)
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => setViewportHeight(el.clientHeight))
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [sorted.length])
-
+  // `.ct` (the hook's scrollRef) is the scroll container for BOTH the
+  // header and the row list — it scrolls as one region (unchanged from
+  // before virtualization). Track the header's rendered height separately
+  // so the row-window math can subtract it out via `headerOffset`:
+  // scrollTop is relative to the top of the header, but row 0's true
+  // position is right after it.
   useLayoutEffect(() => {
     const el = headerRef.current
     if (!el) return
@@ -181,15 +165,19 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
   }, [draftCount, openCount, repliedCount, resolvedCount])
 
   const total = sorted.length
-  const listScrollTop = Math.max(0, scrollTop - headerHeight)
-  const startIndex = Math.max(0, Math.floor(listScrollTop / ROW_HEIGHT) - OVERSCAN)
-  const endIndex = Math.min(total, Math.ceil((listScrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN)
+  const { scrollRef, onScroll, startIndex, endIndex, totalHeight, offsetY } = useVirtualRows({
+    itemCount: total,
+    rowHeight: ROW_HEIGHT,
+    overscan: OVERSCAN,
+    headerOffset: headerHeight,
+    resizeDeps: [total],
+  })
   const visible = sorted.slice(startIndex, endIndex)
 
   if (total === 0) return null
 
   return (
-    <div className="ct" ref={scrollRef} onScroll={handleScroll}>
+    <div className="ct" ref={scrollRef} onScroll={onScroll}>
       <div className="ct-header" ref={headerRef}>
         <MessageSquare size={14} />
         <span className="ct-title">Comments</span>
@@ -200,13 +188,13 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
           {resolvedCount > 0 && <span className="ct-count ct-count-resolved">{resolvedCount} resolved</span>}
         </span>
       </div>
-      <ul className="ct-list" style={{ position: 'relative', height: total * ROW_HEIGHT }}>
+      <ul className="ct-list" style={{ position: 'relative', height: totalHeight }}>
         {visible.map((comment, i) => (
           <CommentRow
             key={comment.id}
             comment={comment}
             status={getCommentStatus(comment)}
-            top={(startIndex + i) * ROW_HEIGHT}
+            top={offsetY + i * ROW_HEIGHT}
             onJump={onJump}
             onDelete={onDelete}
           />

@@ -1,5 +1,4 @@
-import { useState, useMemo, useRef, useCallback, useLayoutEffect, memo } from 'react'
-import type { UIEvent } from 'react'
+import { useState, useMemo, useCallback, memo } from 'react'
 import {
   ChevronRight,
   Folder,
@@ -16,6 +15,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-react'
 import type { FileDiffMetadata } from '@pierre/diffs'
+import { useVirtualRows } from '../hooks/useVirtualRows'
 
 interface FileTreeProps {
   files: FileDiffMetadata[]
@@ -264,10 +264,6 @@ function FileTreeImpl({
   // the set == expanded, matching the old `defaultExpanded={true}` default.
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(() => new Set())
 
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const [scrollTop, setScrollTop] = useState(0)
-  const [viewportHeight, setViewportHeight] = useState(0)
-
   const filteredFiles = useMemo(() => {
     if (!filter) return files
     const lower = filter.toLowerCase()
@@ -291,25 +287,16 @@ function FileTreeImpl({
     })
   }, [])
 
-  const handleScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
-    setScrollTop(e.currentTarget.scrollTop)
-  }, [])
-
-  // Track the scroller's viewport height so the visible-row window can be
-  // computed. Re-measures on resize (e.g. window resize, sidebar toggle).
-  useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    setViewportHeight(el.clientHeight)
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => setViewportHeight(el.clientHeight))
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [collapsed])
-
   const total = flatRows.length
-  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN)
-  const endIndex = Math.min(total, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN)
+  // FileTree's search bar (`ft-search`) is a sibling outside the scrollable
+  // `.ft` div, so no headerOffset is needed — unlike CommentTracker, whose
+  // counts header scrolls with the list.
+  const { scrollRef, onScroll, startIndex, endIndex, totalHeight, offsetY } = useVirtualRows({
+    itemCount: total,
+    rowHeight: ROW_HEIGHT,
+    overscan: OVERSCAN,
+    resizeDeps: [collapsed],
+  })
   const visibleRows = flatRows.slice(startIndex, endIndex)
 
   if (collapsed) {
@@ -355,10 +342,10 @@ function FileTreeImpl({
           />
         </div>
       </div>
-      <div className="ft" ref={scrollRef} onScroll={handleScroll}>
-        <ul className="ft-list ft-root" style={{ position: 'relative', height: total * ROW_HEIGHT }}>
+      <div className="ft" ref={scrollRef} onScroll={onScroll}>
+        <ul className="ft-list ft-root" style={{ position: 'relative', height: totalHeight }}>
           {visibleRows.map((row, i) => {
-            const top = (startIndex + i) * ROW_HEIGHT
+            const top = offsetY + i * ROW_HEIGHT
             if (row.type === 'dir') {
               return (
                 <TreeDirRow
