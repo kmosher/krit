@@ -309,9 +309,9 @@ async fn serve(
     }
 
     // Always-on fs-watcher; sync callback (broadcast::send is sync), safe
-    // from the watcher thread. Setup runs on a blocking thread because the
-    // debouncer's file-ID cache scans the whole repo tree — long enough on a
-    // large repo to look like a hung server if it gates startup or serving.
+    // from the watcher thread. Setup runs on a blocking thread because
+    // registering a recursive watch is synchronous filesystem work, and
+    // nothing about it should gate startup or serving.
     // The watcher is deliberately leaked: it must live for the whole process,
     // and every exit path goes through process::exit anyway.
     {

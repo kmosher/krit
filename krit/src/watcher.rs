@@ -8,7 +8,7 @@
 //! change bytes (mtime churn from checkout/rebase/touch).
 
 use notify::RecursiveMode;
-use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use notify_debouncer_full::{DebounceEventResult, NoCache, new_debouncer_opt};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -79,10 +79,7 @@ fn is_git_ignored(root: &Path, rel: &Path) -> bool {
 
 pub struct RepoWatcher {
     // Held for its lifetime; dropping stops the watch.
-    _debouncer: notify_debouncer_full::Debouncer<
-        notify::RecommendedWatcher,
-        notify_debouncer_full::RecommendedCache,
-    >,
+    _debouncer: notify_debouncer_full::Debouncer<notify::RecommendedWatcher, NoCache>,
 }
 
 fn content_hash(path: &Path) -> Option<u64> {
@@ -137,7 +134,18 @@ pub fn watch_repo(
     let mut hashes: HashMap<String, u64> = HashMap::new();
     let handler_root = root.clone();
 
-    let mut debouncer = match new_debouncer(
+    // `NoCache`, not the platform default. On macOS the default is `FileIdMap`,
+    // whose `add_path` runs `WalkDir::new(root).follow_links(true)` over the
+    // WHOLE tree at `watch()` time — none of the filtering above applies to it,
+    // so it stats and stores a (PathBuf, FileId) for every path under `.git`,
+    // `node_modules`, `target` and `dist` as well. In a pnpm monorepo the
+    // symlink farm turns 350k real files into 3.8M followed paths: measured
+    // 2.6 GB resident and ~35s of startup CPU, held for the life of the review.
+    // The map exists solely to stitch rename events on back-ends that don't
+    // emit rename cookies, and krit never uses that: every path in a tick is
+    // re-hashed by content, so a rename is already handled as its constituent
+    // remove and create.
+    let mut debouncer = match new_debouncer_opt::<_, notify::RecommendedWatcher, NoCache>(
         Duration::from_millis(DEBOUNCE_MS),
         None,
         move |result: DebounceEventResult| {
@@ -188,6 +196,8 @@ pub fn watch_repo(
                 on_change(changed);
             }
         },
+        NoCache::new(),
+        notify::Config::default(),
     ) {
         Ok(d) => d,
         Err(err) => {
