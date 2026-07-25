@@ -47,6 +47,44 @@ export interface UseVirtualRowsResult {
 
 const NO_EXTRA_DEPS: DependencyList = []
 
+/** The visible-row window and layout offsets. Fields match UseVirtualRowsResult
+ *  minus the React-only handles (scrollRef/onScroll). */
+export interface RowWindow {
+  startIndex: number
+  endIndex: number
+  totalHeight: number
+  offsetY: number
+}
+
+/** Pure windowing math, split out of the hook so it can be exhaustively unit
+ *  tested without a DOM/ResizeObserver. Given the current scroll position and
+ *  measured viewport height, returns the half-open `[startIndex, endIndex)`
+ *  slice of rows to render (padded by `overscan` and clamped to
+ *  `[0, itemCount]`) plus the total scroll height and the pixel top of the
+ *  first rendered row. `headerOffset` accounts for a non-virtualized header
+ *  sharing the same scroll container. */
+export function computeRowWindow(
+  itemCount: number,
+  rowHeight: number,
+  overscan: number,
+  headerOffset: number,
+  scrollTop: number,
+  viewportHeight: number,
+): RowWindow {
+  const listScrollTop = Math.max(0, scrollTop - headerOffset)
+  const startIndex = Math.max(0, Math.floor(listScrollTop / rowHeight) - overscan)
+  const endIndex = Math.min(
+    itemCount,
+    Math.ceil((listScrollTop + viewportHeight) / rowHeight) + overscan,
+  )
+  return {
+    startIndex,
+    endIndex,
+    totalHeight: itemCount * rowHeight,
+    offsetY: startIndex * rowHeight,
+  }
+}
+
 export function useVirtualRows({
   itemCount,
   rowHeight,
@@ -76,19 +114,14 @@ export function useVirtualRows({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, resizeDeps)
 
-  const listScrollTop = Math.max(0, scrollTop - headerOffset)
-  const startIndex = Math.max(0, Math.floor(listScrollTop / rowHeight) - overscan)
-  const endIndex = Math.min(
+  const window = computeRowWindow(
     itemCount,
-    Math.ceil((listScrollTop + viewportHeight) / rowHeight) + overscan,
+    rowHeight,
+    overscan,
+    headerOffset,
+    scrollTop,
+    viewportHeight,
   )
 
-  return {
-    scrollRef,
-    onScroll,
-    startIndex,
-    endIndex,
-    totalHeight: itemCount * rowHeight,
-    offsetY: startIndex * rowHeight,
-  }
+  return { scrollRef, onScroll, ...window }
 }

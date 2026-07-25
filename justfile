@@ -12,10 +12,11 @@ install:
     # Apple Silicon. A forced ad-hoc sign is idempotent and cheap. No-op off macOS.
     [ "$(uname)" = Darwin ] && codesign --force -s - "${CARGO_HOME:-$HOME/.cargo}/bin/krit" || true
 
-# Rust tests + TypeScript typecheck
+# Rust tests + TypeScript typecheck + UI unit tests (Vitest)
 test:
     cd krit && cargo test
     pnpm exec tsc --noEmit
+    pnpm exec vitest run
 
 # Formatting, lints, and typecheck — what should be green before landing
 check:

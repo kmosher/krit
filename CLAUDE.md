@@ -14,6 +14,13 @@ exist.
   Release builds **embed** dist at compile time (`krit/build.rs` auto-rebuilds
   it when `src/ui` is newer; `KRIT_SKIP_UI_BUILD=1` opts out).
 - `just` has the entry points: `install` / `test` / `check` / `ui` / `dev`.
+  `just test` runs cargo tests, `tsc --noEmit`, and the Vitest UI suite.
+- UI unit tests are Vitest (`pnpm exec vitest run`, or `vitest` to watch),
+  co-located as `*.test.ts(x)` beside their source. It reuses `vite.config.ts`
+  (the `test` block) so what builds is what tests. Pure logic is tested
+  directly; hooks/components via `@testing-library/react` under happy-dom.
+  Keep testable logic as exported pure functions (see `spliceFilePatches`/
+  `splitFilePatches`, `computeRowWindow`, App's patch-fragment helpers).
 - Fresh worktrees have no `dist/` — build.rs handles it, but the vite build
   needs `node_modules` (symlink from canonical or `pnpm install`).
 

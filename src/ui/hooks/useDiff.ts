@@ -66,7 +66,7 @@ export interface UseDiffOptions extends DiffOptions {
 // server's extractFilePatch boundary logic so a batch refetch can be
 // spliced back into the client's merged patch without re-fetching every
 // other file, and without re-scanning the whole patch once per path.
-function spliceFilePatches(fullPatch: string, fragments: Map<string, string>): string {
+export function spliceFilePatches(fullPatch: string, fragments: Map<string, string>): string {
   const lines = fullPatch ? fullPatch.split('\n') : []
   const targetPrefix = 'diff --git a/'
   const remaining = new Set(fragments.keys())
@@ -112,7 +112,7 @@ const BATCH_REFETCH_MAX = 40
 // GET /api/diff?file=...&file=...) into one fragment per file, keyed by the
 // file's b/-side path — the inverse of spliceFilePatches. Used to distribute
 // a single batch response across each path's slot in the merged patch.
-function splitFilePatches(patch: string): Map<string, string> {
+export function splitFilePatches(patch: string): Map<string, string> {
   const fragments = new Map<string, string>()
   if (!patch) return fragments
   const lines = patch.split('\n')

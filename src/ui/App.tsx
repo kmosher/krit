@@ -22,7 +22,7 @@ import type { SelectionAnchor } from './utils/selectionMapping'
 // line starts a new section that runs until the next one. Cheap string scan
 // (no diff parsing), so per-file re-parse below is the only place actual
 // parsing work happens.
-function splitPatchFragments(patch: string): { name: string; text: string }[] {
+export function splitPatchFragments(patch: string): { name: string; text: string }[] {
   const lines = patch.split('\n')
   const targetPrefix = 'diff --git a/'
   const fragments: { name: string; text: string }[] = []
@@ -46,7 +46,7 @@ function splitPatchFragments(patch: string): { name: string; text: string }[] {
 // walk (previously a second full pass over `patch`) so it folds into the
 // same per-file pass as parseFileFragment below instead of re-walking the
 // merged patch a second time.
-function computeFileStats(text: string): { additions: number; deletions: number } {
+export function computeFileStats(text: string): { additions: number; deletions: number } {
   let additions = 0
   let deletions = 0
   for (const line of text.split('\n')) {
@@ -79,7 +79,7 @@ function stubFile(name: string, type: FileDiffMetadata['type']): FileDiffMetadat
 // full-file metadata is what CodeView needs to render the expand-context UI
 // between hunks. Scoped to one file's fragment text (not the whole patch),
 // so it only costs O(this file) rather than O(the whole review).
-function parseFileFragment(
+export function parseFileFragment(
   name: string,
   text: string,
   contentsEntry: FileContentsMap[string] | undefined,
