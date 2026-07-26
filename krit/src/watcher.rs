@@ -11,7 +11,10 @@ use notify::RecursiveMode;
 use notify_debouncer_full::{DebounceEventResult, NoCache, new_debouncer_opt};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const DEBOUNCE_MS: u64 = 200;
@@ -31,10 +34,10 @@ const HASH_SIZE_CAP: u64 = 8 * 1024 * 1024;
 const HASH_SAMPLE_BYTES: usize = 8 * 1024;
 
 /// Fast-path filter, checked before the git-aware one: cheap enough to run on
-/// every post-debounce path so the highest-churn directories never spawn a
-/// `git check-ignore` subprocess (a `pnpm install` / `cargo build` under the
-/// root is tens of thousands of paths — one fork each is the storm we're
-/// avoiding). Two tiers:
+/// every post-debounce path, and it keeps the highest-churn directories out of
+/// the batched `check-ignore` payload entirely (a `pnpm install` / `cargo
+/// build` under the root is tens of thousands of paths, none of which need
+/// git's opinion to be dismissed). Two tiers:
 ///   - names that are never tracked content and flood hardest: `.git` (which
 ///     check-ignore wouldn't catch anyway — it isn't gitignored), plus
 ///     `node_modules` and `.claude` (installs, and sibling worktrees live at
@@ -66,15 +69,68 @@ fn is_ignored(root: &Path, rel: &Path) -> bool {
 /// The repo's own opinion: anything .gitignore (or global excludes) would
 /// ignore, the watcher ignores too — build artifacts like dist/ stop
 /// generating events without krit hardcoding every ecosystem's output dir.
-/// One subprocess per post-debounce changed path is noise-level cost.
-fn is_git_ignored(root: &Path, rel: &Path) -> bool {
-    std::process::Command::new("git")
-        .args(["check-ignore", "-q", "--"])
-        .arg(rel)
+///
+/// One subprocess for the whole tick, not one per path. A fork costs ~7.8ms
+/// here, so the per-path form spent 7.8 SECONDS on a 1000-path tick (a branch
+/// checkout, a codegen run) — inside the debounce callback, delaying the
+/// `files-changed` broadcast by that whole time. Batched, the same tick costs
+/// ~160ms.
+///
+/// Still `git check-ignore` rather than an in-process matcher because it
+/// consults the index, and git does not ignore tracked files: a file that is
+/// tracked *and* matches an ignore pattern (`git add -f`, or a pattern added
+/// later without untracking) comes back not-ignored, so its edits keep
+/// reaching the review. A pure pattern matcher answers `--no-index` by
+/// construction and would silently stop live-updating exactly those files.
+///
+/// Paths go over stdin as raw bytes, so non-UTF-8 names survive the round trip
+/// and no path can be mistaken for an option. Returns the subset of `rels`
+/// that git considers ignored; anything that goes wrong (git missing, a
+/// non-repo root) yields an empty set, leaving every path un-ignored — a
+/// spurious refresh is recoverable, a silently dropped edit is not.
+fn git_ignored_set<'a>(root: &Path, rels: impl IntoIterator<Item = &'a [u8]>) -> HashSet<Vec<u8>> {
+    let mut payload = Vec::new();
+    for rel in rels {
+        payload.extend_from_slice(rel);
+        payload.push(0);
+    }
+    if payload.is_empty() {
+        return HashSet::new(); // nothing survived the cheap filters; don't fork
+    }
+    let Ok(mut child) = Command::new("git")
+        .args(["check-ignore", "-z", "--stdin"])
         .current_dir(root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return HashSet::new();
+    };
+
+    // Feed stdin from another thread: a large tick is megabytes of paths and
+    // git streams matches back as it reads, so writing everything before
+    // reading anything deadlocks once both pipe buffers fill.
+    let mut sink = child.stdin.take().expect("stdin was piped");
+    let writer = std::thread::spawn(move || {
+        let _ = sink.write_all(&payload);
+        // Dropping `sink` closes the pipe, which is git's EOF.
+    });
+
+    let out = child.wait_with_output();
+    let _ = writer.join();
+
+    // Exit status is deliberately ignored: `check-ignore` exits 1 for the
+    // ordinary "nothing matched" case, and on a real failure stdout is empty,
+    // which already means "nothing ignored".
+    let Ok(out) = out else {
+        return HashSet::new();
+    };
+    out.stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_vec())
+        .collect()
 }
 
 pub struct RepoWatcher {
@@ -157,9 +213,11 @@ pub fn watch_repo(
             // A HashSet, not a Vec+contains: a churn burst is easily 10k paths,
             // and O(n²) membership there is 100M comparisons per tick.
             let mut seen: HashSet<PathBuf> = HashSet::new();
-            // The tick's actually-changed, filtered, deduped paths — collected
-            // and handed to on_change once, not per path.
-            let mut changed: Vec<String> = Vec::new();
+            // Survivors of the cheap per-path filters, held as (absolute,
+            // repo-relative-bytes) until the single check-ignore below rules on
+            // the whole tick at once. Hashing waits until after that verdict, so
+            // an ignored file is never read.
+            let mut candidates: Vec<(PathBuf, Vec<u8>)> = Vec::new();
             for event in events {
                 for path in &event.paths {
                     if !seen.insert(path.clone()) {
@@ -168,27 +226,38 @@ pub fn watch_repo(
                     let Ok(rel) = path.strip_prefix(&handler_root) else {
                         continue;
                     };
-                    if is_ignored(&handler_root, rel)
-                        || path.is_dir()
-                        || is_git_ignored(&handler_root, rel)
-                    {
+                    if is_ignored(&handler_root, rel) || path.is_dir() {
                         continue;
                     }
-                    let rel_str = rel.to_string_lossy().into_owned();
-                    match content_hash(path) {
-                        None => {
-                            // Deleted/unreadable: only an event if we'd seen it.
-                            if hashes.remove(&rel_str).is_some() {
-                                changed.push(rel_str);
-                            }
-                        }
-                        Some(h) => {
-                            if hashes.get(&rel_str) == Some(&h) {
-                                continue; // mtime-only churn
-                            }
-                            hashes.insert(rel_str.clone(), h);
+                    candidates.push((path.clone(), rel.as_os_str().as_bytes().to_vec()));
+                }
+            }
+            let ignored = git_ignored_set(
+                &handler_root,
+                candidates.iter().map(|(_, rel)| rel.as_slice()),
+            );
+
+            // The tick's actually-changed, filtered, deduped paths — collected
+            // and handed to on_change once, not per path.
+            let mut changed: Vec<String> = Vec::new();
+            for (path, rel) in &candidates {
+                if ignored.contains(rel) {
+                    continue;
+                }
+                let rel_str = String::from_utf8_lossy(rel).into_owned();
+                match content_hash(path) {
+                    None => {
+                        // Deleted/unreadable: only an event if we'd seen it.
+                        if hashes.remove(&rel_str).is_some() {
                             changed.push(rel_str);
                         }
+                    }
+                    Some(h) => {
+                        if hashes.get(&rel_str) == Some(&h) {
+                            continue; // mtime-only churn
+                        }
+                        hashes.insert(rel_str.clone(), h);
+                        changed.push(rel_str);
                     }
                 }
             }
@@ -229,6 +298,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A scratch repo with `*.log` ignored, one tracked `.log` (force-added)
+    /// and one untracked `.log`.
+    fn scratch_repo(name: &str) -> PathBuf {
+        let dir = scratch(name);
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git runs");
+        };
+        git(&["init", "-q", "."]);
+        std::fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(dir.join("tracked.log"), "x").unwrap();
+        std::fs::write(dir.join("untracked.log"), "x").unwrap();
+        std::fs::write(dir.join("src.rs"), "x").unwrap();
+        git(&["add", "-f", ".gitignore", "tracked.log", "src.rs"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+        dir
+    }
+
+    #[test]
+    fn batched_check_ignore_classifies_a_whole_tick_at_once() {
+        let dir = scratch_repo("ignore-batch");
+        let ignored = git_ignored_set(
+            &dir,
+            [
+                b"untracked.log".as_slice(),
+                b"tracked.log".as_slice(),
+                b"src.rs".as_slice(),
+            ],
+        );
+        assert!(
+            ignored.contains(b"untracked.log".as_slice()),
+            "an untracked file matching *.log is ignored"
+        );
+        assert!(
+            !ignored.contains(b"src.rs".as_slice()),
+            "a file matching nothing is not ignored"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tracked_file_matching_an_ignore_pattern_is_not_ignored() {
+        // The reason this shells out to git instead of matching patterns
+        // in-process: git consults the index, and does not ignore tracked
+        // files. A pure matcher would drop this file's events and its edits
+        // would silently stop reaching the review.
+        let dir = scratch_repo("ignore-tracked");
+        let ignored = git_ignored_set(&dir, [b"tracked.log".as_slice()]);
+        assert!(
+            ignored.is_empty(),
+            "a tracked file is never ignored, even matching *.log"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paths_survive_stdin_even_with_a_newline_in_the_name() {
+        // Why the exchange is NUL-delimited (-z) rather than line-based: a
+        // newline is a legal filename byte, and a line-split protocol would
+        // tear such a path into two bogus ones.
+        let dir = scratch_repo("ignore-newline");
+        std::fs::write(dir.join("we\nird.log"), "x").unwrap();
+        let ignored = git_ignored_set(&dir, [b"we\nird.log".as_slice()]);
+        assert!(
+            ignored.contains(b"we\nird.log".as_slice()),
+            "an embedded newline must round-trip intact, not split the path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_all_filtered_tick_never_forks_git() {
+        // Not just an optimization: git_ignored_set is also called for ticks
+        // outside any repo, where forking would be pointless work.
+        assert!(git_ignored_set(Path::new("/nonexistent"), []).is_empty());
     }
 
     #[test]
