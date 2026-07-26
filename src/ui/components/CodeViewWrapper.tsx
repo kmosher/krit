@@ -1,5 +1,6 @@
 import { useState, useRef, useMemo, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo } from 'react'
-import { CodeView, useStableCallback, type CodeViewHandle } from '@pierre/diffs/react'
+import { CodeView, EditProvider, useStableCallback, type CodeViewHandle } from '@pierre/diffs/react'
+import { Editor, type EditorOptions } from '@pierre/diffs/edit'
 import type {
   CodeViewItem,
   CodeViewOptions,
@@ -126,7 +127,18 @@ interface Props {
   // of the working-tree file (server-side, via POST /api/edits/delete).
   onDeleteRange?(filePath: string, anchor: SelectionAnchor): void
   onActiveFileChange?(filePath: string | null): void
+  // Whole-file fallback: opens FileEditorModal. Inline editing (below) is the
+  // primary path; this one still reaches regions the diff doesn't render.
   onEditFile?(filePath: string): void
+  // Files currently in inline edit mode — the diff's addition side becomes a
+  // live editor in place. Mirrors `viewedFiles`: the parent owns the set and
+  // we push it into `item.edit`.
+  editingFiles: Set<string>
+  onToggleEdit(filePath: string): void
+  // An inline edit session ended having changed something. Fires once per
+  // session, not per keystroke; the parent writes `contents` to the working
+  // tree. Pierre skips it entirely for sessions that made no changes.
+  onEditComplete(filePath: string, contents: string): void
   // Fires whenever the set of files with an open draft (comment or suggest
   // form) changes. Feeds the 'live-unless-active' refresh-mode policy in
   // useDiff — a file with an open draft is "active" and its background
@@ -219,6 +231,9 @@ export const CodeViewWrapper = memo(
       onDeleteRange,
       onActiveFileChange,
       onEditFile,
+      editingFiles,
+      onToggleEdit,
+      onEditComplete,
       onActiveDraftsChange,
     },
     ref,
@@ -310,7 +325,7 @@ export const CodeViewWrapper = memo(
     )
 
     const initialItems = useMemo<CodeViewItem<Metadata>[]>(
-      () => buildItems(files, fileAnnotationsMap, pending, viewedFiles, fileStatsMap),
+      () => buildItems(files, fileAnnotationsMap, pending, viewedFiles, fileStatsMap, editingFiles),
       // eslint-disable-next-line react-hooks/exhaustive-deps
       [files],
     )
@@ -413,6 +428,28 @@ export const CodeViewWrapper = memo(
       }
       lastViewedRef.current = new Set(next)
     }, [files, viewedFiles])
+
+    // Inline edit mode. Pierre ignores `edit` while an item is collapsed, so
+    // entering edit mode also expands — otherwise the button would look dead
+    // on a collapsed (viewed, or auto-collapsed) file.
+    const lastEditingRef = useRef<Set<string>>(new Set())
+    useEffect(() => {
+      const viewer = viewerRef.current
+      if (!viewer) return
+      const prev = lastEditingRef.current
+      for (const file of files) {
+        const before = prev.has(file.name)
+        const after = editingFiles.has(file.name)
+        if (before === after) continue
+        const item = viewer.getItem(file.name)
+        if (!item || item.type !== 'diff') continue
+        item.edit = after
+        if (after) item.collapsed = false
+        item.version = bumpVersion(item)
+        viewer.updateItem(item)
+      }
+      lastEditingRef.current = new Set(editingFiles)
+    }, [files, editingFiles])
 
     // Push comment-count changes into header metadata. We bump version for
     // any file whose count changed so renderHeaderMetadata re-runs.
@@ -753,6 +790,7 @@ export const CodeViewWrapper = memo(
       (item: CodeViewItem<Metadata>) => {
         if (item.type !== 'diff') return null
         const viewed = viewedFiles.has(item.id)
+        const editing = editingFiles.has(item.id)
         const empty =
           item.fileDiff.splitLineCount === 0 && item.fileDiff.unifiedLineCount === 0
         return (
@@ -782,18 +820,32 @@ export const CodeViewWrapper = memo(
               />
               Viewed
             </label>
-            {onEditFile && (
+            <button
+              type="button"
+              className={`codeview-edit-btn ${editing ? 'is-editing' : ''}`}
+              title={editing ? 'Finish editing and save' : 'Edit this file inline'}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                onToggleEdit(item.id)
+              }}
+            >
+              {editing ? 'Done' : 'Edit'}
+            </button>
+            {onEditFile && !editing && (
               <button
                 type="button"
-                className="codeview-edit-btn"
-                title="Edit file in browser"
+                className="codeview-edit-btn codeview-edit-btn-secondary"
+                // The inline editor only covers what the diff renders; this
+                // opens the whole file, including untouched regions.
+                title="Edit whole file in a modal"
                 onClick={(e) => {
                   e.preventDefault()
                   e.stopPropagation()
                   onEditFile(item.id)
                 }}
               >
-                Edit
+                ⤢
               </button>
             )}
           </div>
@@ -915,8 +967,27 @@ export const CodeViewWrapper = memo(
       [diffStyle, defaultTabSize, handleGutterClick, handleLineEnter],
     )
 
+    // One factory for every inline edit session. CodeView calls it per item
+    // and supplies that item's `onChange`, so our defaults must not include
+    // one. `persistState` stays off: it keys documents by `cacheKey`, and
+    // ours changes on every refetch (contents changed => new key, by the
+    // library's own contract), so there is nothing stable to persist against.
+    const createEditor = useStableCallback((editorOptions: EditorOptions<Metadata>) => {
+      return new Editor<Metadata>({
+        matchBrackets: true,
+        roundedSelection: true,
+        ...editorOptions,
+      })
+    })
+
+    const handleItemEditComplete = useStableCallback(
+      (item: CodeViewItem<Metadata>, file: { contents: string }) => {
+        onEditComplete(item.id, file.contents)
+      },
+    )
+
     return (
-      <>
+      <EditProvider<Metadata> createEditor={createEditor}>
         <CodeView<Metadata>
           key={structuralRevision}
           ref={(v) => {
@@ -926,6 +997,7 @@ export const CodeViewWrapper = memo(
           initialItems={initialItems}
           options={options}
           onScroll={handleScroll}
+          onItemEditComplete={handleItemEditComplete}
           renderAnnotation={renderAnnotation}
           renderHeaderPrefix={renderHeaderPrefix}
           renderHeaderMetadata={renderHeaderMetadata}
@@ -941,7 +1013,7 @@ export const CodeViewWrapper = memo(
             />
           </div>
         )}
-      </>
+      </EditProvider>
     )
   }),
 )
@@ -952,19 +1024,22 @@ function buildItems(
   pending: Map<string, DraftMetadata>,
   viewedFiles: Set<string>,
   fileStatsMap: Record<string, { additions: number; deletions: number }>,
+  editingFiles: Set<string>,
 ): CodeViewItem<Metadata>[] {
   return files.map((fileDiff) => {
     const stats = fileStatsMap[fileDiff.name]
     const changeCount = (stats?.additions ?? 0) + (stats?.deletions ?? 0)
     // Initial collapse: viewed files (carryover from a prior session) and
     // very large diffs. Manual chevron toggle still overrides.
+    const editing = editingFiles.has(fileDiff.name)
     const collapsed =
-      viewedFiles.has(fileDiff.name) || changeCount > AUTO_COLLAPSE_CHANGE_THRESHOLD
+      !editing && (viewedFiles.has(fileDiff.name) || changeCount > AUTO_COLLAPSE_CHANGE_THRESHOLD)
     return {
       id: fileDiff.name,
       type: 'diff' as const,
       fileDiff,
       collapsed,
+      edit: editing,
       annotations: mergeAnnotations(
         fileAnnotationsMap.get(fileDiff.name) ?? [],
         pending,

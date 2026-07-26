@@ -464,6 +464,17 @@ body {
     color: var(--text);
     border-color: var(--text-secondary);
 }
+/* An open inline edit session is a mode, and the only way out is this
+   button — make it read as engaged rather than as one more header control. */
+.codeview-edit-btn.is-editing {
+    background: var(--accent, #3b82f6);
+    border-color: var(--accent, #3b82f6);
+    color: #fff;
+}
+.codeview-edit-btn-secondary {
+    margin-left: 4px;
+    padding: 2px 6px;
+}
 
 .editor-modal-backdrop {
     position: fixed;

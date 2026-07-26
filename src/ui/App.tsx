@@ -141,12 +141,18 @@ export function App() {
   // Files with an open draft (comment/suggest form) — merged with
   // editingFile below into the "active" set that gates 'live-unless-active'.
   const [activeDraftFiles, setActiveDraftFiles] = useState<Set<string>>(() => new Set())
+  // Files in inline edit mode. Like an open draft, an open edit session makes
+  // a file "active": under 'live-unless-active' a background write lands in
+  // staleFiles and waits for an explicit apply instead of being pushed into
+  // the document the user is typing in.
+  const [inlineEditFiles, setInlineEditFiles] = useState<Set<string>>(() => new Set())
   const activeFiles = useMemo(() => {
-    if (!editingFile) return activeDraftFiles
+    if (!editingFile && inlineEditFiles.size === 0) return activeDraftFiles
     const next = new Set(activeDraftFiles)
-    next.add(editingFile.path)
+    for (const p of inlineEditFiles) next.add(p)
+    if (editingFile) next.add(editingFile.path)
     return next
-  }, [activeDraftFiles, editingFile])
+  }, [activeDraftFiles, editingFile, inlineEditFiles])
 
   const {
     patch,
@@ -207,6 +213,29 @@ export function App() {
       throw new Error(`Save failed: ${msg}`)
     }
   }, [editingFile])
+
+  const handleToggleEdit = useCallback((filePath: string) => {
+    setInlineEditFiles((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(filePath)) next.add(filePath)
+      return next
+    })
+  }, [])
+
+  // Inline edit session ended with changes. Writing broadcasts file-written,
+  // which refetches this file's diff — the session is already over by then,
+  // so the refreshed contents can't yank the document out from under anyone.
+  const handleInlineEditComplete = useCallback(async (filePath: string, contents: string) => {
+    const res = await fetch('/api/file-content', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath, contents }),
+    })
+    if (!res.ok) {
+      const msg = await res.text().catch(() => res.statusText)
+      alert(`Save failed for ${filePath}: ${msg}`)
+    }
+  }, [])
 
   // SelectionPill's "Delete" — splices the exact selected range out of the
   // working-tree file server-side and surfaces an Undo toast. Server owns
@@ -473,6 +502,9 @@ export function App() {
             onDeleteRange={handleDeleteRange}
             onActiveFileChange={setActiveFile}
             onEditFile={handleEditFile}
+            editingFiles={inlineEditFiles}
+            onToggleEdit={handleToggleEdit}
+            onEditComplete={handleInlineEditComplete}
             onActiveDraftsChange={setActiveDraftFiles}
           />
         </main>
