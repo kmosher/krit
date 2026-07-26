@@ -23,6 +23,20 @@
        Alias it to the palette's secondary surface — the dark-mode override
        of --bg-secondary below propagates through automatically. */
     --surface-2: var(--bg-secondary);
+    /* Same story as --surface-2: referenced in a handful of places but never
+       defined, so every rule below either fell back to a hardcoded light
+       value or (where it had no fallback) dropped the declaration entirely
+       — an invisible focus ring on settings inputs, a hover with no hover
+       state, transparent modal and suggestion headers. Aliased to the
+       palette so the dark overrides propagate for free. --bg-tertiary is
+       translucent grey on purpose: it reads correctly over either mode's
+       background, which is what the existing fallbacks already assumed. */
+    --accent: var(--primary);
+    --surface: var(--bg-secondary);
+    --bg-tertiary: rgba(127, 127, 127, 0.12);
+    --bg-hover: var(--bg-tertiary);
+    --text-muted: var(--text-secondary);
+    --warning: #d97706;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -38,6 +52,7 @@
         --success: #3fb950;
         --comment-bg: #2d2000;
         --comment-border: #9e6a03;
+        --warning: #d18616;
     }
 }
 
@@ -467,8 +482,8 @@ body {
 /* An open inline edit session is a mode, and the only way out is this
    button — make it read as engaged rather than as one more header control. */
 .codeview-edit-btn.is-editing {
-    background: var(--accent, #3b82f6);
-    border-color: var(--accent, #3b82f6);
+    background: var(--accent);
+    border-color: var(--accent);
     color: #fff;
 }
 .codeview-edit-btn-secondary {
@@ -1132,8 +1147,12 @@ body {
 }
 
 .comment-reply-avatar {
+    /* Literal, not var(--accent): this base color is the violet a reply gets
+       before the -user / -agent variants override it, and --accent is the
+       interactive blue. It only resolved to violet because --accent was
+       undefined. */
     flex-shrink: 0;
-    color: var(--accent, #6f42c1);
+    color: #6f42c1;
 }
 
 .comment-reply-body {
