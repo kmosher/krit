@@ -29,7 +29,13 @@ exist.
   `files-changed`. The tell is the asymmetry — saves through the UI still
   work, because `PUT /api/file-content` broadcasts `file-written` directly
   and never consults the watcher. Working saves plus dead live-refresh means
-  the sandbox, not the watcher.
+  the sandbox, not the watcher. (The global sandbox config now grants it; the
+  note stays because the failure is silent and the diagnosis is not obvious.)
+- **Never `confirm()` / `alert()` for a decision.** A native dialog blocks the
+  page for anything driving the browser programmatically, which is what krit
+  is for — an agent that hits one deadlocks. Both prompts are inline strips
+  now (the file header's save-anyway question, `FileEditorModal`'s discard);
+  keep it that way.
 
 ## Non-obvious behavior (deliberate, don't "fix")
 
@@ -52,6 +58,15 @@ exist.
   Rust binary needs that exact version to still be on the registry — move to
   1.3.0 final once it publishes. An exact pin has no caret for `pnpm update`
   to follow, so nothing will prompt you.
+
+- `@pierre/theming@1.0.0` declares a peer of `@pierre/theme: ^1.1.0` but the
+  tree resolves `@pierre/theme@2.0.0` — an unsatisfied peer inside upstream's
+  own dependency graph, not ours. Installs fine (optional peer,
+  `strict-peer-dependencies` off). Nothing to do; don't "fix" it by pinning.
+
+- An **inline edit session plus an open comment/suggest draft on the same
+  file** is untested. Both render into Pierre's shadow root, historically
+  where the WebKit trouble was.
 
 - Comment/suggest **drafts don't survive a page reload** (persistence is the
   planned "Stage 8" in docs/design/live-review.md). Warn before advising a
