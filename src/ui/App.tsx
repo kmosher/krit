@@ -202,6 +202,62 @@ export function App() {
   const { viewedFiles, setViewed } = useViewed()
   const diffViewerRef = useRef<CodeViewWrapperHandle>(null)
 
+  // Per-path ETag of the working-tree file as of when we last read or wrote it.
+  // Sent back as If-Match so the server refuses a save that would clobber
+  // someone else's write (see api_file_content_put). The staleness badge and
+  // the save-anyway question are conventions layered on top of an endpoint that
+  // couldn't enforce anything; this is the part that actually can't be raced
+  // past. A path with no entry saves unconditionally, which is the old
+  // behaviour — the token is opt-in per request, not a mode.
+  const editBaseTagsRef = useRef<Map<string, string>>(new Map())
+  const rememberTag = useCallback((filePath: string, tag: string | null) => {
+    if (tag) editBaseTagsRef.current.set(filePath, tag)
+    else editBaseTagsRef.current.delete(filePath)
+  }, [])
+
+  // A save the server refused: the contents are held here so the reader can
+  // still land them. Pierre has already torn the editor down by the time we
+  // learn, so without this the text would be gone.
+  const [saveConflict, setSaveConflict] = useState<{ path: string; contents: string } | null>(null)
+
+  // PUT a whole file, carrying If-Match when we know what we based the edit on.
+  // Returns the outcome rather than throwing on the interesting case, because
+  // every caller wants to tell "refused, here's why" apart from "broke".
+  const putFileContents = useCallback(
+    async (
+      filePath: string,
+      contents: string,
+    ): Promise<{ ok: true } | { ok: false; conflict: boolean; message: string }> => {
+      const base = editBaseTagsRef.current.get(filePath)
+      const res = await fetch('/api/file-content', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(base ? { 'If-Match': base } : {}),
+        },
+        body: JSON.stringify({ path: filePath, contents }),
+      })
+      if (res.status === 412) {
+        // Our base is stale by definition now; drop it so an explicit
+        // overwrite isn't refused for the same reason a second time.
+        editBaseTagsRef.current.delete(filePath)
+        return {
+          ok: false,
+          conflict: true,
+          message: `${filePath} changed on disk since you started editing.`,
+        }
+      }
+      if (!res.ok) {
+        const msg = await res.text().catch(() => res.statusText)
+        return { ok: false, conflict: false, message: `Save failed for ${filePath}: ${msg}` }
+      }
+      const body = (await res.json().catch(() => null)) as { etag?: string } | null
+      rememberTag(filePath, body?.etag ?? null)
+      return { ok: true }
+    },
+    [rememberTag],
+  )
+
   const handleEditFile = useCallback(async (filePath: string) => {
     // Pull current working-tree contents fresh — fileContents bundled in
     // /api/diff is whatever the diff thought 'new' was, which may diverge
@@ -212,21 +268,24 @@ export function App() {
       return
     }
     const text = await res.text()
+    rememberTag(filePath, res.headers.get('ETag'))
     setEditingFile({ path: filePath, contents: text })
-  }, [])
+  }, [rememberTag])
 
-  const handleSaveEditedFile = useCallback(async (contents: string) => {
-    if (!editingFile) return
-    const res = await fetch('/api/file-content', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: editingFile.path, contents }),
-    })
-    if (!res.ok) {
-      const msg = await res.text().catch(() => res.statusText)
-      throw new Error(`Save failed: ${msg}`)
-    }
-  }, [editingFile])
+  // The modal stays open on a throw, so a refused save loses nothing — the
+  // message goes in its error strip and the reader can decide.
+  const handleSaveEditedFile = useCallback(
+    async (contents: string) => {
+      if (!editingFile) return
+      const result = await putFileContents(editingFile.path, contents)
+      if (!result.ok) {
+        throw new Error(
+          result.conflict ? `${result.message} Save again to overwrite it.` : result.message,
+        )
+      }
+    },
+    [editingFile, putFileContents],
+  )
 
   // Files where Done was pressed while a change was queued, and the "save
   // anyway?" question is on screen. Rendered into the file header rather than
@@ -261,13 +320,25 @@ export function App() {
         return
       }
       clearConfirmSave(filePath)
+      if (!inlineEditFiles.has(filePath)) {
+        // Entering: record what's on disk right now as the base this session's
+        // save will be checked against. The editor seeds from the rendered
+        // diff, not from a read, so this is the only point where we can learn
+        // it. Best-effort — a failure just means the save goes unconditional,
+        // exactly as it did before there was a token.
+        void fetch(`/api/file-content?path=${encodeURIComponent(filePath)}&version=new`, {
+          method: 'HEAD',
+        })
+          .then((res) => rememberTag(filePath, res.ok ? res.headers.get('ETag') : null))
+          .catch(() => rememberTag(filePath, null))
+      }
       setInlineEditFiles((prev) => {
         const next = new Set(prev)
         if (!next.delete(filePath)) next.add(filePath)
         return next
       })
     },
-    [inlineEditFiles, staleFiles, confirmSaveFiles, clearConfirmSave],
+    [inlineEditFiles, staleFiles, confirmSaveFiles, clearConfirmSave, rememberTag],
   )
 
   // Inline edit session ended with changes. Pierre tears the editor down before
@@ -277,18 +348,16 @@ export function App() {
   const handleInlineEditComplete = useCallback(
     async (filePath: string, contents: string) => {
       try {
-        const res = await fetch('/api/file-content', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: filePath, contents }),
-        })
-        if (!res.ok) {
-          const msg = await res.text().catch(() => res.statusText)
-          alert(`Save failed for ${filePath}: ${msg}`)
+        const result = await putFileContents(filePath, contents)
+        if (!result.ok) {
+          // Hold the text either way: the editor is already gone, so an alert
+          // alone would be a report that the work was lost.
+          setSaveConflict({ path: filePath, contents })
           return
         }
       } catch (err) {
-        alert(`Save failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`)
+        setSaveConflict({ path: filePath, contents })
+        console.error(`Save failed for ${filePath}`, err)
         return
       }
       // Any queued change for this path is now moot — it was either folded in
@@ -298,8 +367,21 @@ export function App() {
       dismissStale(filePath)
       clearConfirmSave(filePath)
     },
-    [dismissStale, clearConfirmSave],
+    [dismissStale, clearConfirmSave, putFileContents],
   )
+
+  // "Overwrite" on the conflict bar: replay the same contents with no
+  // If-Match, which is the deliberate last-writer-wins the reader just asked
+  // for. putFileContents already dropped the stale base, so this is
+  // unconditional by construction.
+  const handleOverwriteConflict = useCallback(async () => {
+    if (!saveConflict) return
+    const { path, contents } = saveConflict
+    setSaveConflict(null)
+    const result = await putFileContents(path, contents)
+    if (!result.ok) alert(result.message)
+    else dismissStale(path)
+  }, [saveConflict, putFileContents, dismissStale])
 
   // Applying a queued change to a file with an open edit session goes through
   // the editor rather than the diff refetch: the write arrives as one undoable
@@ -324,6 +406,9 @@ export function App() {
             `/api/file-content?path=${encodeURIComponent(filePath)}&version=new`,
           )
           if (res.ok && diffViewerRef.current?.applyExternalEdit(filePath, await res.text())) {
+            // The session's base is now what we just pulled in, so the save at
+            // the end of it is no longer racing the write we absorbed.
+            rememberTag(filePath, res.headers.get('ETag'))
             dismissStale(filePath)
             return
           }
@@ -337,7 +422,7 @@ export function App() {
         applyingRef.current.delete(filePath)
       }
     },
-    [inlineEditFiles, applyStaleFile, dismissStale, clearConfirmSave],
+    [inlineEditFiles, applyStaleFile, dismissStale, clearConfirmSave, rememberTag],
   )
 
   // The toolbar's refresh button, which means three different things: with
@@ -637,6 +722,29 @@ export function App() {
           onClose={() => setEditingFile(null)}
           onSave={handleSaveEditedFile}
         />
+      )}
+      {saveConflict && (
+        <div className="save-conflict" role="alert">
+          <span>
+            {saveConflict.path} changed on disk while you were editing, so your save was
+            refused. Your edit is still here.
+          </span>
+          <button className="btn btn-danger btn-sm" onClick={handleOverwriteConflict}>
+            Overwrite
+          </button>
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => {
+              // Reopening the editor re-seeds from the refreshed diff, so
+              // "Reopen" would quietly mean "throw the text away". Copy is the
+              // honest exit: the reader keeps it and decides.
+              void navigator.clipboard?.writeText(saveConflict.contents)
+              setSaveConflict(null)
+            }}
+          >
+            Copy &amp; dismiss
+          </button>
+        </div>
       )}
       {undoToast && (
         <UndoToast

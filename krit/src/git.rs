@@ -289,6 +289,34 @@ pub fn file_content(root: &Path, file_path: &str, version: &str) -> Option<Vec<u
     git_stdout(&["show", &format!("HEAD:{file_path}")])
 }
 
+/// Content fingerprint for the optimistic-concurrency token on
+/// GET/PUT /api/file-content (`ETag` / `If-Match`). FNV-1a: this answers "did
+/// the bytes change under me", not "did an adversary substitute them", so a
+/// ten-line non-cryptographic hash beats taking on a hashing dependency. A
+/// collision costs one lost overwrite warning, which is the behaviour every
+/// client had before the token existed.
+pub fn content_tag(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("\"{hash:016x}\"")
+}
+
+/// The tag a PUT's `If-Match` is checked against: the working-tree file as it
+/// stands right now. `None` for a path that doesn't exist (or isn't readable),
+/// which a caller sending `If-Match` should treat as a mismatch — it was
+/// editing something that is no longer there.
+pub fn working_tree_content_tag(root: &Path, file_path: &str) -> Option<String> {
+    if !is_safe_path(file_path) {
+        return None;
+    }
+    std::fs::read(root.join(file_path))
+        .ok()
+        .map(|bytes| content_tag(&bytes))
+}
+
 pub fn write_working_tree_file(root: &Path, file_path: &str, contents: &str) -> bool {
     if !is_safe_path(file_path) {
         return false;
@@ -558,5 +586,29 @@ mod tests {
         assert_eq!(synthesize_untracked_patch("x", b"\0\x01", false), expected);
         // Unreadable (empty bytes + flag) still renders, doesn't vanish.
         assert_eq!(synthesize_untracked_patch("x", b"", true), expected);
+    }
+
+    #[test]
+    fn content_tag_is_stable_and_content_sensitive() {
+        assert_eq!(content_tag(b"hello"), content_tag(b"hello"));
+        assert_ne!(content_tag(b"hello"), content_tag(b"hello\n"));
+        // Quoted, so it can go straight into an ETag / If-Match header.
+        assert!(content_tag(b"hello").starts_with('"'));
+        assert!(content_tag(b"hello").ends_with('"'));
+    }
+
+    #[test]
+    fn working_tree_content_tag_tracks_disk_and_is_none_when_absent() {
+        let dir = init_repo("content-tag");
+        std::fs::write(dir.join("f.txt"), "one").unwrap();
+        let first = working_tree_content_tag(&dir, "f.txt").unwrap();
+        assert_eq!(first, content_tag(b"one"));
+        std::fs::write(dir.join("f.txt"), "two").unwrap();
+        assert_ne!(working_tree_content_tag(&dir, "f.txt").unwrap(), first);
+        // A path that isn't there reads as None -- a caller holding an
+        // If-Match for it should see a mismatch, not a silent pass.
+        assert!(working_tree_content_tag(&dir, "gone.txt").is_none());
+        // Unsafe paths never get a tag either.
+        assert!(working_tree_content_tag(&dir, "../escape").is_none());
     }
 }

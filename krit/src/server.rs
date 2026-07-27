@@ -471,11 +471,23 @@ async fn api_file_content_get(
         )
             .into_response();
     };
-    ([(header::CONTENT_TYPE, mime_for(path))], content).into_response()
+    // ETag over the bytes we're about to return, so a client that seeds an
+    // editor from this response can hand the tag back on PUT and find out
+    // whether anything else wrote the file in between.
+    let tag = git::content_tag(&content);
+    (
+        [
+            (header::CONTENT_TYPE, mime_for(path)),
+            (header::ETAG, tag.as_str()),
+        ],
+        content,
+    )
+        .into_response()
 }
 
 async fn api_file_content_put(
     State(state): State<AppState>,
+    headers: header::HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
     let (Some(path), Some(contents)) = (body["path"].as_str(), body["contents"].as_str()) else {
@@ -485,6 +497,25 @@ async fn api_file_content_put(
         )
             .into_response();
     };
+    // Optimistic concurrency, opt-in: a client that tells us what it thinks is
+    // on disk gets its write refused if that's no longer true, instead of
+    // silently winning the race. Omitting If-Match keeps the original
+    // last-writer-wins behaviour, which every pre-existing caller relies on.
+    if let Some(expected) = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()) {
+        if expected != "*" {
+            let actual = git::working_tree_content_tag(&state.repo_root, path);
+            if actual.as_deref() != Some(expected) {
+                return (
+                    StatusCode::PRECONDITION_FAILED,
+                    axum::Json(json!({
+                        "error": "file changed on disk since it was read",
+                        "etag": actual,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
     if !git::write_working_tree_file(&state.repo_root, path, contents) {
         return (
             StatusCode::BAD_REQUEST,
@@ -498,7 +529,9 @@ async fn api_file_content_put(
     state.hub.broadcast(Event::FileWritten {
         path: Some(path.to_string()),
     });
-    axum::Json(json!({"ok": true})).into_response()
+    // Hand back the tag the write produced, so a client that stays in the file
+    // can keep sending If-Match without a round trip to re-read it.
+    axum::Json(json!({"ok": true, "etag": git::content_tag(contents.as_bytes())})).into_response()
 }
 
 async fn api_refresh(State(state): State<AppState>) -> Response {
