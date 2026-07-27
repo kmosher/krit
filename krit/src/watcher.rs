@@ -39,9 +39,12 @@ const HASH_SAMPLE_BYTES: usize = 8 * 1024;
 /// build` under the root is tens of thousands of paths, none of which need
 /// git's opinion to be dismissed). Two tiers:
 ///   - names that are never tracked content and flood hardest: `.git` (which
-///     check-ignore wouldn't catch anyway — it isn't gitignored), plus
-///     `node_modules` and `.claude` (installs, and sibling worktrees live at
-///     `.claude/worktrees/*`);
+///     check-ignore wouldn't catch anyway — it isn't gitignored),
+///     `node_modules`, and `.claude/worktrees` (sibling checkouts, each a full
+///     tree of churn). The rest of `.claude/` is tracked, committed content in
+///     repos that carry skills and agents, so it goes to check-ignore like any
+///     other directory — blanket-skipping the name left those files with no
+///     live refresh and no staleness badge;
 ///   - build outputs `target`/`dist`, but *only* when a sibling manifest marks
 ///     the directory as a build root. The manifest gate preserves v1's
 ///     invariant that these are legitimate tracked-dir names elsewhere (a
@@ -56,7 +59,10 @@ fn is_ignored(root: &Path, rel: &Path) -> bool {
     for c in rel.components() {
         let name = c.as_os_str();
         match name.to_str() {
-            Some(".git") | Some("node_modules") | Some(".claude") => return true,
+            Some(".git") | Some("node_modules") => return true,
+            Some("worktrees") if parent.file_name() == Some(std::ffi::OsStr::new(".claude")) => {
+                return true;
+            }
             Some("target") if parent.join("Cargo.toml").exists() => return true,
             Some("dist") if parent.join("package.json").exists() => return true,
             _ => {}
@@ -142,16 +148,11 @@ fn content_hash(path: &Path) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
     let meta = std::fs::metadata(path).ok()?;
     let mut h = DefaultHasher::new();
-    // Oversized files (build artifacts, checkout debris) are never read whole —
-    // pulling a multi-hundred-MB file into RAM just to hash it is the observed
-    // ~2 GB RSS spike. The signature is instead length plus a bounded sample of
-    // the head and tail bytes. Like the small-file path it stays content-based,
-    // not mtime-based, so an mtime-only touch (checkout/rebase) is still
-    // swallowed rather than emitting a spurious change. The one thing it cannot
-    // see is a change that keeps the exact length AND leaves both sampled ends
-    // byte-identical — an edit buried in the middle of a >8 MiB file. That is
-    // vanishingly unlikely for anything a human reviews, and such files are
-    // almost always ignored build output the filters above drop before we hash.
+    // The sampled signature's blind spot: a change that keeps the exact length
+    // AND leaves both sampled ends byte-identical — an edit buried in the
+    // middle of a >8 MiB file — reads as no change at all. Accepted, because
+    // anything that large is almost always ignored build output the filters
+    // above drop before we ever hash it. (Why sampling at all: HASH_SIZE_CAP.)
     if meta.len() >= HASH_SIZE_CAP {
         meta.len().hash(&mut h);
         if let Ok(mut f) = std::fs::File::open(path) {
@@ -397,6 +398,10 @@ mod tests {
             root,
             Path::new(".claude/worktrees/x/src/lib.rs")
         ));
+        // Only the worktrees subtree: skills, agents and settings under
+        // `.claude/` are tracked content and must keep live-refreshing.
+        assert!(!is_ignored(root, Path::new(".claude/skills/x/SKILL.md")));
+        assert!(!is_ignored(root, Path::new(".claude/settings.json")));
         assert!(!is_ignored(root, Path::new("src/lib.rs")));
     }
 
@@ -532,9 +537,10 @@ mod tests {
         })
         .expect("watcher starts");
 
-        // Let the debouncer's startup file-ID scan settle before writing —
-        // otherwise the initial scan itself can race the burst below. Generous
-        // margin: this runs alongside whatever else is loading the box.
+        // `watch()` returning doesn't mean FSEvents is delivering yet; writes
+        // landing in that gap are dropped and the burst below arrives split or
+        // not at all. Generous margin: this runs alongside whatever else is
+        // loading the box.
         std::thread::sleep(Duration::from_millis(1500));
 
         std::fs::write(dir.join("a.txt"), b"a2").unwrap();

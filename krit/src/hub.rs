@@ -41,9 +41,15 @@ pub struct Hub {
     // Bumped on every subscriber connect/disconnect, any role (check_idle
     // runs on each); an armed idle timer only fires if the generation it
     // captured is still current — so CLI/agent churn also re-arms the 60s
-    // window, not just browser transitions. This is the whole cancellation
-    // story: no timer handles to juggle.
+    // window, not just browser transitions. Still needed alongside the
+    // handle below: abort() can't stop a task that has already woken from
+    // its sleep and is inside the check.
     idle_gen: AtomicU64,
+    // At most one armed timer at a time. Generation invalidation alone made
+    // superseded timers no-ops but left them alive, so a CLI or agent
+    // reconnect loop with no browser attached accumulated one live task per
+    // event for a full minute.
+    idle_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutting_down: AtomicBool,
     /// Signalled once the review-ended broadcast is out; axum's graceful
     /// shutdown waits on this.
@@ -81,6 +87,7 @@ impl Hub {
             agent: AtomicUsize::new(0),
             ever_had_browser: AtomicBool::new(false),
             idle_gen: AtomicU64::new(0),
+            idle_timer: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
             shutdown: Notify::new(),
             exit_cleanup: Mutex::new(None),
@@ -154,16 +161,17 @@ impl Hub {
         let ui = self.ui.load(Ordering::SeqCst);
         if ui > 0 {
             self.ever_had_browser.store(true, Ordering::SeqCst);
-            // Invalidate any armed idle timer.
             self.idle_gen.fetch_add(1, Ordering::SeqCst);
+            self.disarm_idle_timer();
             return;
         }
         if !self.ever_had_browser.load(Ordering::SeqCst) {
             return; // the no-browser timer owns this phase
         }
         let generation = self.idle_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        self.disarm_idle_timer();
         let hub = Arc::clone(self);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(IDLE_SHUTDOWN_MS)).await;
             if hub.idle_gen.load(Ordering::SeqCst) == generation
                 && hub.ui.load(Ordering::SeqCst) == 0
@@ -172,6 +180,18 @@ impl Hub {
                 hub.initiate_shutdown("idle");
             }
         });
+        *self.idle_timer.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    fn disarm_idle_timer(&self) {
+        if let Some(handle) = self
+            .idle_timer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
     }
 
     pub fn start_no_browser_timer(self: &Arc<Self>) {

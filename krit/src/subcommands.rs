@@ -152,9 +152,11 @@ pub fn cmd_refresh() {
     println!("refreshed");
 }
 
-/// Block until the user clicks "Done reviewing". Exit 0 on submit, 2 on
-/// connection loss before submit. Retained for the batch workflow — the
-/// streaming flow subscribes to /api/events-ws directly (see the skill).
+/// Block until the user clicks "Done reviewing". Exits 0 on submit, 1 when
+/// there's no reachable server or the state file is unusable (`require_state`
+/// exits before the stream ever opens), 2 on connection loss before submit.
+/// Retained for the batch workflow — the streaming flow subscribes to
+/// /api/events-ws directly (see the skill).
 pub fn cmd_wait_for_submit() -> ! {
     let state = require_state();
     let url = format!("{}/api/events?role=cli", base_url(&state));
@@ -171,7 +173,13 @@ pub fn cmd_wait_for_submit() -> ! {
     };
 
     let mut reader = res.into_reader();
-    let mut buf = String::new();
+    // Buffered as raw bytes and decoded a whole frame at a time: a read
+    // boundary lands anywhere, and decoding each 4 KiB chunk on its own turns
+    // a multi-byte character straddling one into U+FFFD on both sides. The
+    // frame's JSON then fails to parse and is silently skipped below — and
+    // the frame dropped could be `submitted`, leaving this hanging until the
+    // connection drops and exiting 2 on a review that did finish.
+    let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
         let n = match reader.read(&mut chunk) {
@@ -179,10 +187,10 @@ pub fn cmd_wait_for_submit() -> ! {
             Ok(n) => n,
             Err(_) => break, // server went away mid-stream
         };
-        buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+        buf.extend_from_slice(&chunk[..n]);
         // SSE frames are separated by a blank line.
-        while let Some(idx) = buf.find("\n\n") {
-            let frame = buf[..idx].to_string();
+        while let Some(idx) = buf.windows(2).position(|w| w == b"\n\n") {
+            let frame = String::from_utf8_lossy(&buf[..idx]).into_owned();
             buf.drain(..idx + 2);
             let data: String = frame
                 .lines()
