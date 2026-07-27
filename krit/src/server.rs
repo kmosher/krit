@@ -201,8 +201,26 @@ fn parse_file_paths(patch: &str) -> Vec<String> {
 }
 
 /// `diff --git a/<old> b/<new>` → `<new>`.
+///
+/// The header is ambiguous: a path may itself contain `" b/"` (`foo b/bar.rs`
+/// yields `diff --git a/foo b/bar.rs b/foo b/bar.rs`), so the first separator
+/// is the wrong one. Git writes the same path on both sides unless the file
+/// was renamed, so the split is found by length symmetry first — the only
+/// offset where the halves are identical is the real separator — and only a
+/// rename, where the halves genuinely differ, falls back to the first `" b/"`.
+///
+/// `src/ui/hooks/useDiff.ts` and `src/ui/App.tsx` mirror this; keep all three
+/// in step.
 fn diff_header_path(line: &str) -> Option<String> {
     let rest = line.strip_prefix("diff --git a/")?;
+    let split = rest.len().checked_sub(3)?;
+    if split % 2 == 0 {
+        let half = split / 2;
+        // `get` rather than indexing: `half` can land mid-character.
+        if rest.get(half..half + 3) == Some(" b/") && rest[..half] == rest[half + 3..] {
+            return Some(rest[half + 3..].to_string());
+        }
+    }
     rest.split_once(" b/").map(|(_, new)| new.to_string())
 }
 
@@ -1328,6 +1346,16 @@ fn is_authorized(token: Option<&str>, peer_is_local: bool, presented: Option<&st
     }
 }
 
+/// Whether the peer that opened this connection is on this machine — the one
+/// fact that decides whether the token is demanded. Absent connect info fails
+/// closed: without a peer address there is no evidence of where it came from.
+fn peer_is_local(req: &axum::extract::Request) -> bool {
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0.ip().is_loopback())
+        .unwrap_or(false)
+}
+
 async fn require_api_token(
     State(state): State<AppState>,
     req: axum::extract::Request,
@@ -1336,13 +1364,7 @@ async fn require_api_token(
     let Some(expected) = state.api_token.as_deref() else {
         return next.run(req).await;
     };
-    // Absent connect info fails closed: without a peer address there is no
-    // evidence the request came from this machine.
-    let peer_is_local = req
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|info| info.0.ip().is_loopback())
-        .unwrap_or(false);
+    let peer_is_local = peer_is_local(&req);
     let (authorized, carried_in_url) = {
         let from_query = req.uri().query().and_then(token_from_query);
         let from_cookie = req
@@ -1478,13 +1500,63 @@ mod tests {
         assert_eq!(extract_file_patch(PATCH, "absent.rs"), "");
     }
 
+    /// One binary entry per `change_type` `parse_binary_files` can produce:
+    /// a new file the untracked set also knows about, a new file it does not,
+    /// a delete, and a plain modification (no mode line at all).
+    const BINARY_PATCH: &str = concat!(
+        "diff --git a/img.png b/img.png\nnew file mode 100644\n",
+        "Binary files /dev/null and b/img.png differ\n",
+        "diff --git a/added.bin b/added.bin\nnew file mode 100644\n",
+        "Binary files /dev/null and b/added.bin differ\n",
+        "diff --git a/b.txt b/b.txt\ndeleted file mode 100644\n",
+        "Binary files a/b.txt and /dev/null differ\n",
+        "diff --git a/logo.ico b/logo.ico\nindex 111..222 100644\n",
+        "Binary files a/logo.ico and b/logo.ico differ",
+    );
+
     #[test]
     fn classifies_binary_files() {
+        // The untracked set outranks the patch's own `new file mode`, but only
+        // for the paths actually in it — `added.bin` stays `added`.
         let untracked: HashSet<String> = ["img.png".to_string()].into();
-        let bins = parse_binary_files(PATCH, &untracked);
-        assert_eq!(bins.len(), 2);
-        assert_eq!(bins[0], json!({"path": "img.png", "type": "untracked"}));
-        assert_eq!(bins[1], json!({"path": "b.txt", "type": "deleted"}));
+        let bins = parse_binary_files(BINARY_PATCH, &untracked);
+        assert_eq!(
+            bins,
+            vec![
+                json!({"path": "img.png", "type": "untracked"}),
+                json!({"path": "added.bin", "type": "added"}),
+                json!({"path": "b.txt", "type": "deleted"}),
+                json!({"path": "logo.ico", "type": "changed"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_containing_b_slash_is_keyed_by_its_whole_name() {
+        // `foo b/bar.rs` puts a second `" b/"` inside each side of the header.
+        // The first separator splits in the wrong place, and this key is what
+        // scoped refetch and comment anchoring look each other up by — a
+        // disagreement here silently detaches comments from the file.
+        let header = "diff --git a/foo b/bar.rs b/foo b/bar.rs";
+        assert_eq!(diff_header_path(header), Some("foo b/bar.rs".to_string()));
+
+        let patch = format!("{header}\nindex 111..222 100644\n@@ -1 +1 @@\n-old\n+new");
+        let frag = extract_file_patch(&patch, "foo b/bar.rs");
+        assert!(frag.starts_with(header), "{frag}");
+        assert!(frag.ends_with("+new"));
+        assert_eq!(parse_file_paths(&patch), vec!["foo b/bar.rs"]);
+
+        // A rename has no symmetry to find, so the first separator is the only
+        // available reading — and the right one.
+        assert_eq!(
+            diff_header_path("diff --git a/old.rs b/new.rs"),
+            Some("new.rs".to_string())
+        );
+        // Non-ASCII names must not split mid-character.
+        assert_eq!(
+            diff_header_path("diff --git a/räksmörgås.md b/räksmörgås.md"),
+            Some("räksmörgås.md".to_string())
+        );
     }
 
     // ---------- multi-file /api/diff assembly ----------
@@ -1590,7 +1662,11 @@ mod tests {
         // Token minted, but a peer on this machine is exempt — that is what
         // keeps the CLI, the agent ws and the auto-opened tab working.
         assert!(is_authorized(Some("secret"), true, None));
-        // Off-machine: missing, wrong and right.
+        // Off-machine: missing, wrong and right. These results are all `==`
+        // would give too; the comparison goes through `secret_eq` for a
+        // property no assertion here can observe — it must not return early on
+        // the first differing byte, or a caller who can time requests recovers
+        // the token one byte at a time. Keep `secret_eq`, don't "simplify".
         assert!(!is_authorized(Some("secret"), false, None));
         assert!(!is_authorized(Some("secret"), false, Some("")));
         assert!(!is_authorized(Some("secret"), false, Some("secre")));
@@ -1635,13 +1711,27 @@ mod tests {
         token: Option<String>,
         with_connect_info: bool,
     ) -> u16 {
+        spawn_server_rooted(
+            rt,
+            token,
+            with_connect_info,
+            std::env::current_dir().unwrap(),
+        )
+    }
+
+    fn spawn_server_rooted(
+        rt: &tokio::runtime::Runtime,
+        token: Option<String>,
+        with_connect_info: bool,
+        repo_root: PathBuf,
+    ) -> u16 {
         rt.block_on(async move {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let router = build_router(new_state(
                 Hub::new(),
                 CommentStore::new(None),
-                std::env::current_dir().unwrap(),
+                repo_root,
                 None,
                 token,
             ));
@@ -1717,6 +1807,161 @@ mod tests {
         assert_eq!(replayed.status(), 200);
     }
 
+    /// A request carrying `ConnectInfo` for `peer`, as axum's
+    /// `into_make_service_with_connect_info` would attach it.
+    fn request_from(peer: &str) -> axum::extract::Request {
+        let mut req = axum::extract::Request::new(axum::body::Body::empty());
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                peer.parse().unwrap(),
+                4321,
+            )));
+        req
+    }
+
+    #[test]
+    fn only_a_loopback_peer_address_counts_as_this_machine() {
+        assert!(peer_is_local(&request_from("127.0.0.1")));
+        assert!(peer_is_local(&request_from("::1")));
+        // The case the token exists for: a real off-box peer, reaching a
+        // `0.0.0.0` bind. It has connect info, so the fail-closed arm below
+        // never sees it — only the loopback test itself can refuse it.
+        assert!(!peer_is_local(&request_from("192.168.1.7")));
+        assert!(!peer_is_local(&request_from("8.8.8.8")));
+        // No connect info at all: no evidence of locality, so no exemption.
+        assert!(!peer_is_local(&axum::extract::Request::new(
+            axum::body::Body::empty()
+        )));
+    }
+
+    // ---------- rebinding guard, through the router ----------
+
+    /// A hand-rolled GET, because the point is to send headers (`Host`,
+    /// `Origin`) that an HTTP client derives from the URL and will not let a
+    /// caller contradict. Returns the response's status code.
+    fn raw_get(port: u16, path: &str, headers: &str) -> u16 {
+        use std::io::{Read, Write};
+        let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let request = format!("GET {path} HTTP/1.1\r\n{headers}Connection: close\r\n\r\n");
+        sock.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        sock.read_to_string(&mut response).unwrap();
+        response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status line in {response:?}"))
+    }
+
+    #[test]
+    fn a_rebound_host_is_refused_by_the_router() {
+        // The layer, not just `is_local_authority`: this is what makes the
+        // loopback token exemption safe, so it must be un-deletable from
+        // `build_router` without a red test.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let port = spawn_server(&rt, None, true);
+        assert_eq!(
+            raw_get(port, "/api/comments", "Host: evil.example.com\r\n"),
+            403
+        );
+    }
+
+    #[test]
+    fn a_cross_site_origin_is_refused_but_a_same_origin_one_is_served() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let port = spawn_server(&rt, None, true);
+        let host = format!("Host: 127.0.0.1:{port}\r\n");
+        assert_eq!(
+            raw_get(
+                port,
+                "/api/comments",
+                &format!("{host}Origin: https://evil.example.com\r\n"),
+            ),
+            403
+        );
+        // And the guard is a filter, not a blanket deny: the UI's own page
+        // sends an Origin on every fetch.
+        assert_eq!(
+            raw_get(
+                port,
+                "/api/comments",
+                &format!("{host}Origin: http://127.0.0.1:{port}\r\n"),
+            ),
+            200
+        );
+    }
+
+    // ---------- delete/undo content-tag handshake ----------
+
+    /// A scratch repo root holding one file, plus a server serving it.
+    fn spawn_edit_server(rt: &tokio::runtime::Runtime, name: &str) -> (PathBuf, u16) {
+        let root = std::env::temp_dir().join(format!("krit-edits-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let port = spawn_server_rooted(rt, None, true, root.clone());
+        (root, port)
+    }
+
+    fn post_delete_line_two(port: u16) -> String {
+        let res: Value = ureq::post(&format!("http://127.0.0.1:{port}/api/edits/delete"))
+            .send_json(json!({
+                "filePath": "a.txt",
+                "startLine": 2, "startColumn": 0,
+                "endLine": 2, "endColumn": 3,
+            }))
+            .expect("the delete lands")
+            .into_json()
+            .unwrap();
+        res["undoId"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn undo_restores_the_deleted_text_when_the_file_is_untouched() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (root, port) = spawn_edit_server(&rt, "clean");
+        let undo_id = post_delete_line_two(port);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "one\n\nthree\n"
+        );
+
+        let res = ureq::post(&format!("http://127.0.0.1:{port}/api/edits/undo"))
+            .send_json(json!({"id": undo_id}))
+            .expect("an unmodified file undoes cleanly");
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn undo_refuses_a_file_that_changed_since_the_delete() {
+        // The tag stored by `api_edits_delete` is what `api_edits_undo`
+        // compares — re-reading the file at undo time would make the check a
+        // tautology, and the deleted text would be re-inserted at a position
+        // someone else's edit has already moved.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (root, port) = spawn_edit_server(&rt, "conflict");
+        let undo_id = post_delete_line_two(port);
+
+        let meddled = "PREPENDED\none\n\nthree\n";
+        std::fs::write(root.join("a.txt"), meddled).unwrap();
+
+        let err = ureq::post(&format!("http://127.0.0.1:{port}/api/edits/undo"))
+            .send_json(json!({"id": undo_id}))
+            .unwrap_err();
+        assert!(matches!(&err, ureq::Error::Status(409, _)), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            meddled,
+            "a refused undo writes nothing"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // ---------- pathspec-safe file params ----------
 
     #[test]
@@ -1746,10 +1991,12 @@ mod tests {
         let stale_at = Instant::now() - BRANCH_CACHE_TTL - Duration::from_millis(50);
         *lock(&state.branch_cache) = Some(("sentinel-branch".to_string(), stale_at));
         let refreshed = cached_branch_name(&state);
-        // A stale entry is not returned as-is; it's replaced by a fresh
-        // `git::branch_name()` call (this crate's own repo, so never equal
-        // to the sentinel).
-        assert_ne!(refreshed, "sentinel-branch");
+        // A stale entry is not returned as-is; it's replaced by exactly what a
+        // fresh `git::branch_name()` returns. Asserting the value, not just
+        // "not the sentinel": the refreshed name keys the review identity in
+        // the comment store, so an empty or wrong answer would be silent.
+        assert_eq!(refreshed, git::branch_name());
+        assert!(!refreshed.is_empty(), "the test runs inside a git repo");
         // And the cache itself now holds the fresh value + a recent timestamp.
         let (cached, fetched_at) = lock(&state.branch_cache).clone().unwrap();
         assert_eq!(cached, refreshed);

@@ -209,6 +209,17 @@ mod tests {
     use super::*;
     use crate::types::ReviewComment;
 
+    /// A store path in shared system temp, cleared of anything a previous run
+    /// left behind. Pids recycle, so a stale fixture would fail the next run
+    /// of a test whose code is fine.
+    fn store_path(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("krit-store-{name}-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.corrupt"));
+        path
+    }
+
     fn comment(id: &str, body: &str) -> ReviewComment {
         ReviewComment {
             id: id.into(),
@@ -301,9 +312,7 @@ mod tests {
 
     #[test]
     fn persists_and_reloads_across_instances() {
-        let path =
-            std::env::temp_dir().join(format!("krit-store-test-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let path = store_path("test");
 
         let mut s = CommentStore::new(Some(path.clone()));
         s.add(comment("a", "persisted"));
@@ -329,11 +338,7 @@ mod tests {
 
     #[test]
     fn update_many_applies_all_updates_in_one_write() {
-        let path = std::env::temp_dir().join(format!(
-            "krit-store-update-many-{}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
+        let path = store_path("update-many");
 
         let mut s = CommentStore::new(Some(path.clone()));
         s.add(comment("a", "first"));
@@ -385,11 +390,7 @@ mod tests {
 
     #[test]
     fn update_many_with_no_hits_does_not_persist() {
-        let path = std::env::temp_dir().join(format!(
-            "krit-store-update-many-noop-{}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
+        let path = store_path("update-many-noop");
 
         let mut s = CommentStore::new(Some(path.clone()));
         s.add(comment("a", "first"));
@@ -412,29 +413,45 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn corrupt_file_is_set_aside_rather_than_overwritten() {
-        let path =
-            std::env::temp_dir().join(format!("krit-store-corrupt-{}.json", std::process::id()));
+    /// Writes `content` as the store file, loads it, and asserts the bytes were
+    /// moved aside intact and survive the session's first mutation.
+    fn assert_quarantined(name: &str, content: &str) {
+        let path = store_path(name);
         let aside = path.with_extension("json.corrupt");
-        let _ = std::fs::remove_file(&aside);
-        std::fs::write(&path, "{not valid json").unwrap();
+        std::fs::write(&path, content).unwrap();
 
         let mut s = CommentStore::new(Some(path.clone()));
         assert!(s.get_all().is_empty());
-        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "{not valid json");
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), content);
+        assert!(
+            !path.exists(),
+            "the unreadable file is moved aside, not copied — leaving it in \
+             place would let the next load quarantine it a second time"
+        );
         // The first mutation writes a fresh file; the quarantined one stands.
         s.add(comment("a", "new"));
-        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "{not valid json");
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), content);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&aside);
     }
 
     #[test]
+    fn unparseable_json_is_set_aside_rather_than_overwritten() {
+        assert_quarantined("corrupt", "{not valid json");
+    }
+
+    #[test]
+    fn json_without_a_comments_array_is_set_aside_rather_than_overwritten() {
+        // The likelier of the two quarantine triggers: a partial write, a hand
+        // edit or a future schema yields valid JSON of the wrong shape far more
+        // often than it yields a parse error.
+        assert_quarantined("wrong-shape", r#"{"schemaVersion":1,"notes":[]}"#);
+    }
+
+    #[test]
     fn one_unreadable_record_does_not_lose_the_rest() {
-        let path =
-            std::env::temp_dir().join(format!("krit-store-bad-record-{}.json", std::process::id()));
+        let path = store_path("bad-record");
         let mut s = CommentStore::new(Some(path.clone()));
         s.add(comment("a", "keep me"));
         s.add(comment("b", "keep me too"));
@@ -455,8 +472,7 @@ mod tests {
 
     #[test]
     fn reads_the_bare_array_older_builds_wrote() {
-        let path =
-            std::env::temp_dir().join(format!("krit-store-legacy-{}.json", std::process::id()));
+        let path = store_path("legacy");
         let legacy = serde_json::to_string(&vec![comment("a", "from v0")]).unwrap();
         std::fs::write(&path, legacy).unwrap();
 

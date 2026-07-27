@@ -136,9 +136,10 @@ export function estimateWrappedRowHeight(
       const stride = Math.max(1, Math.ceil(source.length / WRAP_SAMPLE_LIMIT))
       for (let i = 0; i < source.length; i += stride) {
         lines++
-        // additionLines/deletionLines carry the trailing newline; it doesn't
-        // occupy a column.
-        const length = source[i].replace(/\n$/, '').length
+        // additionLines/deletionLines carry the trailing newline; neither it
+        // nor a CRLF's carriage return occupies a column, and a stray \r would
+        // push every full-width line in a CRLF repo onto a second row.
+        const length = source[i].replace(/\r?\n$/, '').length
         rows += Math.max(1, Math.ceil(length / charsPerRow))
       }
     }

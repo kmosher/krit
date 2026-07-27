@@ -24,6 +24,12 @@ describe('estimateWrappedRowHeight', () => {
     expect(estimateWrappedRowHeight([file(['x'.repeat(100) + '\n'])], metrics)).toBe(20)
   })
 
+  it('ignores a CRLF line ending when counting columns', () => {
+    // The \r is not a column either: counting it would reserve two rows for
+    // every full-width line in a CRLF repo.
+    expect(estimateWrappedRowHeight([file(['x'.repeat(100) + '\r\n'])], metrics)).toBe(20)
+  })
+
   it('rounds up, so the estimate never reserves less than the average', () => {
     // Two lines, three rows: 1.5 rows/line = 30px exactly; three lines, four
     // rows: 1.333 rows/line = 26.67px, which must round up to 27.
@@ -48,11 +54,26 @@ describe('estimateWrappedRowHeight', () => {
   })
 
   it('falls back to the row height when the surface measurement is unusable', () => {
-    expect(estimateWrappedRowHeight([file(['x'.repeat(500) + '\n'])], { rowHeight: 20, charsPerRow: 0 })).toBe(20)
+    const long = [file(['x'.repeat(500) + '\n'])]
+    expect(estimateWrappedRowHeight(long, { rowHeight: 20, charsPerRow: 0 })).toBe(20)
+    // An unpainted surface measures a 0 row height, and the result feeds
+    // computeRowWindow as its lineHeight — which clamps rather than dividing by
+    // it. Sub-pixel char widths come off the same unpainted surface, and with
+    // one the unguarded arithmetic is 0 * Infinity, i.e. NaN.
+    expect(estimateWrappedRowHeight(long, { rowHeight: 0, charsPerRow: 100 })).toBe(0)
+    expect(
+      estimateWrappedRowHeight(long, { rowHeight: 0, charsPerRow: Number.MIN_VALUE }),
+    ).toBe(0)
   })
 
   it('samples a bounded number of lines from a very large file', () => {
-    const lines = Array.from({ length: 200_000 }, () => 'x'.repeat(200) + '\n')
-    expect(estimateWrappedRowHeight([file(lines)], metrics)).toBe(40)
+    // The long lines sit at an offset the even stride never lands on, so the
+    // sampled average (1 row/line, 20px) and the full-walk average (1.49
+    // rows/line, 30px) can't agree by construction — a uniform fixture would
+    // pass with the sampling removed.
+    const lines = Array.from({ length: 200_000 }, (_, i) =>
+      i % 100 === 50 ? 'x'.repeat(5000) + '\n' : 'short\n',
+    )
+    expect(estimateWrappedRowHeight([file(lines)], metrics)).toBe(20)
   })
 })

@@ -280,7 +280,7 @@ pub fn file_content_at_ref(root: &Path, file_path: &str, git_ref: &str) -> Optio
     } else {
         format!("{git_ref}:{file_path}")
     };
-    git_stdout(&["show", &spec])
+    git_output_at(root, &["show", &spec]).ok()
 }
 
 /// Two-version content fetch behind GET /api/file-content: new = working
@@ -293,7 +293,7 @@ pub fn file_content(root: &Path, file_path: &str, version: &str) -> Option<Vec<u
     if version == "new" {
         return std::fs::read(resolve_safe_path(root, file_path)?).ok();
     }
-    git_stdout(&["show", &format!("HEAD:{file_path}")])
+    git_output_at(root, &["show", &format!("HEAD:{file_path}")]).ok()
 }
 
 /// Content fingerprint for the optimistic-concurrency token on
@@ -345,6 +345,13 @@ pub fn write_working_tree_file(root: &Path, file_path: &str, contents: &str) -> 
 /// An empty right side of `..`/`...` means HEAD. Flags are skipped and
 /// everything after `--` is pathspec, so neither reaches the table.
 pub fn resolve_diff_refs(custom_args: Option<&[String]>) -> (String, String) {
+    // The server runs with the repo as its cwd, so `.` is that repo; the
+    // parameterized form exists so the merge-base shell-out can be pointed at
+    // a fixture repo instead of the ambient cwd.
+    resolve_diff_refs_at(Path::new("."), custom_args)
+}
+
+fn resolve_diff_refs_at(root: &Path, custom_args: Option<&[String]>) -> (String, String) {
     let args = custom_args.unwrap_or(&[]);
     let mut positionals: Vec<&str> = Vec::new();
     let mut staged = false;
@@ -375,8 +382,10 @@ pub fn resolve_diff_refs(custom_args: Option<&[String]>) -> (String, String) {
             let a = positionals[0];
             if let Some((x, y)) = a.split_once("...") {
                 let head = if y.is_empty() { "HEAD" } else { y };
-                let merge_base = git_string(&["merge-base", x, head])
-                    .map(|s| s.trim().to_string())
+                let merge_base = git_output_at(root, &["merge-base", x, head])
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+                    .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| x.to_string());
                 (merge_base, head.to_string())
             } else if let Some((x, y)) = a.split_once("..") {
@@ -541,8 +550,13 @@ mod tests {
         resolve_diff_refs(Some(&owned))
     }
 
+    fn refs_at(root: &Path, args: &[&str]) -> (String, String) {
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        resolve_diff_refs_at(root, Some(&owned))
+    }
+
     // Pins the arg-shape → refs table documented on resolve_diff_refs (minus
-    // the `...` merge-base row, which shells out).
+    // the `...` merge-base row, which has its own repo-backed test).
     #[test]
     fn resolve_refs_table() {
         assert_eq!(
@@ -573,6 +587,168 @@ mod tests {
             refs(&["HEAD~2", "--", "src/"]),
             ("HEAD~2".into(), WORKING_TREE_REF.into())
         );
+    }
+
+    #[test]
+    fn three_dot_resolves_the_old_side_to_the_merge_base() {
+        // `a...b` reviews only what b added since it forked. Resolving the old
+        // side to `a` itself instead would mix everything that landed on the
+        // base branch after the fork into the reviewer's own diff.
+        let root = init_repo("three-dot");
+        std::fs::write(root.join("f.rs"), "base\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        git(&root, &["branch", "-M", "main"]);
+        git(&root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("f.rs"), "feature\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "feature work"]);
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("g.rs"), "moved on\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "main moves on"]);
+        git(&root, &["checkout", "-q", "feature"]);
+
+        let expected = String::from_utf8(
+            Command::new("git")
+                .args(["merge-base", "main", "feature"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        let (old, new) = refs_at(&root, &["main...feature"]);
+        assert_eq!(old, expected);
+        assert_ne!(old, "main", "the merge base is not the base branch tip");
+        assert_eq!(new, "feature");
+
+        // Empty right side means HEAD, and the merge base is computed against
+        // it rather than against the literal string.
+        let (old, new) = refs_at(&root, &["main..."]);
+        assert_eq!(old, expected);
+        assert_eq!(new, "HEAD");
+
+        // Two dots is the plain range: no merge base, both sides verbatim.
+        assert_eq!(
+            refs_at(&root, &["main..feature"]),
+            ("main".into(), "feature".into())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn staged_changes_appear_only_when_staged_is_set() {
+        // `staged: true` is the shipped default, so a diff that drops the index
+        // side renders an empty review after `git add`.
+        let root = init_repo("staged-side");
+        std::fs::write(root.join("a.rs"), "one\n").unwrap();
+        std::fs::write(root.join("both.rs"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        std::fs::write(root.join("a.rs"), "staged-only\n").unwrap();
+        git(&root, &["add", "a.rs"]);
+        std::fs::write(root.join("both.rs"), "staged\n").unwrap();
+        git(&root, &["add", "both.rs"]);
+        std::fs::write(root.join("both.rs"), "staged-then-worktree\n").unwrap();
+
+        let unstaged_only = git_diff(false, None, &root).unwrap();
+        assert!(
+            !unstaged_only.contains("staged-only"),
+            "a purely staged edit must not appear on the unstaged side: {unstaged_only}"
+        );
+
+        let with_staged = git_diff(true, None, &root).unwrap();
+        assert!(
+            with_staged.contains("staged-only"),
+            "the staged edit must be in the diff: {with_staged}"
+        );
+        // A file with edits on both sides contributes one header per side.
+        assert_eq!(
+            with_staged
+                .lines()
+                .filter(|l| *l == "diff --git a/both.rs b/both.rs")
+                .count(),
+            2,
+            "both.rs has a staged and an unstaged hunk: {with_staged}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_untracked_block_starts_on_its_own_line() {
+        // Every patch splitter keys on a line STARTING with `diff --git a/`.
+        // Without the separator the untracked block's first header glues onto
+        // the tail of the preceding tracked patch and that file disappears.
+        let root = init_repo("untracked-join");
+        std::fs::write(root.join("tracked.rs"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("tracked.rs"), "two\n").unwrap();
+        std::fs::write(root.join("fresh.rs"), "new\n").unwrap();
+
+        let untracked = untracked_file_paths(&root);
+        let diff = git_diff(false, Some(&untracked), &root).unwrap();
+        let headers: Vec<&str> = diff
+            .lines()
+            .filter(|l| l.starts_with("diff --git a/"))
+            .collect();
+        assert_eq!(
+            headers.len(),
+            2,
+            "one line-initial header each for the tracked and untracked file: {diff}"
+        );
+
+        // The block carries its own leading newline rather than trusting the
+        // preceding part to have ended in one — that is what makes the header
+        // line-initial no matter what it is appended to.
+        assert!(
+            untracked_files_diff_for(&root, &untracked).starts_with("\ndiff --git a/fresh.rs"),
+            "the untracked block must open with a separator, not with its header"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn file_content_at_ref_serves_each_side_from_its_own_source() {
+        // Hunk expansion asks for the exact side the patch was computed
+        // against; crossing the wires shows the reviewer context that never
+        // existed beside the hunk.
+        let root = init_repo("content-at-ref");
+        std::fs::write(root.join("f.rs"), "committed\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("f.rs"), "staged\n").unwrap();
+        git(&root, &["add", "f.rs"]);
+        std::fs::write(root.join("f.rs"), "working\n").unwrap();
+
+        let at =
+            |r: &str| String::from_utf8(file_content_at_ref(&root, "f.rs", r).unwrap()).unwrap();
+        assert_eq!(at(WORKING_TREE_REF), "working\n");
+        assert_eq!(at(INDEX_REF), "staged\n");
+        assert_eq!(at("HEAD"), "committed\n");
+        assert!(file_content_at_ref(&root, "../escape", WORKING_TREE_REF).is_none());
+        assert!(file_content_at_ref(&root, "../escape", "HEAD").is_none());
+
+        // file_content is the two-version view the editor modal rides on: new
+        // is the working tree (what a save would overwrite), old is HEAD.
+        assert_eq!(
+            String::from_utf8(file_content(&root, "f.rs", "new").unwrap()).unwrap(),
+            "working\n"
+        );
+        assert_eq!(
+            String::from_utf8(file_content(&root, "f.rs", "old").unwrap()).unwrap(),
+            "committed\n"
+        );
+        assert!(file_content(&root, "../escape", "new").is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

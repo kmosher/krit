@@ -109,6 +109,27 @@ export class DiffRequestLedger {
   }
 }
 
+// The b/-side path out of a `diff --git a/X b/Y` header, or null if the line
+// isn't one. A path may itself contain " b/" (`foo b/bar.rs` yields
+// `diff --git a/foo b/bar.rs b/foo b/bar.rs`), so neither the first nor the
+// last " b/" is reliably the separator. Absent a rename git writes the same
+// path on both sides, so the split point is fixed by length: the b/-side is
+// the trailing half of `a/`-stripped remainder. Only when that reconstruction
+// doesn't match — a rename, where the sides genuinely differ — do we fall back
+// to the first " b/", which is unambiguous for the paths git can produce there
+// (a path needing a literal " b/" on one side of a rename is quoted by git).
+export function diffHeaderPath(line: string): string | null {
+  const rest = line.startsWith('diff --git a/') ? line.slice('diff --git a/'.length) : null
+  if (rest === null) return null
+  const half = (rest.length - 3) / 2
+  if (Number.isInteger(half) && half > 0) {
+    const candidate = rest.slice(rest.length - half)
+    if (rest === `${candidate} b/${candidate}`) return candidate
+  }
+  const sep = rest.indexOf(' b/')
+  return sep === -1 ? null : rest.slice(sep + 3)
+}
+
 // Replace (or remove, or append) several files' fragments within a full
 // unified patch, in a single pass over `fullPatch`'s lines. Mirrors the
 // boundary logic of `extract_file_patch` in krit/src/server.rs so a batch
@@ -127,8 +148,7 @@ export function spliceFilePatches(fullPatch: string, fragments: Map<string, stri
       i++
       continue
     }
-    const match = lines[i].match(/^diff --git a\/.+ b\/(.+)$/)
-    const path = match?.[1]
+    const path = diffHeaderPath(lines[i]) ?? undefined
     let end = i + 1
     while (end < lines.length && !lines[end].startsWith(targetPrefix)) end++
     if (path !== undefined && fragments.has(path)) {
@@ -174,8 +194,7 @@ export function splitFilePatches(patch: string): Map<string, string> {
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].startsWith(targetPrefix)) continue
     flush(i)
-    const match = lines[i].match(/^diff --git a\/.+ b\/(.+)$/)
-    path = match?.[1] ?? null
+    path = diffHeaderPath(lines[i])
     start = i
   }
   flush(lines.length)

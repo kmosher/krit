@@ -68,6 +68,10 @@ fn utf16_col_to_byte(line: &str, col: usize) -> Option<usize> {
 /// Both splice paths write the *whole* decoded string back, so a lossy decode
 /// would replace every undecodable byte in the file — not just the edited
 /// range — with U+FFFD. Refusing leaves such a file untouched.
+///
+/// Deliberately equivalent to `fs::read_to_string`, which rejects invalid
+/// UTF-8 too. It exists to name the refusal at both splice call sites, so a
+/// later switch to a lossy read reads as the behavior change it would be.
 fn read_strict(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     String::from_utf8(bytes).ok()

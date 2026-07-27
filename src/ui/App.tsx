@@ -22,6 +22,22 @@ import type { SelectionAnchor } from './utils/selectionMapping'
 // line starts a new section that runs until the next one. Cheap string scan
 // (no diff parsing), so per-file re-parse below is the only place actual
 // parsing work happens.
+// The b/-side path of a `diff --git a/X b/Y` line. A path may itself contain
+// " b/", so scanning for that separator is ambiguous; git writes both sides
+// identically unless the file was renamed, so split the remainder in half and
+// only fall back to the last-separator reading when the halves disagree (a
+// rename, where the sides genuinely differ and no better signal exists here).
+function headerTargetPath(line: string): string | null {
+  const rest = line.slice('diff --git a/'.length)
+  const half = (rest.length - 3) / 2
+  if (Number.isInteger(half) && half > 0 && rest.slice(half, half + 3) === ' b/') {
+    const a = rest.slice(0, half)
+    const b = rest.slice(half + 3)
+    if (a === b) return b
+  }
+  return line.match(/^diff --git a\/.+ b\/(.+)$/)?.[1] ?? null
+}
+
 export function splitPatchFragments(patch: string): { name: string; text: string }[] {
   const lines = patch.split('\n')
   const targetPrefix = 'diff --git a/'
@@ -34,8 +50,7 @@ export function splitPatchFragments(patch: string): { name: string; text: string
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].startsWith(targetPrefix)) continue
     flush(i)
-    const match = lines[i].match(/^diff --git a\/.+ b\/(.+)$/)
-    name = match?.[1] ?? null
+    name = headerTargetPath(lines[i])
     start = i
   }
   flush(lines.length)

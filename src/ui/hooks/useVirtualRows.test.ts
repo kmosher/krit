@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest'
-import { renderHook } from '@testing-library/react'
+import { describe, it, expect, afterAll, beforeAll } from 'vitest'
+import { createElement } from 'react'
+import { fireEvent, render as renderDom, renderHook } from '@testing-library/react'
 import { computeRowWindow, useVirtualRows } from './useVirtualRows'
+import type { UseVirtualRowsResult } from './useVirtualRows'
 
 describe('computeRowWindow', () => {
   const ITEMS = 1000
@@ -31,12 +33,25 @@ describe('computeRowWindow', () => {
   })
 
   it('subtracts headerOffset before mapping scrollTop to a row', () => {
-    // A 40px header shares the scroll container: 40px of scroll is still row 0.
+    // A 40px header shares the scroll container: 40px of scroll is still row 0,
+    // and the visible span still ends 200px later, at row 10.
     const w = computeRowWindow(ITEMS, ROW, 0, 40, 40, 200)
     expect(w.startIndex).toBe(0)
+    expect(w.endIndex).toBe(10)
     // Same physical scroll without the offset would start one row in.
     const noOffset = computeRowWindow(ITEMS, ROW, 0, 0, 40, 200)
     expect(noOffset.startIndex).toBe(2)
+  })
+
+  it('clamps a scrollTop above the row list to zero, not to a negative span', () => {
+    // Resting at the very top of a container with a 40px header: the list has
+    // not scrolled at all. Without the clamp the span starts 40px negative and
+    // endIndex comes up two rows short of the viewport, at the top of every
+    // diff — startIndex's own clamp hides it.
+    const w = computeRowWindow(ITEMS, ROW, 0, 40, 0, 200)
+    expect(w.startIndex).toBe(0)
+    expect(w.endIndex).toBe(10)
+    expect(w.offsetY).toBe(0)
   })
 
   it('produces an empty window for zero items', () => {
@@ -45,10 +60,19 @@ describe('computeRowWindow', () => {
     expect(w.endIndex).toBe(0)
     expect(w.totalHeight).toBe(0)
   })
+
+  it('returns a finite empty window when the row height is not yet measured', () => {
+    // estimateWrappedRowHeight returns 0 off an unpainted surface; dividing by
+    // it would put NaN in every field and blank the list for good.
+    const w = computeRowWindow(ITEMS, 0, 3, 0, 500, 200)
+    for (const v of [w.startIndex, w.endIndex, w.totalHeight, w.offsetY]) {
+      expect(Number.isFinite(v)).toBe(true)
+    }
+    expect(w.endIndex).toBe(0)
+    expect(w.totalHeight).toBe(0)
+  })
 })
 
-// Exercises the hook under happy-dom + Testing Library, so the DOM-dependent
-// half (refs, scroll handler, viewport measurement) is covered too.
 describe('useVirtualRows (hook)', () => {
   const render = () =>
     renderHook(() => useVirtualRows({ itemCount: 100, rowHeight: 20, overscan: 4 }))
@@ -66,5 +90,61 @@ describe('useVirtualRows (hook)', () => {
     rerender()
     expect(result.current.onScroll).toBe(onScroll)
     expect(result.current.scrollRef).toBe(scrollRef)
+  })
+})
+
+// The half that only exists with a real element attached: the ref feeding the
+// viewport measurement, and the scroll handler feeding scrollTop. happy-dom
+// lays nothing out, so clientHeight is stubbed on the prototype — that is the
+// one value the hook reads off the DOM.
+describe('useVirtualRows (attached to a scroller)', () => {
+  const VIEWPORT = 200
+  let originalClientHeight: PropertyDescriptor | undefined
+
+  beforeAll(() => {
+    originalClientHeight = Object.getOwnPropertyDescriptor(
+      window.HTMLElement.prototype,
+      'clientHeight',
+    )
+    Object.defineProperty(window.HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => VIEWPORT,
+    })
+  })
+
+  afterAll(() => {
+    if (originalClientHeight) {
+      Object.defineProperty(window.HTMLElement.prototype, 'clientHeight', originalClientHeight)
+    } else {
+      // @ts-expect-error deleting a stub we added ourselves
+      delete window.HTMLElement.prototype.clientHeight
+    }
+  })
+
+  function mount() {
+    let latest!: UseVirtualRowsResult
+    function Scroller() {
+      const v = useVirtualRows({ itemCount: 100, rowHeight: 20, overscan: 4 })
+      latest = v
+      return createElement('div', { ref: v.scrollRef, onScroll: v.onScroll, 'data-testid': 'sc' })
+    }
+    const { getByTestId } = renderDom(createElement(Scroller))
+    return { el: getByTestId('sc'), current: () => latest }
+  }
+
+  it('measures the scroller and windows to its height', () => {
+    // Without the measurement viewportHeight stays 0 and only the overscan
+    // rows render, i.e. an empty list below the fold.
+    expect(mount().current().endIndex).toBe(VIEWPORT / 20 + 4)
+  })
+
+  it('follows the element scrollTop', () => {
+    const { el, current } = mount()
+    el.scrollTop = 1000
+    fireEvent.scroll(el)
+    // Row 50 is at the top; overscan 4 above it.
+    expect(current().startIndex).toBe(46)
+    expect(current().offsetY).toBe(46 * 20)
+    expect(current().endIndex).toBe(64)
   })
 })

@@ -23,6 +23,21 @@ function fragment(path: string, additions = 1, deletions = 1): string {
   return lines.join('\n')
 }
 
+// The same fragment as git writes it with core.quotePath left on: every path
+// in the header block is C-quoted. krit's own diffs are unquoted, but this is
+// the shape @pierre/diffs re-derives its `.name` from.
+function quotedFragment(quoted: string): string {
+  return [
+    `diff --git a/"${quoted}" b/"${quoted}"`,
+    `index 1111111..2222222 100644`,
+    `--- a/"${quoted}"`,
+    `+++ b/"${quoted}"`,
+    `@@ -1,1 +1,1 @@`,
+    `-old line`,
+    `+new line`,
+  ].join('\n')
+}
+
 describe('splitPatchFragments', () => {
   it('splits a multi-file patch into ordered {name,text} fragments keyed on the b/ path', () => {
     const a = fragment('src/a.rs')
@@ -39,6 +54,21 @@ describe('splitPatchFragments', () => {
 
   it('preserves a raw non-ASCII path', () => {
     expect(splitPatchFragments(fragment('src/café.rs'))[0].name).toBe('src/café.rs')
+  })
+
+  it('keys a path containing " b/" on the whole path, not its tail', () => {
+    // Keying on the tail puts the fragment under a name no other map uses, so
+    // a splice appends a second copy instead of replacing the first.
+    const path = 'src/foo b/bar.rs'
+    const frags = splitPatchFragments(fragment(path))
+    expect(frags.map((f) => f.name)).toEqual([path])
+  })
+
+  it('takes the destination path of a rename', () => {
+    const frags = splitPatchFragments(
+      ['diff --git a/src/old.rs b/src/new.rs', 'similarity index 100%', 'rename from src/old.rs', 'rename to src/new.rs'].join('\n'),
+    )
+    expect(frags.map((f) => f.name)).toEqual(['src/new.rs'])
   })
 })
 
@@ -61,7 +91,7 @@ describe('parseFileFragment', () => {
   // non-ASCII paths. parseFileFragment must pin .name to the unquoted fragment
   // name we pass in, so display/tree/comment keys all agree.
   it('pins .name to the given unquoted name for a non-ASCII path (patch-only)', () => {
-    const file = parseFileFragment('src/café.rs', fragment('src/café.rs'), undefined)
+    const file = parseFileFragment('src/café.rs', quotedFragment('src/caf\\303\\251.rs'), undefined)
     expect(file.name).toBe('src/café.rs')
   })
 
@@ -70,7 +100,7 @@ describe('parseFileFragment', () => {
     const contents: FileContentsMap = {
       [path]: { old: { contents: 'old\n' }, new: { contents: 'new\n' } },
     }
-    const file = parseFileFragment(path, fragment(path), contents[path])
+    const file = parseFileFragment(path, quotedFragment('src/caf\\303\\251.rs'), contents[path])
     expect(file.name).toBe(path)
   })
 

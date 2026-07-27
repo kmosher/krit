@@ -65,6 +65,23 @@ describe('computeSingleEdit', () => {
     expect([...applyEdit(before, edit)]).toEqual([...after])
   })
 
+  it('never splits a surrogate pair from the suffix end', () => {
+    // The mirror of the case above: 🚀 U+1F680 and 🪀 U+1FA80 share their LOW
+    // surrogate, so it is the backwards scan that stops between the halves.
+    // Only the suffix guard moves the boundary back off the pair.
+    const before = 'x🚀'
+    const after = 'x🪀'
+    const edit = computeSingleEdit(before, after)!
+    expect(applyEdit(before, edit)).toBe(after)
+    expect([...applyEdit(before, edit)]).toEqual([...after])
+    for (const pos of [edit.range.start, edit.range.end]) {
+      const line = before.split('\n')[pos.line] ?? ''
+      // A boundary just after a high surrogate is inside a pair, which Pierre's
+      // Position cannot denote.
+      expect(pos.character > 0 && /[\uD800-\uDBFF]/.test(line[pos.character - 1])).toBe(false)
+    }
+  })
+
   // Pierre cannot express a position between \r and \n, so neither boundary
   // may land there. Normalizing line endings is the way this shows up.
   it.each([

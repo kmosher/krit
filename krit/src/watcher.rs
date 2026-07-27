@@ -384,9 +384,27 @@ mod tests {
 
     #[test]
     fn an_all_filtered_tick_never_forks_git() {
-        // Not just an optimization: git_ignored_set is also called for ticks
-        // outside any repo, where forking would be pointless work.
-        assert!(git_ignored_set(Path::new("/nonexistent"), []).is_empty());
+        // This runs inside the debounce callback, where a single fork costs
+        // ~7.8ms. 100 empty ticks must therefore cost far less than the ~780ms
+        // that 100 spawns would — measuring the time is the only way to tell
+        // "returned early" from "forked and got nothing back".
+        let dir = scratch_repo("no-fork");
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            assert!(git_ignored_set(&dir, []).is_empty());
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "100 empty ticks took {elapsed:?}; that is spawn territory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_root_that_is_not_a_repo_leaves_every_path_un_ignored() {
+        // A spurious refresh is recoverable; a silently dropped edit is not.
+        assert!(git_ignored_set(Path::new("/nonexistent"), [b"src/lib.rs".as_slice()]).is_empty());
     }
 
     #[test]
@@ -402,6 +420,9 @@ mod tests {
         // `.claude/` are tracked content and must keep live-refreshing.
         assert!(!is_ignored(root, Path::new(".claude/skills/x/SKILL.md")));
         assert!(!is_ignored(root, Path::new(".claude/settings.json")));
+        // ...and only under `.claude`: a tracked `docs/worktrees/` is ordinary
+        // content that must keep live-refreshing.
+        assert!(!is_ignored(root, Path::new("docs/worktrees/plan.md")));
         assert!(!is_ignored(root, Path::new("src/lib.rs")));
     }
 
@@ -554,17 +575,27 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        // Keep listening past the first batch: stopping at it would accept a
+        // callback fired twice for the same tick.
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 5));
         drop(watcher);
 
         let batches = batches.lock().unwrap();
+        // The union, not batches[0]: whether FSEvents lands both writes inside
+        // one debounce window is a scheduling accident. What must hold is that
+        // each file is reported once in total and no path is reported twice.
+        let mut got: Vec<String> = batches.iter().flatten().cloned().collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["a.txt".to_string(), "b.txt".to_string()],
+            "each changed file reported exactly once across all batches: {batches:?}"
+        );
         assert_eq!(
             batches.len(),
             1,
-            "one burst of changes must produce exactly one callback invocation, not one per file: {batches:?}"
+            "the burst is one batched callback, not one per file: {batches:?}"
         );
-        let mut got = batches[0].clone();
-        got.sort();
-        assert_eq!(got, vec!["a.txt".to_string(), "b.txt".to_string()]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -578,12 +609,13 @@ mod tests {
         let f = dir.join("f.txt");
         std::fs::write(&f, b"same").unwrap();
 
-        let calls: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-        let calls_cb = calls.clone();
-        let watcher = watch_repo(dir.clone(), move |_paths| {
-            *calls_cb.lock().unwrap() += 1;
+        let batches: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let batches_cb = batches.clone();
+        let watcher = watch_repo(dir.clone(), move |paths| {
+            batches_cb.lock().unwrap().push(paths);
         })
         .expect("watcher starts");
+        let calls = || batches.lock().unwrap().len();
 
         // The watcher only learns a path's baseline hash from events it
         // observes AFTER it starts — a file written before `watch_repo` was
@@ -593,12 +625,12 @@ mod tests {
         // that second, content-identical event adds no further call.
         std::fs::write(&f, b"baseline").unwrap();
         for _ in 0..50 {
-            if *calls.lock().unwrap() >= 1 {
+            if calls() >= 1 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        let after_baseline = *calls.lock().unwrap();
+        let after_baseline = calls();
         assert_eq!(
             after_baseline, 1,
             "the baseline-establishing write must itself call back once"
@@ -614,14 +646,42 @@ mod tests {
             .set_modified(t)
             .unwrap();
 
+        // A file that appears and vanishes inside one window was never part of
+        // the review — an editor's swap file, a compiler's scratch output. It
+        // has no baseline hash, so its disappearance must report nothing.
+        let transient = dir.join("transient.tmp");
+        std::fs::write(&transient, b"gone in a moment").unwrap();
+        std::fs::remove_file(&transient).unwrap();
+
         std::thread::sleep(Duration::from_millis(1500));
-        drop(watcher);
 
         assert_eq!(
-            *calls.lock().unwrap(),
+            calls(),
             after_baseline,
-            "mtime-only churn over an already-known baseline must not call back again"
+            "neither mtime churn nor a never-baselined file's deletion is a change: {:?}",
+            batches.lock().unwrap()
         );
+
+        // A file we DID baseline is a different matter: its deletion is real
+        // review state and must be reported exactly once.
+        std::fs::remove_file(&f).unwrap();
+        for _ in 0..50 {
+            if calls() > after_baseline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 5));
+        drop(watcher);
+
+        let batches = batches.lock().unwrap();
+        assert_eq!(
+            batches.len(),
+            after_baseline + 1,
+            "exactly one further callback for the deletion: {batches:?}"
+        );
+        assert_eq!(batches[after_baseline], vec!["f.txt".to_string()]);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

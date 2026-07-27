@@ -62,7 +62,14 @@ export interface RowWindow {
  *  slice of rows to render (padded by `overscan` and clamped to
  *  `[0, itemCount]`) plus the total scroll height and the pixel top of the
  *  first rendered row. `headerOffset` accounts for a non-virtualized header
- *  sharing the same scroll container. */
+ *  sharing the same scroll container.
+ *
+ *  A non-positive `rowHeight` means the row geometry isn't known yet — the
+ *  main-pane caller derives it from `estimateWrappedRowHeight`, which returns
+ *  the surface's measured row height and so returns 0 before the surface has
+ *  painted. Dividing by it would make every field NaN and blank the list
+ *  permanently; an empty finite window instead fills itself in on the
+ *  re-measure. */
 export function computeRowWindow(
   itemCount: number,
   rowHeight: number,
@@ -71,6 +78,7 @@ export function computeRowWindow(
   scrollTop: number,
   viewportHeight: number,
 ): RowWindow {
+  if (!(rowHeight > 0)) return { startIndex: 0, endIndex: 0, totalHeight: 0, offsetY: 0 }
   const listScrollTop = Math.max(0, scrollTop - headerOffset)
   const startIndex = Math.max(0, Math.floor(listScrollTop / rowHeight) - overscan)
   const endIndex = Math.min(

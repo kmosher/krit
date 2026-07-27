@@ -7,7 +7,7 @@
 //! reaches everybody who hasn't overridden it.
 
 use serde_json::{Map, Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn settings_file() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -39,8 +39,8 @@ const SCHEMA_VERSION_KEY: &str = "schemaVersion";
 /// What the file actually holds — only the keys a user has explicitly set.
 /// Defaults are never written into it, so a later change to `defaults()`
 /// still reaches everyone who hasn't overridden that key.
-fn saved_settings() -> Map<String, Value> {
-    let mut saved = match std::fs::read_to_string(settings_file())
+fn saved_settings_at(path: &Path) -> Map<String, Value> {
+    let mut saved = match std::fs::read_to_string(path)
         .ok()
         .and_then(|c| serde_json::from_str::<Value>(&c).ok())
     {
@@ -79,16 +79,26 @@ fn apply_partial(saved: &mut Map<String, Value>, partial: &Value) {
 }
 
 pub fn load_settings() -> Value {
-    over_defaults(saved_settings())
+    load_settings_at(&settings_file())
+}
+
+fn load_settings_at(path: &Path) -> Value {
+    over_defaults(saved_settings_at(path))
 }
 
 /// Applies `partial` to the saved file and returns the full effective
 /// settings.
 pub fn save_settings(partial: &Value) -> Value {
-    let mut saved = saved_settings();
+    save_settings_at(&settings_file(), partial)
+}
+
+/// The `$HOME` lookup lives only in the wrappers above: the read/merge/write
+/// behavior is the part worth pinning, and it can't be exercised through a
+/// process-global environment variable without racing every other test.
+fn save_settings_at(path: &Path, partial: &Value) -> Value {
+    let mut saved = saved_settings_at(path);
     apply_partial(&mut saved, partial);
 
-    let path = settings_file();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -99,7 +109,7 @@ pub fn save_settings(partial: &Value) -> Value {
     // all" — silently reverting the user to defaults.
     if let Ok(s) = serde_json::to_string_pretty(&Value::Object(to_write)) {
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        if std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        if std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, path).is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
     }
@@ -150,5 +160,100 @@ mod tests {
         );
         assert_eq!(saved["futureKey"], json!({"nested": true}));
         assert!(!saved.contains_key(SCHEMA_VERSION_KEY));
+    }
+
+    fn settings_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("krit-settings-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_version_marker_is_written_but_never_read_back_as_a_setting() {
+        let dir = settings_dir("version-marker");
+        let path = dir.join("settings.json");
+
+        let effective = save_settings_at(&path, &json!({"diffStyle": "unified"}));
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk[SCHEMA_VERSION_KEY], json!(SCHEMA_VERSION));
+        assert_eq!(on_disk["diffStyle"], "unified");
+
+        // The marker is file metadata, not a setting: it must not reach the UI
+        // in the effective settings, nor round-trip back into the saved map.
+        assert!(effective.get(SCHEMA_VERSION_KEY).is_none());
+        assert!(
+            load_settings_at(&path).get(SCHEMA_VERSION_KEY).is_none(),
+            "a reloaded file must strip the marker it wrote"
+        );
+        assert!(!saved_settings_at(&path).contains_key(SCHEMA_VERSION_KEY));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_leaves_no_temp_file_beside_the_settings() {
+        // The file is shared by every krit process on the machine, so it is
+        // written to a per-process temp name and renamed into place. A leftover
+        // tmp means the rename never happened.
+        let dir = settings_dir("atomic-save");
+        let path = dir.join("settings.json");
+        save_settings_at(&path, &json!({"diffStyle": "unified"}));
+        save_settings_at(&path, &json!({"defaultTabSize": 2}));
+
+        let strays: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "settings.json")
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "unexpected files beside the store: {strays:?}"
+        );
+
+        // Successive saves accumulate rather than replacing the file.
+        let effective = load_settings_at(&path);
+        assert_eq!(effective["diffStyle"], "unified");
+        assert_eq!(effective["defaultTabSize"], 2);
+        assert_eq!(effective["staged"], true, "untouched keys still default");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_concurrent_reader_never_sees_a_half_written_file() {
+        // Every krit process on the machine shares this file, and a truncated
+        // one reads as "no settings at all" — silently reverting the user to
+        // defaults. Writing in place exposes exactly that window; renaming a
+        // complete temp file into place has none.
+        let dir = settings_dir("no-torn-read");
+        let path = dir.join("settings.json");
+        save_settings_at(&path, &json!({"diffStyle": "unified"}));
+
+        let reader_path = path.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let reader = std::thread::spawn(move || {
+            let mut torn = 0usize;
+            while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(text) = std::fs::read_to_string(&reader_path)
+                    && serde_json::from_str::<Value>(&text).is_err()
+                {
+                    torn += 1;
+                }
+            }
+            torn
+        });
+
+        for i in 0..2000 {
+            save_settings_at(&path, &json!({"defaultTabSize": i}));
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let torn = reader.join().unwrap();
+        assert_eq!(torn, 0, "a reader observed the file mid-write {torn} times");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

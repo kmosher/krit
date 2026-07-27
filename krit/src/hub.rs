@@ -236,3 +236,205 @@ impl Hub {
         });
     }
 }
+
+/// `tokio`'s `test-util` feature is off, so `start_paused` / `advance` are
+/// unavailable and no test here may wait for a timer to *fire* — a real
+/// 60s sleep is not a test anyone keeps. Everything below asserts the
+/// observable state the timers hang off instead: whether a timer is armed,
+/// which generation it captured, and how many tasks are alive.
+///
+/// Nothing may let `initiate_shutdown`'s spawned task run to completion:
+/// it ends in `process::exit(0)`, which would take the whole test binary
+/// with it. It sleeps 300ms first, and dropping the runtime at test end
+/// drops the task, so tests that touch shutdown must simply not linger.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn armed(hub: &Arc<Hub>) -> bool {
+        hub.idle_timer.lock().unwrap().is_some()
+    }
+
+    fn generation(hub: &Arc<Hub>) -> u64 {
+        hub.idle_gen.load(Ordering::SeqCst)
+    }
+
+    /// Aborting is asynchronous: the task is only reaped once the runtime
+    /// gets a chance to poll its cancellation, so `num_alive_tasks` lies
+    /// until we yield.
+    async fn alive_tasks() -> usize {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks()
+    }
+
+    #[tokio::test]
+    async fn each_role_increments_only_its_own_counter() {
+        let hub = Hub::new();
+        let (_rx, _ui) = hub.subscribe(Role::Ui);
+        assert_eq!(hub.counts(), (0, 1, 0));
+        let (_rx, _cli) = hub.subscribe(Role::Cli);
+        assert_eq!(hub.counts(), (1, 1, 0));
+        let (_rx, _agent) = hub.subscribe(Role::Agent);
+        assert_eq!(hub.counts(), (1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_subscription_decrements_the_role_it_was_taken_for() {
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        let (_rx, cli) = hub.subscribe(Role::Cli);
+        drop(cli);
+        assert_eq!(hub.counts(), (0, 1, 0));
+        drop(ui);
+        assert_eq!(hub.counts(), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_ui_subscriber_sets_had_browser_and_it_survives_the_disconnect() {
+        let hub = Hub::new();
+        assert!(!hub.had_browser());
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        assert!(hub.had_browser());
+        drop(ui);
+        assert!(hub.had_browser());
+    }
+
+    #[tokio::test]
+    async fn cli_and_agent_subscribers_never_set_had_browser() {
+        let hub = Hub::new();
+        let (_rx, _cli) = hub.subscribe(Role::Cli);
+        let (_rx, _agent) = hub.subscribe(Role::Agent);
+        assert!(!hub.had_browser());
+    }
+
+    #[tokio::test]
+    async fn no_idle_timer_arms_before_a_browser_has_ever_connected() {
+        let hub = Hub::new();
+        let (_rx, cli) = hub.subscribe(Role::Cli);
+        drop(cli);
+        assert!(
+            !armed(&hub),
+            "the no-browser timer owns the pre-browser phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn losing_the_last_browser_arms_the_idle_timer() {
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        assert!(!armed(&hub));
+        drop(ui);
+        assert!(armed(&hub));
+    }
+
+    #[tokio::test]
+    async fn a_cli_subscriber_alone_does_not_hold_the_server_alive() {
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        drop(ui);
+        let (_rx, _cli) = hub.subscribe(Role::Cli);
+        assert!(
+            armed(&hub),
+            "shutdown is keyed on browser presence; a cli subscriber must not cancel it"
+        );
+        let (_rx, _agent) = hub.subscribe(Role::Agent);
+        assert!(armed(&hub));
+    }
+
+    #[tokio::test]
+    async fn a_returning_browser_disarms_the_idle_timer() {
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        drop(ui);
+        assert!(armed(&hub));
+        let (_rx, _ui2) = hub.subscribe(Role::Ui);
+        assert!(!armed(&hub));
+    }
+
+    #[tokio::test]
+    async fn every_subscriber_event_invalidates_the_generation_an_armed_timer_captured() {
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        drop(ui);
+        let armed_at = generation(&hub);
+        // The handle can be aborted, but a timer already past its sleep can
+        // only be stopped by the generation check — so cli/agent churn has to
+        // move the generation too, not just browser transitions.
+        let (_rx, cli) = hub.subscribe(Role::Cli);
+        assert!(generation(&hub) > armed_at);
+        let bumped = generation(&hub);
+        drop(cli);
+        assert!(generation(&hub) > bumped);
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_loop_with_no_browser_leaves_at_most_one_live_timer() {
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        drop(ui);
+        for _ in 0..100 {
+            let (_rx, cli) = hub.subscribe(Role::Cli);
+            drop(cli);
+        }
+        assert!(
+            alive_tasks().await <= 1,
+            "superseded idle timers must be aborted, not merely made no-ops"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutting_down_stops_arming_new_idle_timers() {
+        let hub = Hub::new();
+        hub.initiate_shutdown("test");
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        drop(ui);
+        assert!(!armed(&hub));
+    }
+
+    #[tokio::test]
+    async fn initiate_shutdown_broadcasts_review_ended_exactly_once() {
+        let hub = Hub::new();
+        let (mut rx, _guard) = hub.subscribe(Role::Ui);
+        hub.initiate_shutdown("done");
+        hub.initiate_shutdown("done again");
+        loop {
+            match rx.try_recv().expect("review-ended never landed") {
+                Event::ReviewEnded { reason } => {
+                    assert_eq!(reason, "done");
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn subscriber_changes_broadcast_the_current_counts() {
+        let hub = Hub::new();
+        let (mut rx, _ui) = hub.subscribe(Role::Ui);
+        let (_rx2, cli) = hub.subscribe(Role::Cli);
+        drop(cli);
+        let mut last = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::State { .. } = ev {
+                last = Some(ev);
+            }
+        }
+        assert!(matches!(
+            last,
+            Some(Event::State {
+                watcher_count: 0,
+                ui_count: 1,
+                agent_count: 0
+            })
+        ));
+    }
+}
