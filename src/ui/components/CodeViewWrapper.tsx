@@ -24,8 +24,7 @@ type DraftMetadata = {
   startLine: number
   endLine: number
   // In-progress form text, lifted out of CommentForm's local state so a
-  // remount (structural file add/remove, or a page reload once Stage 8
-  // persists drafts) doesn't discard what the user was typing.
+  // structural add/remove remount doesn't discard what the user was typing.
   body: string
   suggestMode: boolean
   suggestionText: string
@@ -95,6 +94,100 @@ function AnnotationEventGuard(props: { children: React.ReactNode }) {
 // file regardless of whether the diff itself is large.
 const AUTO_COLLAPSE_CHANGE_THRESHOLD = 500
 
+// What CodeView needs to size an unrendered file: how tall one visual row is,
+// how many characters fit on one before `overflow: 'wrap'` breaks it, and how
+// tall a file header is. Pierre's own defaults (lineHeight 20, header 44) are
+// estimates for *unwrapped* rows, so on a wrapped surface the reservation runs
+// short by however much the diff wraps. Measured off the live surface rather
+// than hardcoded: every one of these is set by the Pierre theme's CSS, which
+// krit doesn't own and can change under it on a version bump.
+export interface SurfaceMetrics {
+  rowHeight: number
+  charsPerRow: number
+  headerHeight: number
+}
+
+// Cap on how many lines the wrap estimate reads per file. Full-file mode hands
+// us whole files, so a large review can carry hundreds of thousands of lines;
+// the estimate is an average, and an even stride over a few thousand samples
+// converges to the same number as reading every line.
+const WRAP_SAMPLE_LIMIT = 2000
+
+// Frames to keep retrying the surface measurement before giving up and letting
+// Pierre's own defaults stand.
+const MEASURE_ATTEMPTS = 60
+
+// Average visual rows per source line, in pixels — what to hand Pierre as
+// `lineHeight`. Under-reserving is the bug being fixed here (the layout grows
+// as rows are measured on approach, so the bottom recedes as you scroll toward
+// it); over-reserving only leaves dead space the layout reclaims. When in
+// doubt this rounds up.
+export function estimateWrappedRowHeight(
+  files: FileDiffMetadata[],
+  metrics: Pick<SurfaceMetrics, 'rowHeight' | 'charsPerRow'>,
+): number {
+  const { rowHeight, charsPerRow } = metrics
+  if (!(rowHeight > 0) || !(charsPerRow > 0)) return rowHeight
+  let lines = 0
+  let rows = 0
+  for (const file of files) {
+    for (const source of [file.additionLines, file.deletionLines]) {
+      if (!source || source.length === 0) continue
+      const stride = Math.max(1, Math.ceil(source.length / WRAP_SAMPLE_LIMIT))
+      for (let i = 0; i < source.length; i += stride) {
+        lines++
+        // additionLines/deletionLines carry the trailing newline; it doesn't
+        // occupy a column.
+        const length = source[i].replace(/\n$/, '').length
+        rows += Math.max(1, Math.ceil(length / charsPerRow))
+      }
+    }
+  }
+  if (lines === 0) return rowHeight
+  return Math.ceil((rows / lines) * rowHeight)
+}
+
+// Character advance width for a monospace font, via canvas rather than a probe
+// element: the surface lives in Pierre's shadow root and its font stack is not
+// in scope for anything krit renders, so the only honest measurement is to ask
+// the shadow node for its computed font and measure that exact string.
+let measureCanvas: HTMLCanvasElement | null = null
+const CHAR_SAMPLE = 'x'.repeat(64)
+function measureCharWidth(style: CSSStyleDeclaration): number {
+  measureCanvas ??= document.createElement('canvas')
+  const ctx = measureCanvas.getContext('2d')
+  if (!ctx) return 0
+  ctx.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`
+  return ctx.measureText(CHAR_SAMPLE).width / CHAR_SAMPLE.length
+}
+
+// Read the real geometry off whichever file happens to be rendered. Returns
+// null until CodeView has painted at least one item — the caller retries.
+function measureSurfaceMetrics(container: HTMLElement | null): SurfaceMetrics | null {
+  const root = container?.querySelector('diffs-container')?.shadowRoot
+  const content = root?.querySelector('[data-content]')
+  if (!(content instanceof HTMLElement)) return null
+  const style = getComputedStyle(content)
+  const rowHeight = Number.parseFloat(style.lineHeight)
+  const charWidth = measureCharWidth(style)
+  const width = content.getBoundingClientRect().width
+  if (!(rowHeight > 0) || !(charWidth > 0) || !(width > 0)) return null
+  // Every rendered header, not just the first: krit's renderHeaderPrefix grows
+  // a stale/Apply button and a confirm-save strip on the file being edited, and
+  // Pierre reserves one flat height for all of them. Sizing to the tallest
+  // over-reserves for the other files by that difference, which is the
+  // direction that doesn't strand the bottom of the scroll.
+  let headerHeight = 0
+  for (const host of container?.querySelectorAll('diffs-container') ?? []) {
+    const header = host.shadowRoot?.querySelector('[data-diffs-header]')
+    if (header instanceof HTMLElement) {
+      headerHeight = Math.max(headerHeight, Math.ceil(header.getBoundingClientRect().height))
+    }
+  }
+  if (!(headerHeight > 0)) return null
+  return { rowHeight, charsPerRow: Math.max(1, Math.floor(width / charWidth)), headerHeight }
+}
+
 export interface CodeViewWrapperHandle {
   scrollToFile(filePath: string): void
   scrollToLine(filePath: string, side: SelectionSide, lineNumber: number): void
@@ -111,6 +204,12 @@ interface Props {
   viewedFiles: Set<string>
   fileAnnotationsMap: Map<string, DiffLineAnnotation<ReviewComment>[]>
   commentCounts: Record<string, number>
+  // Passed in rather than derived here. Neither source available to this
+  // component can produce it: after the parseDiffFromFile upgrade
+  // hunk.additionCount/deletionCount come back zero (that path exists for
+  // expansion context, not stats), and FileDiffMetadata.additionLines is the
+  // entire new file in full-file mode. The caller computes it off the patch
+  // text, which is the only place the real +/- counts survive.
   fileStatsMap: Record<string, { additions: number; deletions: number }>
   onViewedChange(filePath: string, viewed: boolean): void
   onAddComment(
@@ -258,12 +357,6 @@ function fileTypeLabel(type: FileDiffMetadata['type']): { label: string; cls: st
   }
 }
 
-// We can't rely on hunk.additionLines/deletionLines after the parseDiffFromFile
-// upgrade — that path returns hunks with zero +/- counts (the upgrade is for
-// expansion context, not stats). Counting from FileDiffMetadata.additionLines
-// (the array of strings) is wrong too: in full-file mode it's the entire new
-// file. So we hand stats in from the caller, computed off the patch text.
-
 export const CodeViewWrapper = memo(
   forwardRef<CodeViewWrapperHandle, Props>(function CodeViewWrapper(
     {
@@ -399,6 +492,12 @@ export const CodeViewWrapper = memo(
 
     const initialItems = useMemo<CodeViewItem<Metadata>[]>(
       () => buildItems(files, fileAnnotationsMap, pending, viewedFiles, fileStatsMap, editingFiles),
+      // buildItems also reads fileAnnotationsMap, pending, viewedFiles,
+      // fileStatsMap and editingFiles, and the omission is the point: these are
+      // the items CodeView mounts with, and every later change to any of them
+      // is owned by the sync effects below, which patch items in place. Adding
+      // the deps would rebuild the initial list behind CodeView's back, where
+      // nothing reads it again.
       // eslint-disable-next-line react-hooks/exhaustive-deps
       [files],
     )
@@ -435,7 +534,6 @@ export const CodeViewWrapper = memo(
 
       const sameFileSet =
         prevFiles.size === nextFiles.size && [...prevFiles.keys()].every((name) => nextFiles.has(name))
-      lastFileRef.current = nextFiles
 
       if (!sameFileSet) {
         // The remount destroys every editor instance, and Pierre's teardown
@@ -446,13 +544,22 @@ export const CodeViewWrapper = memo(
         // stale, which is the same bargain live-unless-active already makes.
         if (editingFiles.size > 0) {
           pendingStructuralRef.current = true
+          // Leave the baseline at prevFiles. A tick that adds or removes a file
+          // can also change the contents of files present in both sets, and
+          // those changes are skipped here along with the remount; advancing
+          // the baseline would hide them from the next tick's
+          // `prevFiles.get(name) !== nextFiles.get(name)` compare and leave
+          // them rendering stale forever. The non-deferred branch can advance
+          // safely because the remount rebuilds every item from `files`.
           return
         }
+        lastFileRef.current = nextFiles
         pendingScrollRestoreRef.current = scrollRef.current?.scrollTop ?? null
         setStructuralRevision((r) => r + 1)
         return
       }
 
+      lastFileRef.current = nextFiles
       syncItems(
         viewerRef.current,
         files,
@@ -582,9 +689,10 @@ export const CodeViewWrapper = memo(
     }, [files, commentCounts])
 
     // Same idea for stats: bump version if a file's stats change so the
-    // metadata cell rerenders. In practice stats don't change for a given
-    // diff identity (the viewerKey remount catches identity changes), but
-    // this keeps the data path consistent.
+    // metadata cell rerenders. In practice stats don't change for a given diff
+    // identity — a change to the file set remounts via `structuralRevision`,
+    // and a mode switch remounts via App's key on DiffViewer — but this keeps
+    // the data path consistent.
     const lastStatsRef = useRef<Record<string, { additions: number; deletions: number }>>({})
     useEffect(() => {
       const prev = lastStatsRef.current
@@ -1038,6 +1146,73 @@ export const CodeViewWrapper = memo(
       },
     )
 
+    // Live surface geometry, remeasured whenever the thing that sets it moves:
+    // the container resizes (window, sidebar toggle, split/unified column
+    // width) or a remount repaints the surface. Held as state because
+    // `options.itemMetrics` is derived from it and CodeView must see the new
+    // value; Pierre reanchors scroll across the relayout itself.
+    const [surfaceMetrics, setSurfaceMetrics] = useState<SurfaceMetrics | null>(null)
+    // Header reservation only ever grows. The tall header belongs to whichever
+    // file is mid-edit, so letting the metric fall back the moment that file
+    // leaves edit mode would shorten the layout under a user who is still
+    // scrolling it.
+    const maxHeaderHeightRef = useRef(0)
+    const measureFrameRef = useRef<number | null>(null)
+    const scheduleMeasure = useStableCallback((attemptsLeft = MEASURE_ATTEMPTS) => {
+      if (measureFrameRef.current !== null) return
+      measureFrameRef.current = requestAnimationFrame(() => {
+        measureFrameRef.current = null
+        const next = measureSurfaceMetrics(scrollRef.current)
+        if (!next) {
+          // CodeView paints asynchronously after mount, so the first attempts
+          // legitimately find nothing. Bounded rather than open-ended: a diff
+          // with no files renders no surface and would otherwise leave a
+          // retry running for the life of the page.
+          if (attemptsLeft > 0) scheduleMeasure(attemptsLeft - 1)
+          return
+        }
+        maxHeaderHeightRef.current = Math.max(maxHeaderHeightRef.current, next.headerHeight)
+        next.headerHeight = maxHeaderHeightRef.current
+        setSurfaceMetrics((prev) =>
+          prev &&
+          prev.rowHeight === next.rowHeight &&
+          prev.charsPerRow === next.charsPerRow &&
+          prev.headerHeight === next.headerHeight
+            ? prev
+            : next,
+        )
+      })
+    })
+
+    useEffect(() => {
+      const container = scrollRef.current
+      if (!container) return
+      scheduleMeasure()
+      const observer = new ResizeObserver(() => scheduleMeasure())
+      observer.observe(container)
+      return () => {
+        observer.disconnect()
+        if (measureFrameRef.current !== null) cancelAnimationFrame(measureFrameRef.current)
+        measureFrameRef.current = null
+      }
+    }, [structuralRevision, scheduleMeasure])
+
+    // The header renderers grow and shrink with these, and Pierre reserves one
+    // height for every header — so a change here can change what the tallest
+    // header is. The resize observer above doesn't see it: the container's own
+    // size never moves.
+    useEffect(() => {
+      scheduleMeasure()
+    }, [editingFiles, staleFiles, confirmSaveFiles, diffStyle, scheduleMeasure])
+
+    const itemMetrics = useMemo(() => {
+      if (!surfaceMetrics) return undefined
+      return {
+        lineHeight: estimateWrappedRowHeight(files, surfaceMetrics),
+        diffHeaderHeight: surfaceMetrics.headerHeight,
+      }
+    }, [files, surfaceMetrics])
+
     const activeOffset = 80
     const lastActiveFileRef = useRef<string | null>(null)
     const rafIdRef = useRef<number | null>(null)
@@ -1072,6 +1247,14 @@ export const CodeViewWrapper = memo(
         // overflow-x: clip (global.css), so anything past the viewport edge
         // was simply unreadable.
         overflow: 'wrap' as const,
+        // Pierre's default metrics assume one 20px row per source line and a
+        // 44px header. Both under-reserve here — wrapped lines occupy several
+        // rows, and krit's header prefix can outgrow one row — and an
+        // under-reserved layout grows as rows are measured on approach, so the
+        // bottom of the scroll recedes and never arrives. Measured, so a theme
+        // change moves it too. Undefined until the surface has painted once;
+        // Pierre reanchors scroll when it lands.
+        itemMetrics,
         themeType: 'system' as const,
         theme: { dark: 'github-dark' as const, light: 'github-light' as const },
         enableGutterUtility: true,
@@ -1126,7 +1309,7 @@ export const CodeViewWrapper = memo(
           isSelectingRef.current = false
         },
       }),
-      [diffStyle, defaultTabSize, handleGutterClick, handleLineEnter],
+      [diffStyle, defaultTabSize, itemMetrics, handleGutterClick, handleLineEnter],
     )
 
     // One factory for every inline edit session. CodeView calls it per item
