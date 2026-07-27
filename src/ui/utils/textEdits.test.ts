@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { computeMinimalEdit } from './textEdits'
+import { computeSingleEdit } from './textEdits'
 
 // Independent oracle: apply an edit the way a text document would, so each
 // case asserts on the observable result rather than on offsets we computed
 // with the same arithmetic we're testing.
-function applyEdit(text: string, edit: ReturnType<typeof computeMinimalEdit>): string {
+function applyEdit(text: string, edit: ReturnType<typeof computeSingleEdit>): string {
   if (!edit) return text
   const lines = text.split('\n')
   const offsetOf = (pos: { line: number; character: number }) => {
@@ -15,13 +15,13 @@ function applyEdit(text: string, edit: ReturnType<typeof computeMinimalEdit>): s
   return text.slice(0, offsetOf(edit.range.start)) + edit.newText + text.slice(offsetOf(edit.range.end))
 }
 
-describe('computeMinimalEdit', () => {
+describe('computeSingleEdit', () => {
   it('returns null when the texts already match', () => {
-    expect(computeMinimalEdit('same\ntext\n', 'same\ntext\n')).toBeNull()
+    expect(computeSingleEdit('same\ntext\n', 'same\ntext\n')).toBeNull()
   })
 
   it('narrows a single-line change to just that line', () => {
-    const edit = computeMinimalEdit('a\nb\nc\n', 'a\nBB\nc\n')
+    const edit = computeSingleEdit('a\nb\nc\n', 'a\nBB\nc\n')
     expect(edit?.range.start).toEqual({ line: 1, character: 0 })
     expect(edit?.range.end).toEqual({ line: 1, character: 1 })
     expect(edit?.newText).toBe('BB')
@@ -30,7 +30,7 @@ describe('computeMinimalEdit', () => {
   it('spans the gap when two distant regions change', () => {
     const before = 'one\ntwo\nthree\nfour\nfive\n'
     const after = 'ONE\ntwo\nthree\nfour\nFIVE\n'
-    const edit = computeMinimalEdit(before, after)
+    const edit = computeSingleEdit(before, after)
     expect(edit?.range.start.line).toBe(0)
     expect(edit?.range.end.line).toBe(4)
     expect(applyEdit(before, edit)).toBe(after)
@@ -51,7 +51,7 @@ describe('computeMinimalEdit', () => {
   ]
 
   it.each(cases)('round-trips: %s', (_name, before, after) => {
-    expect(applyEdit(before, computeMinimalEdit(before, after))).toBe(after)
+    expect(applyEdit(before, computeSingleEdit(before, after))).toBe(after)
   })
 
   it('never splits a surrogate pair', () => {
@@ -59,7 +59,7 @@ describe('computeMinimalEdit', () => {
     // unit is identical) — a naive prefix scan stops between the halves.
     const before = 'x🚀y'
     const after = 'x🚁y'
-    const edit = computeMinimalEdit(before, after)!
+    const edit = computeSingleEdit(before, after)!
     expect(applyEdit(before, edit)).toBe(after)
     // The proof it didn't split: no lone surrogate survived the round trip.
     expect([...applyEdit(before, edit)]).toEqual([...after])
@@ -72,7 +72,7 @@ describe('computeMinimalEdit', () => {
     ['LF converted to CRLF', 'a\nb\n', 'a\r\nb\r\n'],
     ['one CRLF line ending dropped', 'a\r\n', 'a\n'],
   ])('keeps both boundaries off the CR/LF gap: %s', (_name, before, after) => {
-    const edit = computeMinimalEdit(before, after)!
+    const edit = computeSingleEdit(before, after)!
     for (const pos of [edit.range.start, edit.range.end]) {
       // Splitting a line on \n leaves the \r at the end of the preceding
       // piece, so the forbidden gap is exactly "at end-of-line, on a line that
@@ -89,7 +89,7 @@ describe('computeMinimalEdit', () => {
     // end was computed against the new text would land short and leave a tail.
     const before = 'keep\ndelete me entirely\nkeep\n'
     const after = 'keep\nx\nkeep\n'
-    const edit = computeMinimalEdit(before, after)!
+    const edit = computeSingleEdit(before, after)!
     expect(edit.range.end.line).toBe(1)
     expect(applyEdit(before, edit)).toBe(after)
   })

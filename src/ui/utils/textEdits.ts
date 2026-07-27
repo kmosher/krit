@@ -30,19 +30,19 @@ function positionAt(text: string, offset: number): { line: number; character: nu
 }
 
 /**
- * The single edit that turns `oldText` into `newText`, or null if they already
- * match.
+ * One edit that turns `oldText` into `newText`, or null if they already match.
  *
- * One edit, not a per-hunk list, and that is the point: an agent's write should
- * cost the reader exactly one undo to reject, whatever it touched. The cost is
- * that a write touching two distant regions produces a range spanning the
- * untouched text between them, which is rewritten with itself.
+ * Exactly one, never a per-hunk list, and that is the guarantee the name
+ * carries: an agent's write should cost the reader a single undo to reject,
+ * whatever it touched. The price is that a write touching two distant regions
+ * yields a range spanning the untouched text between them, rewritten with
+ * itself — so the range is single, not minimal.
  *
  * Trimming the common prefix and suffix keeps the usual case (one region
  * changed) tight enough that the editor's selection and markers outside it
  * survive.
  */
-export function computeMinimalEdit(oldText: string, newText: string): TextEdit | null {
+export function computeSingleEdit(oldText: string, newText: string): TextEdit | null {
   if (oldText === newText) return null
 
   const maxPrefix = Math.min(oldText.length, newText.length)
@@ -50,9 +50,9 @@ export function computeMinimalEdit(oldText: string, newText: string): TextEdit |
   while (prefix < maxPrefix && oldText.charCodeAt(prefix) === newText.charCodeAt(prefix)) {
     prefix++
   }
-  // Both adjustments only ever shrink the prefix, and every code unit inside
-  // it is common to both strings, so backing off stays consistent with the
-  // newText slice below.
+  // Every guard below only ever shrinks the common prefix or suffix, growing
+  // the range outward. The trimmed region is common to both strings, so
+  // backing off stays consistent with the newText slice at the end.
   if (prefix > 0 && isHighSurrogate(oldText.charCodeAt(prefix - 1))) prefix--
   if (splitsCRLF(oldText, prefix)) prefix--
 
@@ -67,10 +67,6 @@ export function computeMinimalEdit(oldText: string, newText: string): TextEdit |
   ) {
     suffix++
   }
-  // Symmetric guard: the boundary must not fall between a surrogate pair's
-  // halves. Here the character *before* the suffix start is the risk.
-  // Mirror image: these only ever shrink the common suffix, growing the range
-  // forward, which is likewise consistent with the newText slice.
   if (suffix > 0 && isHighSurrogate(oldText.charCodeAt(oldText.length - suffix - 1))) suffix--
   if (splitsCRLF(oldText, oldText.length - suffix)) suffix--
 

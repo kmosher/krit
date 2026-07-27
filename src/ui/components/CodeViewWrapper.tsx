@@ -15,7 +15,7 @@ import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 import { SelectionPill } from './SelectionPill'
 import { getActiveSelectionRange, mapRangeToAnchor, type SelectionAnchor } from '../utils/selectionMapping'
-import { computeMinimalEdit } from '../utils/textEdits'
+import { computeSingleEdit } from '../utils/textEdits'
 
 type DraftMetadata = {
   _pending: true
@@ -313,12 +313,16 @@ export const CodeViewWrapper = memo(
         },
         applyExternalEdit(filePath: string, contents: string): boolean {
           // getEditor is typed as DiffsEditor, the narrow interface CodeView
-          // needs; the document methods live on the concrete class. Our
-          // EditProvider factory below is the only thing that ever constructs
-          // one, and it always returns an Editor, so the narrowing holds.
+          // needs; the document methods live on the concrete class. Probed
+          // rather than asserted: this is a prerelease, and the declared
+          // interface deliberately omits both methods, so if a later release
+          // hands back something else we want the documented "no live editor"
+          // answer — a diff refetch — not a TypeError mid-apply.
           const editor = viewerRef.current?.getEditor(filePath) as Editor<Metadata> | undefined
-          if (!editor) return false
-          const edit = computeMinimalEdit(editor.getText(), contents)
+          if (typeof editor?.getText !== 'function' || typeof editor.applyEdits !== 'function') {
+            return false
+          }
+          const edit = computeSingleEdit(editor.getText(), contents)
           // The write matched what's already in the document — an echo of the
           // session's own save, or a no-op touch. Reporting it as applied
           // keeps the caller from refetching the diff for nothing.
@@ -371,6 +375,9 @@ export const CodeViewWrapper = memo(
     // shrinking the item list can't be done in place.
     const lastFileRef = useRef<Map<string, FileDiffMetadata> | null>(null)
     const pendingScrollRestoreRef = useRef<number | null>(null)
+    // Set when a file-set change arrived while an edit session was open; the
+    // remount it wanted is owed and runs once the last session closes.
+    const pendingStructuralRef = useRef(false)
     const [structuralRevision, setStructuralRevision] = useState(0)
     useEffect(() => {
       const prevFiles = lastFileRef.current
@@ -388,6 +395,16 @@ export const CodeViewWrapper = memo(
       lastFileRef.current = nextFiles
 
       if (!sameFileSet) {
+        // The remount destroys every editor instance, and Pierre's teardown
+        // path (reset() -> editor.cleanUp()) pushes no completion — unsaved
+        // typing would go silently. An unrelated file appearing or vanishing
+        // is not worth that, so hold the remount until the last session ends;
+        // the effect below runs it then. Until then the item list is one file
+        // stale, which is the same bargain live-unless-active already makes.
+        if (editingFiles.size > 0) {
+          pendingStructuralRef.current = true
+          return
+        }
         pendingScrollRestoreRef.current = scrollRef.current?.scrollTop ?? null
         setStructuralRevision((r) => r + 1)
         return
@@ -448,7 +465,11 @@ export const CodeViewWrapper = memo(
         if (!item || item.type !== 'diff') continue
         // Auto-collapse on viewed, auto-expand on un-viewed. The user can
         // still manually re-expand with the chevron after marking viewed.
-        item.collapsed = after
+        // Never collapse out from under a live editor: that would make Pierre
+        // end the session and write the file, which is not what ticking a
+        // checkbox asked for. The header still needs its bump below, so this
+        // suppresses only the collapse.
+        if (!(after && editingFiles.has(file.name))) item.collapsed = after
         item.version = bumpVersion(item)
         viewer.updateItem(item)
       }
@@ -477,10 +498,20 @@ export const CodeViewWrapper = memo(
       lastEditingRef.current = new Set(editingFiles)
     }, [files, editingFiles])
 
+    // Pay off a remount deferred by an open edit session (see above).
+    useEffect(() => {
+      if (editingFiles.size > 0 || !pendingStructuralRef.current) return
+      pendingStructuralRef.current = false
+      pendingScrollRestoreRef.current = scrollRef.current?.scrollTop ?? null
+      setStructuralRevision((r) => r + 1)
+    }, [editingFiles])
+
     // renderHeaderPrefix reads staleFiles through its closure, so an item whose
     // staleness flipped needs a version bump to re-run it and show (or drop)
     // the Apply button. Only files being edited render it, so only those need
-    // the bump.
+    // the bump. The other order — stale first, edit second — is covered by the
+    // edit effect above, which bumps unconditionally on entry; this one only
+    // handles staleness moving while a session is already open.
     const lastStaleRef = useRef<Set<string>>(new Set())
     useEffect(() => {
       const viewer = viewerRef.current
@@ -822,12 +853,23 @@ export const CodeViewWrapper = memo(
       },
     )
 
+    // Collapsing ends a Pierre edit session (it fires onItemEditComplete for
+    // "edit turned off, item removed or collapsed"), which writes the file.
+    // Route it through the normal exit so the save is the one the user gets
+    // asked about and our `editingFiles` doesn't outlive the session Pierre
+    // just closed — otherwise the header keeps reading "Done" over a dead
+    // editor and useDiff defers that file's changes forever.
     const handleToggleCollapse = useStableCallback((itemId: string) => {
       const viewer = viewerRef.current
       if (!viewer) return
       const item = viewer.getItem(itemId)
       if (!item || item.type !== 'diff') return
-      item.collapsed = item.collapsed !== true
+      const collapsing = item.collapsed !== true
+      if (collapsing && editingFiles.has(itemId)) {
+        onToggleEdit(itemId)
+        return
+      }
+      item.collapsed = collapsing
       item.version = bumpVersion(item)
       viewer.updateItem(item)
     })
@@ -899,6 +941,7 @@ export const CodeViewWrapper = memo(
                 // The inline editor only covers what the diff renders; this
                 // opens the whole file, including untouched regions.
                 title="Edit whole file in a modal"
+                aria-label="Edit whole file in a modal"
                 onClick={(e) => {
                   e.preventDefault()
                   e.stopPropagation()
@@ -1040,6 +1083,13 @@ export const CodeViewWrapper = memo(
       })
     })
 
+    // Pierre's documented commit path is one immediate updateItem carrying the
+    // new fileDiff and a fresh cacheKey. We deliberately don't: the diff shown
+    // is the server's, and re-deriving a FileDiffMetadata client-side from the
+    // editor's text would mean rendering a diff the server never computed.
+    // Writing and letting file-written drive the refetch keeps one source of
+    // truth, at the cost of a brief window where the item still holds the
+    // pre-edit fileDiff.
     const handleItemEditComplete = useStableCallback(
       (item: CodeViewItem<Metadata>, file: { contents: string }) => {
         onEditComplete(item.id, file.contents)

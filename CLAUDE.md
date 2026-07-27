@@ -23,13 +23,13 @@ exist.
   `splitFilePatches`, `computeRowWindow`, App's patch-fragment helpers).
 - Fresh worktrees have no `dist/` — build.rs handles it, but the vite build
   needs `node_modules` (symlink from canonical or `pnpm install`).
-- **The fs-watcher is dead under Claude Code's Bash sandbox**: FSEvents
-  delivers nothing, so `cargo test watcher` fails and a sandboxed `krit`
-  never emits `files-changed`. Anything exercising live refresh — including
-  a server you intend to drive from a browser — has to run with the sandbox
-  disabled. Explicit saves (`PUT /api/file-content`) broadcast
-  `file-written` directly and work either way, which is what makes this look
-  like a product bug instead of an environment one.
+- **The fs-watcher needs `com.apple.FSEvents` in the sandbox's
+  `allowMachLookup`**: without it `FSEventStreamStart` fails silently, so
+  `cargo test watcher` fails and a sandboxed `krit` never emits
+  `files-changed`. The tell is the asymmetry — saves through the UI still
+  work, because `PUT /api/file-content` broadcasts `file-written` directly
+  and never consults the watcher. Working saves plus dead live-refresh means
+  the sandbox, not the watcher.
 
 ## Non-obvious behavior (deliberate, don't "fix")
 
@@ -44,6 +44,16 @@ exist.
   no UI actually connected.
 
 ## Known gaps
+
+- `@pierre/diffs` is pinned to an exact **prerelease** (`1.3.0-rc.1`), not a
+  caret range: inline editing needs 1.3.0-only APIs (`item.edit`,
+  `onItemEditComplete`, `EditProvider`, the `./edit` entry point). Because
+  `dist/` is gitignored and `build.rs` runs vite, a from-source build of the
+  Rust binary needs that exact version to still be on the registry — move to
+  1.3.0 final once it publishes. An exact pin has no caret for `pnpm update`
+  to follow, so nothing will prompt you. Note `pnpm install` can silently
+  drop back to 1.2.12 under a `minimumReleaseAge` policy; reinstall with
+  `--config.minimumReleaseAge=0`.
 
 - Comment/suggest **drafts don't survive a page reload** (persistence is the
   planned "Stage 8" in docs/design/live-review.md). Warn before advising a

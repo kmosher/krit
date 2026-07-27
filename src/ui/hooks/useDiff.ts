@@ -59,6 +59,12 @@ export interface UseDiffOptions extends DiffOptions {
   // modal) — only consulted in 'live-unless-active' mode. An identity change
   // here does not need to be cheap; it's read from a ref, not an effect dep.
   activeFiles: Set<string>
+  // Files with a live inline editor. Narrower than activeFiles and obeyed in
+  // every refresh mode, including by `file-written`, which otherwise refetches
+  // unconditionally: a refetch replaces the item's fileDiff, and for these
+  // paths that discards a live document and its undo history. Their changes
+  // queue in staleFiles instead and reach the editor through applyExternalEdit.
+  editingFiles: Set<string>
 }
 
 // Replace (or remove, or append) several files' fragments within a full
@@ -139,9 +145,18 @@ export function useDiff(options: UseDiffOptions) {
   const [error, setError] = useState<string | null>(null)
   // Files a `files-changed`/`file-changed` event named but that refreshMode
   // deferred instead of applying — surfaced to the UI as a "N files changed"
-  // toast / file-tree badge. Never populated by `file-written` (always
-  // applies immediately).
+  // toast / file-tree badge. Also populated by `file-written` for a file with
+  // a live editor, which is the one case that event doesn't apply immediately.
   const [staleFiles, setStaleFiles] = useState<Set<string>>(() => new Set())
+  // The queue's synchronous truth. State alone is not enough: an SSE frame and
+  // a click can land in the same tick, before React re-renders, and a reader
+  // that saw only the previous render's set would clear a path it never
+  // fetched. Every mutation goes through commitStale so the two never diverge.
+  const staleFilesRef = useRef<Set<string>>(staleFiles)
+  const commitStale = useCallback((next: Set<string>) => {
+    staleFilesRef.current = next
+    setStaleFiles(next)
+  }, [])
 
   // Mirrors `data` for the merge path below, which runs inside an event
   // handler closure that would otherwise see a stale `data` from the render
@@ -155,6 +170,8 @@ export function useDiff(options: UseDiffOptions) {
   refreshModeRef.current = options.refreshMode
   const activeFilesRef = useRef(options.activeFiles)
   activeFilesRef.current = options.activeFiles
+  const editingFilesRef = useRef(options.editingFiles)
+  editingFilesRef.current = options.editingFiles
 
   const load = useCallback(() => {
     setLoading(true)
@@ -225,48 +242,54 @@ export function useDiff(options: UseDiffOptions) {
   // 1-element case of loadFiles, kept as one merge implementation.
   const loadFile = useCallback((path: string) => loadFiles([path]), [loadFiles])
 
-  const markStale = useCallback((path: string) => {
-    setStaleFiles((prev) => (prev.has(path) ? prev : new Set(prev).add(path)))
-  }, [])
+  const markStale = useCallback(
+    (path: string) => {
+      if (staleFilesRef.current.has(path)) return
+      commitStale(new Set(staleFilesRef.current).add(path))
+    },
+    [commitStale],
+  )
+
+  const unmarkStale = useCallback(
+    (path: string) => {
+      if (!staleFilesRef.current.has(path)) return
+      const next = new Set(staleFilesRef.current)
+      next.delete(path)
+      commitStale(next)
+    },
+    [commitStale],
+  )
 
   // Drop a path from the stale set without refetching its diff. For a file
   // with an open edit session, the caller applies the change into the editor
   // instead (see applyExternalEdit) — refetching would replace the item's
   // fileDiff and take the live document, and its undo history, with it.
-  const dismissStale = useCallback((path: string) => {
-    setStaleFiles((prev) => {
-      if (!prev.has(path)) return prev
-      const next = new Set(prev)
-      next.delete(path)
-      return next
-    })
-  }, [])
+  const dismissStale = unmarkStale
 
   const applyStaleFile = useCallback(
     (path: string) => {
-      setStaleFiles((prev) => {
-        if (!prev.has(path)) return prev
-        const next = new Set(prev)
-        next.delete(path)
-        return next
-      })
+      unmarkStale(path)
       void loadFile(path)
     },
-    [loadFile],
+    [loadFile, unmarkStale],
   )
 
   // `skip` holds paths the caller is applying some other way — in practice
   // files with an open edit session, which take their change through the
-  // editor. They stay in staleFiles so their own apply affordance survives
-  // this batch.
+  // editor. They stay queued so their own apply affordance survives this batch.
   const applyAllStale = useCallback(
     (skip?: Set<string>) => {
-      const paths = [...staleFiles].filter((p) => !skip?.has(p))
-      if (paths.length === 0) return
-      setStaleFiles((prev) => new Set([...prev].filter((p) => skip?.has(p))))
-      void loadFiles(paths)
+      const toApply: string[] = []
+      const retained = new Set<string>()
+      for (const p of staleFilesRef.current) {
+        if (skip?.has(p)) retained.add(p)
+        else toApply.push(p)
+      }
+      if (toApply.length === 0) return
+      commitStale(retained)
+      void loadFiles(toApply)
     },
-    [staleFiles, loadFiles],
+    [loadFiles, commitStale],
   )
 
   useEffect(() => {
@@ -311,6 +334,15 @@ export function useDiff(options: UseDiffOptions) {
           void loadFiles(toApply)
           return
         }
+        // A path with a live editor never refetches, in any mode: the refetch
+        // would swap out the item's fileDiff and take the open document with
+        // it. Queue it instead — applyExternalEdit is how it reaches the
+        // editor. Checked before the per-type branches below so it also
+        // covers `file-written`, which otherwise applies unconditionally.
+        if (parsed.path && editingFilesRef.current.has(parsed.path)) {
+          markStale(parsed.path)
+          return
+        }
         if (parsed.type !== 'file-written' && parsed.type !== 'file-changed') return
         const path: string | undefined = parsed.path ?? undefined
         if (!path) {
@@ -340,18 +372,24 @@ export function useDiff(options: UseDiffOptions) {
   // live-unless-active: once a deferred file stops being "active" (draft
   // closed, editor modal closed), apply the queued change automatically —
   // this is the "applies on close/submit" half of the mode.
+  //
+  // editingFiles is excluded on its own account rather than by trusting the
+  // caller to have merged it into activeFiles. Auto-applying here is a
+  // refetch, which is the one thing a live editor must never be handed: the
+  // queued change stays put until the session ends or Apply routes it through
+  // the editor.
   useEffect(() => {
     if (options.refreshMode !== 'live-unless-active' || staleFiles.size === 0) return
-    const toApply = [...staleFiles].filter((p) => !options.activeFiles.has(p))
+    const toApply = [...staleFiles].filter(
+      (p) => !options.activeFiles.has(p) && !options.editingFiles.has(p),
+    )
     if (toApply.length === 0) return
-    setStaleFiles((prev) => {
-      const next = new Set(prev)
-      for (const p of toApply) next.delete(p)
-      return next
-    })
+    const next = new Set(staleFilesRef.current)
+    for (const p of toApply) next.delete(p)
+    commitStale(next)
     void loadFiles(toApply)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [options.activeFiles, options.refreshMode, staleFiles, loadFiles])
+  }, [options.activeFiles, options.editingFiles, options.refreshMode, staleFiles, loadFiles])
 
   return {
     patch: data?.patch ?? null,

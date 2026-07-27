@@ -23,19 +23,21 @@
        Alias it to the palette's secondary surface — the dark-mode override
        of --bg-secondary below propagates through automatically. */
     --surface-2: var(--bg-secondary);
-    /* Same story as --surface-2: referenced in a handful of places but never
-       defined, so every rule below either fell back to a hardcoded light
-       value or (where it had no fallback) dropped the declaration entirely
-       — an invisible focus ring on settings inputs, a hover with no hover
-       state, transparent modal and suggestion headers. Aliased to the
-       palette so the dark overrides propagate for free. --bg-tertiary is
-       translucent grey on purpose: it reads correctly over either mode's
-       background, which is what the existing fallbacks already assumed. */
+    /* Same story as --surface-2: referenced across this sheet but never
+       defined. Alias each to a palette entry so the dark-mode overrides
+       propagate without a second definition. --bg-tertiary is the exception
+       that proves the rule — translucent grey rather than an alias, because
+       it must read correctly over either mode's background. */
     --accent: var(--primary);
     --surface: var(--bg-secondary);
     --bg-tertiary: rgba(127, 127, 127, 0.12);
     --bg-hover: var(--bg-tertiary);
     --text-muted: var(--text-secondary);
+    /* Not an alias: a literal with a hand-written dark override below, so its
+       two values must be kept in sync by hand. Unlike the aliases above, every
+       pre-existing --warning site already passed this exact fallback, so
+       defining it changes nothing in light mode and only takes effect in
+       dark. */
     --warning: #d97706;
 }
 

@@ -174,6 +174,7 @@ export function App() {
     untracked: settings.untracked,
     refreshMode: settings.refreshMode,
     activeFiles,
+    editingFiles: inlineEditFiles,
   })
   const { comments, addComment, removeComment, replyToComment, copyAllComments, postDrafts, draftCount } =
     useComments()
@@ -215,49 +216,110 @@ export function App() {
     }
   }, [editingFile])
 
-  const handleToggleEdit = useCallback((filePath: string) => {
-    setInlineEditFiles((prev) => {
-      const next = new Set(prev)
-      if (!next.delete(filePath)) next.add(filePath)
-      return next
-    })
-  }, [])
+  // Ending a session saves, and the save is a whole-file overwrite with no
+  // base-version check server-side — so leaving edit mode with a queued change
+  // outstanding would silently drop whatever wrote the file while you typed.
+  // The queued change is the one thing the editor cannot merge for you, so ask
+  // rather than pick: stay in edit mode (Apply, then decide) or overwrite.
+  const handleToggleEdit = useCallback(
+    (filePath: string) => {
+      const leaving = inlineEditFiles.has(filePath)
+      if (leaving && staleFiles.has(filePath)) {
+        const overwrite = confirm(
+          `${filePath} changed on disk while you were editing.\n\n` +
+            `Saving now overwrites that change.\n\n` +
+            `OK to save anyway, or Cancel to keep editing (use Apply to pull the change in first).`,
+        )
+        if (!overwrite) return
+      }
+      setInlineEditFiles((prev) => {
+        const next = new Set(prev)
+        if (!next.delete(filePath)) next.add(filePath)
+        return next
+      })
+    },
+    [inlineEditFiles, staleFiles],
+  )
 
-  // Inline edit session ended with changes. Writing broadcasts file-written,
-  // which refetches this file's diff — the session is already over by then,
-  // so the refreshed contents can't yank the document out from under anyone.
-  const handleInlineEditComplete = useCallback(async (filePath: string, contents: string) => {
-    const res = await fetch('/api/file-content', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: filePath, contents }),
-    })
-    if (!res.ok) {
-      const msg = await res.text().catch(() => res.statusText)
-      alert(`Save failed for ${filePath}: ${msg}`)
-    }
-  }, [])
+  // Inline edit session ended with changes. Pierre tears the editor down before
+  // firing this (syncItemEditors cleans up the instance, then collects
+  // completions), so the file-written refetch this write triggers cannot land
+  // on a live document.
+  const handleInlineEditComplete = useCallback(
+    async (filePath: string, contents: string) => {
+      try {
+        const res = await fetch('/api/file-content', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: filePath, contents }),
+        })
+        if (!res.ok) {
+          const msg = await res.text().catch(() => res.statusText)
+          alert(`Save failed for ${filePath}: ${msg}`)
+          return
+        }
+      } catch (err) {
+        alert(`Save failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`)
+        return
+      }
+      // Any queued change for this path is now moot — it was either folded in
+      // via Apply or deliberately overwritten above, and the write's own
+      // file-written refetch supersedes it either way. Without this the badge
+      // would stay lit against a file that no longer differs from disk.
+      dismissStale(filePath)
+    },
+    [dismissStale],
+  )
 
   // Applying a queued change to a file with an open edit session goes through
   // the editor rather than the diff refetch: the write arrives as one undoable
   // edit, so the reader can read it in place and ⌘Z it away like their own
   // typing. Falls back to the refetch whenever there's no live editor to take
   // it — including the case where the session ended between event and click.
+  // Paths whose apply is mid-flight. The Apply button stays lit until the
+  // fetch resolves, so without this a second click (or the toolbar's
+  // apply-everything) would issue a duplicate fetch and a second applyEdits
+  // against a document that already absorbed the first.
+  const applyingRef = useRef<Set<string>>(new Set())
   const handleApplyStale = useCallback(
     async (filePath: string) => {
-      if (inlineEditFiles.has(filePath)) {
-        const res = await fetch(
-          `/api/file-content?path=${encodeURIComponent(filePath)}&version=new`,
-        )
-        if (res.ok && diffViewerRef.current?.applyExternalEdit(filePath, await res.text())) {
-          dismissStale(filePath)
-          return
+      if (applyingRef.current.has(filePath)) return
+      applyingRef.current.add(filePath)
+      try {
+        if (inlineEditFiles.has(filePath)) {
+          const res = await fetch(
+            `/api/file-content?path=${encodeURIComponent(filePath)}&version=new`,
+          )
+          if (res.ok && diffViewerRef.current?.applyExternalEdit(filePath, await res.text())) {
+            dismissStale(filePath)
+            return
+          }
         }
+        // No live editor to take it, or the read failed: the ordinary refetch
+        // still shows the change, just without the undo entry.
+        applyStaleFile(filePath)
+      } catch {
+        applyStaleFile(filePath)
+      } finally {
+        applyingRef.current.delete(filePath)
       }
-      applyStaleFile(filePath)
     },
     [inlineEditFiles, applyStaleFile, dismissStale],
   )
+
+  // The toolbar's refresh button, which means three different things: with
+  // nothing queued it's a plain reload, and otherwise it drains the queue —
+  // files being edited through their editors, the rest in one batched refetch.
+  const handleRefreshAll = useCallback(() => {
+    if (staleFiles.size === 0) {
+      void reload()
+      return
+    }
+    for (const p of staleFiles) {
+      if (inlineEditFiles.has(p)) void handleApplyStale(p)
+    }
+    applyAllStale(inlineEditFiles)
+  }, [staleFiles, inlineEditFiles, handleApplyStale, applyAllStale, reload])
 
   // SelectionPill's "Delete" — splices the exact selected range out of the
   // working-tree file server-side and surfaces an Undo toast. Server owns
@@ -467,18 +529,7 @@ export function App() {
         refreshMode={settings.refreshMode}
         onRefreshModeChange={(refreshMode) => updateSettings({ refreshMode })}
         staleCount={staleFiles.size}
-        onRefresh={() => {
-          if (staleFiles.size === 0) {
-            void reload()
-            return
-          }
-          // Files being edited take their queued change through the editor;
-          // everything else goes in one batched refetch.
-          for (const p of staleFiles) {
-            if (inlineEditFiles.has(p)) void handleApplyStale(p)
-          }
-          applyAllStale(inlineEditFiles)
-        }}
+        onRefresh={handleRefreshAll}
         draftCount={draftCount}
         onPostDrafts={postDrafts}
       />
