@@ -23,6 +23,13 @@ exist.
   `splitFilePatches`, `computeRowWindow`, App's patch-fragment helpers).
 - Fresh worktrees have no `dist/` — build.rs handles it, but the vite build
   needs `node_modules` (symlink from canonical or `pnpm install`).
+- **The fs-watcher is dead under Claude Code's Bash sandbox**: FSEvents
+  delivers nothing, so `cargo test watcher` fails and a sandboxed `krit`
+  never emits `files-changed`. Anything exercising live refresh — including
+  a server you intend to drive from a browser — has to run with the sandbox
+  disabled. Explicit saves (`PUT /api/file-content`) broadcast
+  `file-written` directly and work either way, which is what makes this look
+  like a product bug instead of an environment one.
 
 ## Non-obvious behavior (deliberate, don't "fix")
 

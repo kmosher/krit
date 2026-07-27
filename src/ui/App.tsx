@@ -168,6 +168,7 @@ export function App() {
     staleFiles,
     applyStaleFile,
     applyAllStale,
+    dismissStale,
   } = useDiff({
     staged: settings.staged,
     untracked: settings.untracked,
@@ -236,6 +237,27 @@ export function App() {
       alert(`Save failed for ${filePath}: ${msg}`)
     }
   }, [])
+
+  // Applying a queued change to a file with an open edit session goes through
+  // the editor rather than the diff refetch: the write arrives as one undoable
+  // edit, so the reader can read it in place and ⌘Z it away like their own
+  // typing. Falls back to the refetch whenever there's no live editor to take
+  // it — including the case where the session ended between event and click.
+  const handleApplyStale = useCallback(
+    async (filePath: string) => {
+      if (inlineEditFiles.has(filePath)) {
+        const res = await fetch(
+          `/api/file-content?path=${encodeURIComponent(filePath)}&version=new`,
+        )
+        if (res.ok && diffViewerRef.current?.applyExternalEdit(filePath, await res.text())) {
+          dismissStale(filePath)
+          return
+        }
+      }
+      applyStaleFile(filePath)
+    },
+    [inlineEditFiles, applyStaleFile, dismissStale],
+  )
 
   // SelectionPill's "Delete" — splices the exact selected range out of the
   // working-tree file server-side and surfaces an Undo toast. Server owns
@@ -445,7 +467,18 @@ export function App() {
         refreshMode={settings.refreshMode}
         onRefreshModeChange={(refreshMode) => updateSettings({ refreshMode })}
         staleCount={staleFiles.size}
-        onRefresh={() => (staleFiles.size > 0 ? applyAllStale() : reload())}
+        onRefresh={() => {
+          if (staleFiles.size === 0) {
+            void reload()
+            return
+          }
+          // Files being edited take their queued change through the editor;
+          // everything else goes in one batched refetch.
+          for (const p of staleFiles) {
+            if (inlineEditFiles.has(p)) void handleApplyStale(p)
+          }
+          applyAllStale(inlineEditFiles)
+        }}
         draftCount={draftCount}
         onPostDrafts={postDrafts}
       />
@@ -459,7 +492,7 @@ export function App() {
             viewedFiles={viewedFiles}
             untrackedFiles={untrackedSet}
             staleFiles={staleFiles}
-            onApplyStale={applyStaleFile}
+            onApplyStale={handleApplyStale}
             onFileClick={handleFileClick}
             collapsed={sidebarCollapsed}
             onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
@@ -505,6 +538,8 @@ export function App() {
             editingFiles={inlineEditFiles}
             onToggleEdit={handleToggleEdit}
             onEditComplete={handleInlineEditComplete}
+            staleFiles={staleFiles}
+            onApplyStale={handleApplyStale}
             onActiveDraftsChange={setActiveDraftFiles}
           />
         </main>

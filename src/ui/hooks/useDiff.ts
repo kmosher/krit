@@ -229,6 +229,19 @@ export function useDiff(options: UseDiffOptions) {
     setStaleFiles((prev) => (prev.has(path) ? prev : new Set(prev).add(path)))
   }, [])
 
+  // Drop a path from the stale set without refetching its diff. For a file
+  // with an open edit session, the caller applies the change into the editor
+  // instead (see applyExternalEdit) — refetching would replace the item's
+  // fileDiff and take the live document, and its undo history, with it.
+  const dismissStale = useCallback((path: string) => {
+    setStaleFiles((prev) => {
+      if (!prev.has(path)) return prev
+      const next = new Set(prev)
+      next.delete(path)
+      return next
+    })
+  }, [])
+
   const applyStaleFile = useCallback(
     (path: string) => {
       setStaleFiles((prev) => {
@@ -242,12 +255,19 @@ export function useDiff(options: UseDiffOptions) {
     [loadFile],
   )
 
-  const applyAllStale = useCallback(() => {
-    const paths = [...staleFiles]
-    if (paths.length === 0) return
-    setStaleFiles(new Set())
-    void loadFiles(paths)
-  }, [staleFiles, loadFiles])
+  // `skip` holds paths the caller is applying some other way — in practice
+  // files with an open edit session, which take their change through the
+  // editor. They stay in staleFiles so their own apply affordance survives
+  // this batch.
+  const applyAllStale = useCallback(
+    (skip?: Set<string>) => {
+      const paths = [...staleFiles].filter((p) => !skip?.has(p))
+      if (paths.length === 0) return
+      setStaleFiles((prev) => new Set([...prev].filter((p) => skip?.has(p))))
+      void loadFiles(paths)
+    },
+    [staleFiles, loadFiles],
+  )
 
   useEffect(() => {
     void load()
@@ -353,5 +373,6 @@ export function useDiff(options: UseDiffOptions) {
     staleFiles,
     applyStaleFile,
     applyAllStale,
+    dismissStale,
   }
 }

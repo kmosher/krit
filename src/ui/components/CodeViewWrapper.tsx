@@ -15,6 +15,7 @@ import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 import { SelectionPill } from './SelectionPill'
 import { getActiveSelectionRange, mapRangeToAnchor, type SelectionAnchor } from '../utils/selectionMapping'
+import { computeMinimalEdit } from '../utils/textEdits'
 
 type DraftMetadata = {
   _pending: true
@@ -97,6 +98,10 @@ const AUTO_COLLAPSE_CHANGE_THRESHOLD = 500
 export interface CodeViewWrapperHandle {
   scrollToFile(filePath: string): void
   scrollToLine(filePath: string, side: SelectionSide, lineNumber: number): void
+  // Pull an external write (agent, git checkout, another editor) into an open
+  // edit session as one undoable edit. Returns false when the file has no live
+  // editor, which is the caller's signal to refetch the diff normally instead.
+  applyExternalEdit(filePath: string, contents: string): boolean
 }
 
 interface Props {
@@ -135,6 +140,10 @@ interface Props {
   // we push it into `item.edit`.
   editingFiles: Set<string>
   onToggleEdit(filePath: string): void
+  // Files with a queued external change. Only surfaced in the header for files
+  // being edited — everywhere else the file tree and toolbar already say so.
+  staleFiles: Set<string>
+  onApplyStale(filePath: string): void
   // An inline edit session ended having changed something. Fires once per
   // session, not per keystroke; the parent writes `contents` to the working
   // tree. Pierre skips it entirely for sessions that made no changes.
@@ -234,6 +243,8 @@ export const CodeViewWrapper = memo(
       editingFiles,
       onToggleEdit,
       onEditComplete,
+      staleFiles,
+      onApplyStale,
       onActiveDraftsChange,
     },
     ref,
@@ -299,6 +310,21 @@ export const CodeViewWrapper = memo(
             align: 'start',
             behavior: 'smooth',
           })
+        },
+        applyExternalEdit(filePath: string, contents: string): boolean {
+          // getEditor is typed as DiffsEditor, the narrow interface CodeView
+          // needs; the document methods live on the concrete class. Our
+          // EditProvider factory below is the only thing that ever constructs
+          // one, and it always returns an Editor, so the narrowing holds.
+          const editor = viewerRef.current?.getEditor(filePath) as Editor<Metadata> | undefined
+          if (!editor) return false
+          const edit = computeMinimalEdit(editor.getText(), contents)
+          // The write matched what's already in the document — an echo of the
+          // session's own save, or a no-op touch. Reporting it as applied
+          // keeps the caller from refetching the diff for nothing.
+          if (!edit) return true
+          editor.applyEdits([edit])
+          return true
         },
         scrollToLine(filePath: string, side: SelectionSide, lineNumber: number) {
           // Expand if collapsed — scrolling to a line inside a collapsed file
@@ -450,6 +476,26 @@ export const CodeViewWrapper = memo(
       }
       lastEditingRef.current = new Set(editingFiles)
     }, [files, editingFiles])
+
+    // renderHeaderPrefix reads staleFiles through its closure, so an item whose
+    // staleness flipped needs a version bump to re-run it and show (or drop)
+    // the Apply button. Only files being edited render it, so only those need
+    // the bump.
+    const lastStaleRef = useRef<Set<string>>(new Set())
+    useEffect(() => {
+      const viewer = viewerRef.current
+      if (!viewer) return
+      const prev = lastStaleRef.current
+      for (const file of files) {
+        if (!editingFiles.has(file.name)) continue
+        if (prev.has(file.name) === staleFiles.has(file.name)) continue
+        const item = viewer.getItem(file.name)
+        if (!item || item.type !== 'diff') continue
+        item.version = bumpVersion(item)
+        viewer.updateItem(item)
+      }
+      lastStaleRef.current = new Set(staleFiles)
+    }, [files, staleFiles, editingFiles])
 
     // Push comment-count changes into header metadata. We bump version for
     // any file whose count changed so renderHeaderMetadata re-runs.
@@ -832,6 +878,20 @@ export const CodeViewWrapper = memo(
             >
               {editing ? 'Done' : 'Edit'}
             </button>
+            {editing && staleFiles.has(item.id) && (
+              <button
+                type="button"
+                className="codeview-stale-btn"
+                title="This file changed on disk while you were editing. Apply the change as one undoable edit."
+                onClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  onApplyStale(item.id)
+                }}
+              >
+                ⚠ changed on disk — Apply
+              </button>
+            )}
             {onEditFile && !editing && (
               <button
                 type="button"

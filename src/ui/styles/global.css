@@ -486,6 +486,22 @@ body {
     border-color: var(--accent);
     color: #fff;
 }
+/* Only appears when a file you're editing changed underneath you — it should
+   pull the eye away from the rest of the header. */
+.codeview-stale-btn {
+    margin-left: 8px;
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--warning);
+    border: 1px solid var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.codeview-stale-btn:hover {
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+}
+
 .codeview-edit-btn-secondary {
     margin-left: 4px;
     padding: 2px 6px;
