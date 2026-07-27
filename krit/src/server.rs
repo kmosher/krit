@@ -1,6 +1,7 @@
-//! The HTTP surface: the frozen v1 API contract served by axum. Routes, JSON
-//! shapes, and event frames are wire-compatible with diffx v1 — the React UI
-//! and the Claude skill run against either backend unchanged.
+//! The HTTP surface served by axum. Routes, JSON shapes and event frames
+//! still carry diffx v1's shapes, which is where their oddities come from —
+//! but the UI and the skill live in this repo, so changing the wire is a
+//! matter of changing them alongside it.
 
 use crate::edits::{DeleteRange, splice_delete_range, splice_insert_text};
 use crate::git;
@@ -1040,20 +1041,25 @@ fn to_sse(event: &Event) -> SseEvent {
     SseEvent::default().data(serde_json::to_string(event).unwrap_or_default())
 }
 
+/// Only an explicit `role=ui` counts as a browser. Browser presence gates
+/// idle shutdown and the Done-reviewing button, so the default has to be the
+/// one that can't hold a review open forever: an unlabelled subscriber — a
+/// curl, a script, a consumer written before this parameter existed — is a
+/// CLI. The UI says what it is (`src/ui/hooks/useDiff.ts`,
+/// `useReviewState.ts`, both pinned by a Vitest test).
+fn subscriber_role(role: Option<&str>) -> Role {
+    if role == Some("ui") {
+        Role::Ui
+    } else {
+        Role::Cli
+    }
+}
+
 async fn api_events(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, std::convert::Infallible>>> {
-    // Only an explicit role=ui counts as a browser. Presence gates idle
-    // shutdown and the Done-reviewing button, so an unlabelled subscriber —
-    // a curl, a script, a consumer written against the v1 endpoint — must not
-    // be able to hold a review open forever by omitting a parameter it never
-    // knew about.
-    let role = if params.get("role").map(|s| s.as_str()) == Some("ui") {
-        Role::Ui
-    } else {
-        Role::Cli
-    };
+    let role = subscriber_role(params.get("role").map(|s| s.as_str()));
     let (mut rx, guard) = state.hub.subscribe(role);
     let initial = state.hub.state_event();
     let stream = async_stream::stream! {
@@ -1601,6 +1607,19 @@ mod tests {
         assert_eq!(token_from_cookie("krit_token=abc"), Some("abc"));
         assert_eq!(token_from_cookie("other=1; krit_token=abc"), Some("abc"));
         assert_eq!(token_from_cookie("other=1"), None);
+    }
+
+    #[test]
+    fn only_an_explicit_role_ui_counts_as_a_browser() {
+        assert_eq!(subscriber_role(Some("ui")), Role::Ui);
+        // Everything else is a CLI. The pre-2026-07 default was the reverse,
+        // which let a bare `curl /api/events` set ever_had_browser and keep a
+        // finished review alive until the process was killed by hand.
+        assert_eq!(subscriber_role(None), Role::Cli);
+        assert_eq!(subscriber_role(Some("cli")), Role::Cli);
+        assert_eq!(subscriber_role(Some("agent")), Role::Cli);
+        assert_eq!(subscriber_role(Some("UI")), Role::Cli);
+        assert_eq!(subscriber_role(Some("")), Role::Cli);
     }
 
     // ---------- token middleware, end to end ----------

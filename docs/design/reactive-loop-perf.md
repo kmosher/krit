@@ -64,7 +64,7 @@ per-file parses total** (not M×U×M), **1 SSE frame per tab**.
    **same** `DiffData` JSON as `?file=`, only scoped to several paths. No new
    response schema.
 
-## Wire contract (frozen — both sides code to this)
+## Wire contract (both sides code to this)
 
 ### SSE event (Rust `Event` enum, `#[serde(tag="type", rename_all="kebab-case")]`)
 

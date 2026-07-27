@@ -25,7 +25,7 @@ const IDLE_SHUTDOWN_MS: u64 = 60_000;
 /// reviewing — shut down instead of running forever.
 const NO_BROWSER_TIMEOUT_MS: u64 = 180_000;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Role {
     Ui,
     Cli,

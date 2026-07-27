@@ -4,8 +4,9 @@
 UI it embeds; `src/types.ts` is the comment schema both share. `desktop/`
 is the Tauri app (krit.app) that claims the `krit://` scheme. The HTTP/WS
 API descends from v1 diffx (wong2's, later this repo's TS CLI — removed
-2026-07) — treat wire-contract changes as breaking, external consumers
-exist.
+2026-07), which is why some shapes look the way they do; it is not a
+constraint. Change the wire freely, and move the server, the UI and the
+skill together when you do.
 
 ## Edit loops
 

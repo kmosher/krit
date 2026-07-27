@@ -1,7 +1,8 @@
-//! The wire types: comments and the event protocol. These are the frozen v1
-//! API contract (see docs/design/krit-v2.md) — field names and event tags
-//! must stay byte-compatible with what the React UI and the Claude skill
-//! already speak.
+//! The wire types: comments and the event protocol. Field names and event
+//! tags are what the React UI and the Claude skill speak, so changing one
+//! means changing them in the same breath — `src/types.ts` mirrors this file
+//! and the UI switches over it exhaustively, so a rename shows up as a
+//! TypeScript error rather than a silent mismatch.
 
 use serde::{Deserialize, Serialize};
 
@@ -141,9 +142,10 @@ pub fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-// Snapshot tests pinning every Event variant's JSON against the frozen v1
-// wire strings — tag casing, field names, and optional-field absence are the
-// contract; a green build with a changed shape here means a broken UI/skill.
+// Snapshot tests pinning every Event variant's JSON — tag casing, field
+// names, and optional-field absence. Changing a shape here is allowed; doing
+// it without updating these, `src/types.ts` and the skill is what breaks the
+// UI, and this is the test that makes you notice.
 #[cfg(test)]
 mod tests {
     use super::*;

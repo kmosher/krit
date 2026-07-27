@@ -215,7 +215,7 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
 
 /// One untracked file's synthesized new-file patch. Byte shape (headers,
 /// sentinel index line, `@@` count, `+`-prefixed body) matches v1 exactly —
-/// the UI parses this, so it's the frozen contract. `unreadable` files render
+/// the UI parses this byte shape, so the two move together. `unreadable` files render
 /// as the binary placeholder (v1's isBinaryFile reported true on read error).
 fn synthesize_untracked_patch(file: &str, bytes: &[u8], unreadable: bool) -> String {
     if unreadable || looks_binary(bytes) {
@@ -582,9 +582,9 @@ mod tests {
         assert!(!looks_binary(&[]));
     }
 
-    // Golden byte-shape for the synthesized untracked-file patch — this is the
-    // frozen v1 wire contract the UI parses. A whitespace or header change
-    // here breaks rendering with no other test failing.
+    // Golden byte-shape for the synthesized untracked-file patch, which the UI
+    // parses directly. A whitespace or header change here breaks rendering with
+    // no other test failing, so this is the one that has to fail loudly.
     #[test]
     fn untracked_patch_text_golden() {
         assert_eq!(

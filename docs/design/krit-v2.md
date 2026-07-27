@@ -14,12 +14,13 @@ and gives v1 and v2 disjoint namespaces so they can run side by side.
   unrepresentable beats convention-checked JSON), and deterministic single-digit-MB
   memory for a long-idle daemon. Cost accepted: slower build-out in a secondary
   language, mitigated by the walking-skeleton order below and the v1 fallback.
-- **The v1 HTTP/ws API is the frozen contract.** Routes, JSON shapes, event
-  frames, and the state-file schema stay wire-compatible (state file gains
-  `"v": 2`). The React UI and the Claude skill target the contract, not the
-  implementation — so the frontend and backend tracks proceed independently,
-  and either backend can serve either UI build. Additive changes allowed;
-  breaking changes require moving UI + skill + server together.
+- **The v1 HTTP/ws API was the frozen contract** *for the duration of the
+  rewrite only.* Holding routes, JSON shapes, event frames and the state-file
+  schema wire-compatible (state file gained `"v": 2`) let the frontend and
+  backend tracks proceed independently, with either backend serving either UI
+  build. That scaffolding came down when the rewrite finished: the API is
+  malleable again, and a breaking change just means moving UI + skill + server
+  together.
   - **One deliberate v2 narrowing**: the agent ws stream (`/api/events-ws`)
     delivers only human-originated frames — `file-changed`, `comment-updated`,
     and the agent's own `file-written{path:null}` refresh echo are filtered
