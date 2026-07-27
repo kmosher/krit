@@ -2,7 +2,7 @@
 //! linking a git library — exact diff semantics (rename detection, diff
 //! algorithms, textconv) for free, and it's the approach v1 proved.
 
-use crate::pathsafe::is_safe_path;
+use crate::pathsafe::{is_safe_path, resolve_safe_path};
 use std::path::Path;
 use std::process::Command;
 
@@ -185,8 +185,14 @@ pub fn untracked_file_paths(root: &Path) -> Vec<String> {
     // Run from the repo root so paths come back root-relative regardless of
     // the server's launch cwd — from a subdir, cwd-relative output silently
     // dropped or mis-pathed untracked files (a bug v1 shared).
+    // `-z`: NUL-delimited output is emitted verbatim, so a non-ASCII name
+    // arrives as raw UTF-8 instead of the C-quoted-and-octal-escaped
+    // `"caf\303\251.rs"` that quotePath produces (see QUOTE_PATH_OFF). These
+    // names go straight into the untrackedFiles response, the synthesized
+    // patch header, and the path-scoping check — a mangled one matches
+    // nothing and renders as a binary placeholder under a wrong name.
     let Ok(out) = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
         .current_dir(root)
         .output()
     else {
@@ -195,10 +201,10 @@ pub fn untracked_file_paths(root: &Path) -> Vec<String> {
     if !out.status.success() {
         return Vec::new();
     }
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .lines()
-        .map(|l| l.to_string())
+    out.stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
         .collect()
 }
 
@@ -267,7 +273,7 @@ pub fn file_content_at_ref(root: &Path, file_path: &str, git_ref: &str) -> Optio
         return None;
     }
     if git_ref == WORKING_TREE_REF {
-        return std::fs::read(root.join(file_path)).ok();
+        return std::fs::read(resolve_safe_path(root, file_path)?).ok();
     }
     let spec = if git_ref == INDEX_REF {
         format!(":{file_path}")
@@ -277,14 +283,15 @@ pub fn file_content_at_ref(root: &Path, file_path: &str, git_ref: &str) -> Optio
     git_stdout(&["show", &spec])
 }
 
-/// Legacy two-version content fetch for GET /api/file-content:
-/// new = working tree, old = HEAD.
+/// Two-version content fetch behind GET /api/file-content: new = working
+/// tree, old = HEAD. The inline-edit flow rides on this — it seeds the editor
+/// modal, supplies the `If-Match` base, and re-reads on a stale-write retry.
 pub fn file_content(root: &Path, file_path: &str, version: &str) -> Option<Vec<u8>> {
     if !is_safe_path(file_path) {
         return None;
     }
     if version == "new" {
-        return std::fs::read(root.join(file_path)).ok();
+        return std::fs::read(resolve_safe_path(root, file_path)?).ok();
     }
     git_stdout(&["show", &format!("HEAD:{file_path}")])
 }
@@ -309,25 +316,34 @@ pub fn content_tag(bytes: &[u8]) -> String {
 /// which a caller sending `If-Match` should treat as a mismatch — it was
 /// editing something that is no longer there.
 pub fn working_tree_content_tag(root: &Path, file_path: &str) -> Option<String> {
-    if !is_safe_path(file_path) {
-        return None;
-    }
-    std::fs::read(root.join(file_path))
+    std::fs::read(resolve_safe_path(root, file_path)?)
         .ok()
         .map(|bytes| content_tag(&bytes))
 }
 
 pub fn write_working_tree_file(root: &Path, file_path: &str, contents: &str) -> bool {
-    if !is_safe_path(file_path) {
+    let Some(path) = resolve_safe_path(root, file_path) else {
         return false;
-    }
-    std::fs::write(root.join(file_path), contents).is_ok()
+    };
+    std::fs::write(path, contents).is_ok()
 }
 
 /// Resolve a krit invocation to the (old, new) refs its patch was computed
-/// against, mirroring `git diff`'s own semantics for each arg shape — see the
-/// table in v1's git.ts. Wrong answers degrade to "no hunk expansion", not
-/// corruption.
+/// against, mirroring `git diff`'s own semantics for each arg shape. Wrong
+/// answers degrade to "no hunk expansion", not corruption.
+///
+/// | args                | old              | new         |
+/// |---------------------|------------------|-------------|
+/// | (none)              | HEAD             | WORKING_TREE|
+/// | `--staged`/`--cached`| HEAD            | INDEX       |
+/// | `<ref>`             | `<ref>`          | WORKING_TREE|
+/// | `<a>..<b>`          | `<a>`            | `<b>`       |
+/// | `<a>..`             | `<a>`            | HEAD        |
+/// | `<a>...<b>`         | merge-base(a, b) | `<b>`       |
+/// | `<a> <b>` (2+)      | `<a>`            | `<b>`       |
+///
+/// An empty right side of `..`/`...` means HEAD. Flags are skipped and
+/// everything after `--` is pathspec, so neither reaches the table.
 pub fn resolve_diff_refs(custom_args: Option<&[String]>) -> (String, String) {
     let args = custom_args.unwrap_or(&[]);
     let mut positionals: Vec<&str> = Vec::new();
@@ -458,6 +474,29 @@ mod tests {
     }
 
     #[test]
+    fn untracked_non_ascii_names_come_back_unquoted() {
+        // C-quoted output (`"caf\303\251.rs"`) would flow into untrackedFiles,
+        // into the synthesized `diff --git a/…` header, and into the
+        // path-scoping check — matching nothing under the file's real name.
+        let root = init_repo("untracked-non-ascii");
+        std::fs::write(root.join("café.rs"), "one\n").unwrap();
+
+        let untracked = untracked_file_paths(&root);
+        assert_eq!(untracked, vec!["café.rs".to_string()]);
+
+        let diff = git_diff(false, Some(&untracked), &root).unwrap();
+        assert!(
+            diff.contains("diff --git a/café.rs b/café.rs"),
+            "synthesized header must carry the real name: {diff}"
+        );
+        let scoped =
+            git_diff_paths(false, Some(&untracked), &root, &["café.rs".to_string()]).unwrap();
+        assert!(scoped.contains("diff --git a/café.rs b/café.rs"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn git_diff_paths_scopes_untracked_synthesis_to_requested_paths() {
         let root = init_repo("scoped-untracked");
         std::fs::write(root.join("tracked.rs"), "x\n").unwrap();
@@ -502,8 +541,8 @@ mod tests {
         resolve_diff_refs(Some(&owned))
     }
 
-    // Pins the arg-shape → refs table (minus the `...` merge-base row, which
-    // shells out). Matches v1's git.ts table.
+    // Pins the arg-shape → refs table documented on resolve_diff_refs (minus
+    // the `...` merge-base row, which shells out).
     #[test]
     fn resolve_refs_table() {
         assert_eq!(
