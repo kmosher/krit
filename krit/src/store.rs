@@ -5,7 +5,12 @@
 //! repo.
 
 use crate::types::{CommentReply, ReviewComment};
-use std::path::PathBuf;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+
+/// Bumped when the on-disk record shape changes incompatibly. Files written
+/// before it existed are bare arrays and read as version 0.
+const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Default)]
 pub struct UpdateFields {
@@ -17,31 +22,86 @@ pub struct UpdateFields {
     pub outdated: Option<bool>,
 }
 
+/// Reads the store file, keeping every record that still parses. Records are
+/// decoded one at a time so that a single malformed or newer-shaped comment
+/// costs one comment rather than the whole review — the next mutation
+/// persists whatever survived, so anything dropped here is dropped for good.
+/// Accepts both the versioned object and the bare array older builds wrote.
+fn load(path: &Path) -> Vec<ReviewComment> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let records = match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Array(records)) => records,
+        Ok(Value::Object(mut obj)) => match obj.remove("comments") {
+            Some(Value::Array(records)) => records,
+            _ => return quarantine(path, "no `comments` array"),
+        },
+        _ => return quarantine(path, "not valid JSON"),
+    };
+    records
+        .into_iter()
+        .filter_map(
+            |record| match serde_json::from_value::<ReviewComment>(record) {
+                Ok(comment) => Some(comment),
+                Err(err) => {
+                    eprintln!(
+                        "krit: dropping unreadable comment in {}: {err}",
+                        path.display()
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+/// Renames an unreadable store aside so the first mutation of the new session
+/// doesn't overwrite it with an empty list.
+fn quarantine(path: &Path, why: &str) -> Vec<ReviewComment> {
+    let aside = path.with_extension("json.corrupt");
+    match std::fs::rename(path, &aside) {
+        Ok(()) => eprintln!(
+            "krit: comment store {} is unreadable ({why}); kept a copy at {}",
+            path.display(),
+            aside.display()
+        ),
+        Err(err) => eprintln!(
+            "krit: comment store {} is unreadable ({why}) and could not be set aside: {err}",
+            path.display()
+        ),
+    }
+    Vec::new()
+}
+
 pub struct CommentStore {
     comments: Vec<ReviewComment>,
     file: Option<PathBuf>,
 }
 
 impl CommentStore {
-    /// File-backed: loads existing comments (tolerating a corrupt or
-    /// partially-written file by starting fresh) and persists after every
-    /// mutation. `None` = in-memory only.
+    /// File-backed: loads existing comments and persists after every mutation.
+    /// `None` = in-memory only.
     pub fn new(file: Option<PathBuf>) -> Self {
-        let comments = file
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str::<Vec<ReviewComment>>(&s).ok())
-            .unwrap_or_default();
+        let comments = file.as_ref().map(|p| load(p)).unwrap_or_default();
         Self { comments, file }
     }
 
     fn persist(&self) {
         // Best-effort: a failed write shouldn't crash a working review
-        // session; only durability across a restart is lost.
-        if let Some(path) = &self.file
-            && let Ok(json) = serde_json::to_string_pretty(&self.comments)
-        {
-            let _ = std::fs::write(path, json);
+        // session; only durability across a restart is lost. The rename is
+        // what makes it safe to fail — the previous file stays whole until
+        // the replacement is complete on disk.
+        let Some(path) = &self.file else { return };
+        let Ok(json) = serde_json::to_string_pretty(&serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "comments": &self.comments,
+        })) else {
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -353,12 +413,62 @@ mod tests {
     }
 
     #[test]
-    fn tolerates_corrupt_file_by_starting_empty() {
+    fn corrupt_file_is_set_aside_rather_than_overwritten() {
         let path =
             std::env::temp_dir().join(format!("krit-store-corrupt-{}.json", std::process::id()));
+        let aside = path.with_extension("json.corrupt");
+        let _ = std::fs::remove_file(&aside);
         std::fs::write(&path, "{not valid json").unwrap();
-        let s = CommentStore::new(Some(path.clone()));
+
+        let mut s = CommentStore::new(Some(path.clone()));
         assert!(s.get_all().is_empty());
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "{not valid json");
+        // The first mutation writes a fresh file; the quarantined one stands.
+        s.add(comment("a", "new"));
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "{not valid json");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&aside);
+    }
+
+    #[test]
+    fn one_unreadable_record_does_not_lose_the_rest() {
+        let path =
+            std::env::temp_dir().join(format!("krit-store-bad-record-{}.json", std::process::id()));
+        let mut s = CommentStore::new(Some(path.clone()));
+        s.add(comment("a", "keep me"));
+        s.add(comment("b", "keep me too"));
+
+        // Corrupt exactly one record in place.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut file: serde_json::Value = serde_json::from_str(&text).unwrap();
+        file["comments"][0]["lineNumber"] = serde_json::json!("not a number");
+        std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+
+        let reloaded = CommentStore::new(Some(path.clone()));
+        let all = reloaded.get_all();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "b");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reads_the_bare_array_older_builds_wrote() {
+        let path =
+            std::env::temp_dir().join(format!("krit-store-legacy-{}.json", std::process::id()));
+        let legacy = serde_json::to_string(&vec![comment("a", "from v0")]).unwrap();
+        std::fs::write(&path, legacy).unwrap();
+
+        let mut s = CommentStore::new(Some(path.clone()));
+        assert_eq!(s.get_all().len(), 1);
+        // ...and rewrites it in the versioned shape.
+        s.add(comment("b", "new"));
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["schemaVersion"], SCHEMA_VERSION);
+        assert_eq!(written["comments"].as_array().unwrap().len(), 2);
+
         let _ = std::fs::remove_file(&path);
     }
 }

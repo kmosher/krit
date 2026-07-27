@@ -2,9 +2,41 @@
 //! a working-tree file. 1-based lines, 0-based columns, end_column exclusive
 //! — the same convention as the schema v3 comment fields.
 
-use crate::git::write_working_tree_file;
-use crate::pathsafe::is_safe_path;
+use crate::git::{content_tag, write_working_tree_file};
+use crate::pathsafe::resolve_safe_path;
 use std::path::Path;
+
+/// Why an undo splice refused. The caller surfaces these to the user, so the
+/// distinction between "your undo is stale" and "the file is unwritable"
+/// has to survive out of this module.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SpliceError {
+    UnsafePath,
+    Unreadable,
+    /// Not valid UTF-8. Splicing would mean rewriting the whole file from a
+    /// lossy decode, replacing every undecodable byte outside the edited
+    /// range with U+FFFD.
+    NotUtf8,
+    /// The file no longer holds what the delete left behind.
+    ContentChanged,
+    /// The position doesn't exist in the file any more.
+    PositionOutOfRange,
+    WriteFailed,
+}
+
+impl std::fmt::Display for SpliceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::UnsafePath => "unsafe path",
+            Self::Unreadable => "file is unreadable",
+            Self::NotUtf8 => "file is not valid UTF-8",
+            Self::ContentChanged => "file changed since the delete",
+            Self::PositionOutOfRange => "position no longer exists in the file",
+            Self::WriteFailed => "file is unwritable",
+        };
+        f.write_str(s)
+    }
+}
 
 pub struct DeleteRange {
     pub file_path: String,
@@ -33,24 +65,21 @@ fn utf16_col_to_byte(line: &str, col: usize) -> Option<usize> {
     (units == col).then_some(line.len())
 }
 
-/// Read as lossy UTF-8, matching what the server serves the browser — offsets
-/// computed against the lossily-decoded text must splice the same text.
-fn read_lossy(path: &Path) -> Option<String> {
-    std::fs::read(path)
-        .ok()
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
+/// Both splice paths write the *whole* decoded string back, so a lossy decode
+/// would replace every undecodable byte in the file — not just the edited
+/// range — with U+FFFD. Refusing leaves such a file untouched.
+fn read_strict(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// Removes the range and writes the file back. Returns the deleted text (for
 /// the undo buffer / user-edit event), or None if the path is unsafe, the
-/// file is unreadable, or the range no longer fits the file on disk — the
-/// range was computed against whatever the browser last rendered, which may
-/// have drifted by the time the request lands.
+/// file is unreadable or not valid UTF-8, or the range no longer fits the
+/// file on disk — the range was computed against whatever the browser last
+/// rendered, which may have drifted by the time the request lands.
 pub fn splice_delete_range(repo_root: &Path, range: &DeleteRange) -> Option<String> {
-    if !is_safe_path(&range.file_path) {
-        return None;
-    }
-    let content = read_lossy(&repo_root.join(&range.file_path))?;
+    let content = read_strict(&resolve_safe_path(repo_root, &range.file_path)?)?;
     let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
 
     let start_idx = range.start_line.checked_sub(1)? as usize;
@@ -89,31 +118,35 @@ pub fn splice_delete_range(repo_root: &Path, range: &DeleteRange) -> Option<Stri
 }
 
 /// Inverse of splice_delete_range: re-inserts `text` at its removal point.
-/// Only correct if nothing else touched that position since — accepted
-/// tradeoff for a simple undo buffer (no OT reconciliation).
+/// The position is only meaningful in the exact file the delete left behind,
+/// so `expected_tag` (the `git::content_tag` of that file) is required and
+/// checked — without it an undo landing after someone else's edit splices the
+/// text into an unrelated position. There is no OT reconciliation: a changed
+/// file is a refused undo, not a rebased one.
 pub fn splice_insert_text(
     repo_root: &Path,
     file_path: &str,
     start_line: u32,
     start_column: u32,
     text: &str,
-) -> bool {
-    if !is_safe_path(file_path) {
-        return false;
+    expected_tag: &str,
+) -> Result<(), SpliceError> {
+    let path = resolve_safe_path(repo_root, file_path).ok_or(SpliceError::UnsafePath)?;
+    let bytes = std::fs::read(path).map_err(|_| SpliceError::Unreadable)?;
+    if content_tag(&bytes) != expected_tag {
+        return Err(SpliceError::ContentChanged);
     }
-    let Some(content) = read_lossy(&repo_root.join(file_path)) else {
-        return false;
-    };
+    let content = String::from_utf8(bytes).map_err(|_| SpliceError::NotUtf8)?;
     let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
     let Some(idx) = start_line.checked_sub(1).map(|n| n as usize) else {
-        return false;
+        return Err(SpliceError::PositionOutOfRange);
     };
     if idx >= lines.len() {
-        return false;
+        return Err(SpliceError::PositionOutOfRange);
     }
     let line = lines[idx].clone();
     let Some(col) = utf16_col_to_byte(&line, start_column as usize) else {
-        return false;
+        return Err(SpliceError::PositionOutOfRange);
     };
 
     let inserted: Vec<&str> = text.split('\n').collect();
@@ -126,7 +159,11 @@ pub fn splice_insert_text(
         new_lines[last] = format!("{}{}", new_lines[last], &line[col..]);
         lines.splice(idx..=idx, new_lines);
     }
-    write_working_tree_file(repo_root, file_path, &lines.join("\n"))
+    if write_working_tree_file(repo_root, file_path, &lines.join("\n")) {
+        Ok(())
+    } else {
+        Err(SpliceError::WriteFailed)
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +200,10 @@ mod tests {
         (dir, name.to_string())
     }
 
+    fn tag_of(root: &Path, file: &str) -> String {
+        content_tag(&std::fs::read(root.join(file)).unwrap())
+    }
+
     #[test]
     fn delete_range_with_non_ascii_prefix() {
         // Regression: UTF-16 columns from the browser used to be treated as
@@ -183,7 +224,8 @@ mod tests {
         let after = std::fs::read_to_string(root.join(&file)).unwrap();
         assert_eq!(after, "let s = \"café-\";\nnext");
         // Undo restores byte-exactly.
-        assert!(splice_insert_text(&root, &file, 1, 14, "menu"));
+        let tag = tag_of(&root, &file);
+        assert!(splice_insert_text(&root, &file, 1, 14, "menu", &tag).is_ok());
         let restored = std::fs::read_to_string(root.join(&file)).unwrap();
         assert_eq!(restored, "let s = \"café-menu\";\nnext");
     }
@@ -211,7 +253,8 @@ mod tests {
     fn insert_multiline_text_stitches_ends() {
         let (root, file) = temp_repo("multi-ins.txt", "aabb\nkeep");
         // Insert "X\nY\nZ" between "aa" and "bb" on line 1.
-        assert!(splice_insert_text(&root, &file, 1, 2, "X\nY\nZ"));
+        let tag = tag_of(&root, &file);
+        assert!(splice_insert_text(&root, &file, 1, 2, "X\nY\nZ", &tag).is_ok());
         let after = std::fs::read_to_string(root.join(&file)).unwrap();
         assert_eq!(after, "aaX\nY\nZbb\nkeep");
     }
@@ -235,7 +278,8 @@ mod tests {
             std::fs::read_to_string(root.join(&file)).unwrap(),
             "onethree"
         );
-        assert!(splice_insert_text(&root, &file, 1, 3, &deleted));
+        let tag = tag_of(&root, &file);
+        assert!(splice_insert_text(&root, &file, 1, 3, &deleted, &tag).is_ok());
         assert_eq!(
             std::fs::read_to_string(root.join(&file)).unwrap(),
             "one\ntwo\nthree"
@@ -256,5 +300,101 @@ mod tests {
             },
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn non_utf8_file_is_refused_not_rewritten() {
+        let dir = std::env::temp_dir().join(format!("krit-edits-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = "latin1.txt";
+        let original: &[u8] = b"caf\xe9 menu\nsecond \xe9 line";
+        std::fs::write(dir.join(file), original).unwrap();
+
+        assert!(
+            splice_delete_range(
+                &dir,
+                &DeleteRange {
+                    file_path: file.into(),
+                    start_line: 1,
+                    start_column: 0,
+                    end_line: 1,
+                    end_column: 3,
+                },
+            )
+            .is_none()
+        );
+        assert_eq!(
+            splice_insert_text(&dir, file, 1, 0, "x", &tag_of(&dir, file)),
+            Err(SpliceError::NotUtf8)
+        );
+        // Every undecodable byte outside the edited range survives.
+        assert_eq!(std::fs::read(dir.join(file)).unwrap(), original);
+    }
+
+    #[test]
+    fn a_symlink_out_of_the_repo_is_not_writable() {
+        // The splices write, so following a symlink out of the repo turns a
+        // scoped in-repo edit into an arbitrary-filesystem write.
+        let base = std::env::temp_dir().join(format!("krit-edits-symlink-{}", std::process::id()));
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = base.join("outside.txt");
+        std::fs::write(&outside, "secret\ncontent").unwrap();
+        let link = root.join("link.txt");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        assert!(
+            splice_delete_range(
+                &root,
+                &DeleteRange {
+                    file_path: "link.txt".into(),
+                    start_line: 1,
+                    start_column: 0,
+                    end_line: 1,
+                    end_column: 6,
+                },
+            )
+            .is_none()
+        );
+        assert_eq!(
+            splice_insert_text(&root, "link.txt", 1, 0, "x", "\"whatever\""),
+            Err(SpliceError::UnsafePath)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "secret\ncontent"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn undo_refuses_when_the_file_changed_since_the_delete() {
+        let (root, file) = temp_repo("stale-undo.txt", "one\ntwo\nthree");
+        let deleted = splice_delete_range(
+            &root,
+            &DeleteRange {
+                file_path: file.clone(),
+                start_line: 2,
+                start_column: 0,
+                end_line: 2,
+                end_column: 3,
+            },
+        )
+        .unwrap();
+        let tag = tag_of(&root, &file);
+
+        // Someone else rewrites the file; the recorded position now means
+        // something different.
+        std::fs::write(root.join(&file), "completely\ndifferent\ncontent").unwrap();
+        assert_eq!(
+            splice_insert_text(&root, &file, 2, 0, &deleted, &tag),
+            Err(SpliceError::ContentChanged)
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(&file)).unwrap(),
+            "completely\ndifferent\ncontent"
+        );
     }
 }

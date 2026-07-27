@@ -5,7 +5,7 @@
 //! to the store (which persists on every update) with the server's store
 //! lock held.
 
-use crate::pathsafe::is_safe_path;
+use crate::pathsafe::resolve_safe_path;
 use crate::store::{CommentStore, UpdateFields};
 use crate::types::ReviewComment;
 use std::path::Path;
@@ -64,14 +64,15 @@ pub fn reanchor_file_comments(
     store: &mut CommentStore,
     repo_root: &Path,
 ) -> Vec<ReviewComment> {
-    if !is_safe_path(file_path) {
+    let Some(path) = resolve_safe_path(repo_root, file_path) else {
         return Vec::new();
-    }
+    };
     // Deleted or unreadable — no lines to match, everything on the file
-    // falls through to outdated. Lossy decode (matching read_side and the
-    // edit paths): a stray invalid-UTF-8 byte must not blank the whole file
-    // and spuriously outdate every comment on it.
-    let content = std::fs::read(repo_root.join(file_path))
+    // falls through to outdated. Lossy decode (matching read_side): a stray
+    // invalid-UTF-8 byte must not blank the whole file and spuriously
+    // outdate every comment on it. Read-only, so unlike the edit paths
+    // nothing is written back from the lossy text.
+    let content = std::fs::read(path)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
     let file_lines: Vec<&str> = if content.is_empty() {
@@ -110,7 +111,10 @@ pub fn reanchor_file_comments(
             }
             Some(start) => {
                 let end_line = comment.end_line_or_start();
-                let new_end = start + (end_line - comment.line_number);
+                // A persisted record predating the POST-time clamp can hold
+                // end_line < line_number; saturating keeps that from panicking
+                // a reanchor pass that no catch_unwind covers.
+                let new_end = start + end_line.saturating_sub(comment.line_number);
                 if start == comment.line_number
                     && new_end == end_line
                     && comment.outdated != Some(true)
@@ -285,6 +289,40 @@ mod tests {
         assert_eq!(reloaded.get("c3").unwrap().line_number, 7);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_symlink_out_of_the_repo_is_not_read() {
+        let base =
+            std::env::temp_dir().join(format!("krit-reanchor-symlink-{}", std::process::id()));
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(base.join("outside.txt"), "let b = 2;").unwrap();
+        let link = root.join("f.rs");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(base.join("outside.txt"), &link).unwrap();
+
+        let mut store = CommentStore::new(None);
+        store.add(comment("c", 1, "let b = 2;", "additions", "open"));
+        // Refusal, not a miss: nothing is read, so nothing is outdated either.
+        assert!(reanchor_file_comments("f.rs", &mut store, &root).is_empty());
+        assert_eq!(store.get("c").unwrap().outdated, None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn inverted_end_line_does_not_panic() {
+        let root = temp_root_with("inverted", b"a\nx\ny\nlet b = 2;\nz");
+        let mut store = CommentStore::new(None);
+        let mut c = comment("c", 3, "let b = 2;", "additions", "open");
+        c.end_line = Some(1);
+        store.add(c);
+
+        let changed = reanchor_file_comments("f.rs", &mut store, &root);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].line_number, 4);
+        assert_eq!(changed[0].end_line, Some(4));
     }
 
     #[test]
