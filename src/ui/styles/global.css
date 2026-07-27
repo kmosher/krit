@@ -1771,19 +1771,35 @@ body {
     background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
-/* Undo toast — bottom-corner, shown after a SelectionPill delete */
-/* A save the server refused (If-Match mismatch). Sits above the undo toast's
-   corner and stays until answered — it's holding the only copy of the edit. */
-.save-conflict {
+/* The one fixed slot every persistent strip renders into. It owns the corner
+   so its children stack in normal flow — column-reverse puts the first child
+   nearest the corner and pushes later ones upward, which is what a per-index
+   `bottom` used to fake. Empty gaps are click-through; the strips are not. */
+.strip-stack {
     position: fixed;
     left: 50%;
     bottom: 24px;
     transform: translateX(-50%);
     z-index: 450;
     display: flex;
+    flex-direction: column-reverse;
+    align-items: center;
+    gap: 8px;
+    max-width: min(720px, calc(100vw - 48px));
+    pointer-events: none;
+}
+
+.strip-stack > * {
+    pointer-events: auto;
+}
+
+/* A save the server refused (If-Match mismatch). Warning-colored: nothing is
+   lost yet, but it stays until answered — it holds the only copy of the edit. */
+.save-conflict {
+    display: flex;
     align-items: center;
     gap: 12px;
-    max-width: min(720px, calc(100vw - 48px));
+    max-width: 100%;
     padding: 12px 16px;
     font-size: 13px;
     color: var(--text);
@@ -1792,6 +1808,25 @@ body {
     border-radius: 8px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
 }
+
+/* Something failed — the replacement for the alert() calls a browser-driving
+   agent would deadlock on. Danger-colored to read as "this did not happen",
+   distinct from .save-conflict's "your work is held, choose". */
+.app-error {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 100%;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: var(--text);
+    background: color-mix(in srgb, var(--danger) 8%, var(--bg));
+    border: 1px solid var(--danger);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+/* Undo toast — bottom-corner, shown after a SelectionPill delete */
 
 .undo-toast {
     position: fixed;

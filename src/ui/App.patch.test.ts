@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { splitPatchFragments, computeFileStats, parseFileFragment, editToggleAction } from './App'
+import {
+  splitPatchFragments,
+  computeFileStats,
+  parseFileFragment,
+  editToggleAction,
+  withEntry,
+  withoutEntry,
+  undoToastLabel,
+} from './App'
 import type { FileContentsMap } from './hooks/useDiff'
 
 function fragment(path: string, additions = 1, deletions = 1): string {
@@ -90,5 +98,56 @@ describe('editToggleAction', () => {
 
   it('never asks on the way in — a queued change is not a reason to refuse to open an editor', () => {
     expect(editToggleAction({ editing: false, stale: true, confirming: false })).toBe('toggle')
+  })
+})
+
+describe('withEntry / withoutEntry', () => {
+  it('keeps an existing entry when a second one is added', () => {
+    // The regression: a single-slot conflict holder loses the first file's
+    // only surviving copy of its refused save the moment a second save fails.
+    const one = withEntry(new Map<string, string>(), 'src/a.rs', 'a-text')
+    const two = withEntry(one, 'src/b.rs', 'b-text')
+    expect([...two]).toEqual([
+      ['src/a.rs', 'a-text'],
+      ['src/b.rs', 'b-text'],
+    ])
+    expect(two.get('src/a.rs')).toBe('a-text')
+  })
+
+  it('does not mutate the map it was given', () => {
+    const before = withEntry(new Map<string, string>(), 'src/a.rs', 'a-text')
+    withEntry(before, 'src/b.rs', 'b-text')
+    withoutEntry(before, 'src/a.rs')
+    expect([...before.keys()]).toEqual(['src/a.rs'])
+  })
+
+  it('replaces the held contents when the same path fails twice', () => {
+    const map = withEntry(withEntry(new Map<string, string>(), 'src/a.rs', 'first'), 'src/a.rs', 'second')
+    expect(map.size).toBe(1)
+    expect(map.get('src/a.rs')).toBe('second')
+  })
+
+  it('removes only the named entry, and returns the same map for a miss', () => {
+    const map = withEntry(withEntry(new Map<string, string>(), 'a', '1'), 'b', '2')
+    expect([...withoutEntry(map, 'a').keys()]).toEqual(['b'])
+    expect(withoutEntry(map, 'c')).toBe(map)
+  })
+})
+
+describe('undoToastLabel', () => {
+  it('is null with nothing queued', () => {
+    expect(undoToastLabel([])).toBeNull()
+  })
+
+  it('shows the head message alone when it is the only one', () => {
+    expect(undoToastLabel([{ message: 'Deleted "x"' }])).toBe('Deleted "x"')
+  })
+
+  it('counts the ones still waiting behind the head', () => {
+    // Without the count, a second delete looks like it replaced the first, and
+    // the first undo id has no handle left in the UI.
+    expect(
+      undoToastLabel([{ message: 'Deleted "x"' }, { message: 'Deleted "y"' }, { message: 'Deleted "z"' }]),
+    ).toBe('Deleted "x" (+2 more)')
   })
 })

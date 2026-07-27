@@ -42,10 +42,9 @@ export function splitPatchFragments(patch: string): { name: string; text: string
   return fragments
 }
 
-// +/- counts for one file's patch fragment. Split out of the old whole-patch
-// walk (previously a second full pass over `patch`) so it folds into the
-// same per-file pass as parseFileFragment below instead of re-walking the
-// merged patch a second time.
+// +/- counts for one file's patch fragment. Scoped to a fragment so it folds
+// into the same per-file pass as parseFileFragment below, leaving the merged
+// patch walked exactly once per render.
 export function computeFileStats(text: string): { additions: number; deletions: number } {
   let additions = 0
   let deletions = 0
@@ -136,6 +135,29 @@ interface FileCacheEntry {
 // rule that matters here — a session with a queued change never saves on the
 // first Done, and always saves on the second — is checkable without standing
 // up a CodeView.
+// Immutable Map updates, used for the per-path collections below (held
+// contents from refused saves, and the like). Kept as functions rather than
+// inlined closures so a "second entry silently replaces the first" regression
+// is a unit test rather than a UI walkthrough.
+export function withEntry<V>(prev: Map<string, V>, key: string, value: V): Map<string, V> {
+  return new Map(prev).set(key, value)
+}
+
+export function withoutEntry<V>(prev: Map<string, V>, key: string): Map<string, V> {
+  if (!prev.has(key)) return prev
+  const next = new Map(prev)
+  next.delete(key)
+  return next
+}
+
+// The undo toasts share one fixed corner, so they show one at a time, newest
+// last. The count tells the reader that dismissing this one is not the end of
+// it — without it, a second delete would make the first undo id look gone.
+export function undoToastLabel(queue: readonly { message: string }[]): string | null {
+  if (queue.length === 0) return null
+  return queue.length === 1 ? queue[0].message : `${queue[0].message} (+${queue.length - 1} more)`
+}
+
 export function editToggleAction(state: {
   editing: boolean
   stale: boolean
@@ -215,10 +237,31 @@ export function App() {
     else editBaseTagsRef.current.delete(filePath)
   }, [])
 
-  // A save the server refused: the contents are held here so the reader can
-  // still land them. Pierre has already torn the editor down by the time we
-  // learn, so without this the text would be gone.
-  const [saveConflict, setSaveConflict] = useState<{ path: string; contents: string } | null>(null)
+  // Saves the server refused, path -> the contents it refused: held here so
+  // the reader can still land them. Pierre has already torn the editor down by
+  // the time we learn, so without this the text would be gone. Keyed rather
+  // than single-slot because multi-file inline editing is the normal flow, and
+  // a slot would mean the second refusal discards the first file's only copy.
+  const [saveConflicts, setSaveConflicts] = useState<Map<string, string>>(() => new Map())
+  const holdConflict = useCallback((filePath: string, contents: string) => {
+    setSaveConflicts((prev) => withEntry(prev, filePath, contents))
+  }, [])
+  const dropConflict = useCallback((filePath: string) => {
+    setSaveConflicts((prev) => withoutEntry(prev, filePath))
+  }, [])
+
+  // Failures with nowhere better to go. An inline strip rather than alert():
+  // a native dialog freezes the page for anything driving the browser
+  // programmatically, and these all fire on paths where an agent-driven
+  // session is already in trouble and least able to click OK.
+  const [errors, setErrors] = useState<{ id: number; message: string }[]>([])
+  const errorSeqRef = useRef(0)
+  const reportError = useCallback((message: string) => {
+    setErrors((prev) => [...prev, { id: ++errorSeqRef.current, message }])
+  }, [])
+  const dismissError = useCallback((id: number) => {
+    setErrors((prev) => prev.filter((e) => e.id !== id))
+  }, [])
 
   // PUT a whole file, carrying If-Match when we know what we based the edit on.
   // Returns the outcome rather than throwing on the interesting case, because
@@ -258,19 +301,22 @@ export function App() {
     [rememberTag],
   )
 
-  const handleEditFile = useCallback(async (filePath: string) => {
-    // Pull current working-tree contents fresh — fileContents bundled in
-    // /api/diff is whatever the diff thought 'new' was, which may diverge
-    // from disk if the agent rewrote since the last poll.
-    const res = await fetch(`/api/file-content?path=${encodeURIComponent(filePath)}&version=new`)
-    if (!res.ok) {
-      alert(`Could not load ${filePath}: HTTP ${res.status}`)
-      return
-    }
-    const text = await res.text()
-    rememberTag(filePath, res.headers.get('ETag'))
-    setEditingFile({ path: filePath, contents: text })
-  }, [rememberTag])
+  const handleEditFile = useCallback(
+    async (filePath: string) => {
+      // Pull current working-tree contents fresh — fileContents bundled in
+      // /api/diff is whatever the diff thought 'new' was, which may diverge
+      // from disk if the agent rewrote since the last poll.
+      const res = await fetch(`/api/file-content?path=${encodeURIComponent(filePath)}&version=new`)
+      if (!res.ok) {
+        reportError(`Could not load ${filePath}: HTTP ${res.status}`)
+        return
+      }
+      const text = await res.text()
+      rememberTag(filePath, res.headers.get('ETag'))
+      setEditingFile({ path: filePath, contents: text })
+    },
+    [rememberTag, reportError],
+  )
 
   // The modal stays open on a throw, so a refused save loses nothing — the
   // message goes in its error strip and the reader can decide.
@@ -350,13 +396,13 @@ export function App() {
       try {
         const result = await putFileContents(filePath, contents)
         if (!result.ok) {
-          // Hold the text either way: the editor is already gone, so an alert
-          // alone would be a report that the work was lost.
-          setSaveConflict({ path: filePath, contents })
+          // Hold the text either way: the editor is already gone, so a bare
+          // message would be a report that the work was lost.
+          holdConflict(filePath, contents)
           return
         }
       } catch (err) {
-        setSaveConflict({ path: filePath, contents })
+        holdConflict(filePath, contents)
         console.error(`Save failed for ${filePath}`, err)
         return
       }
@@ -367,32 +413,39 @@ export function App() {
       dismissStale(filePath)
       clearConfirmSave(filePath)
     },
-    [dismissStale, clearConfirmSave, putFileContents],
+    [dismissStale, clearConfirmSave, putFileContents, holdConflict],
   )
 
-  // "Overwrite" on the conflict bar: replay the same contents with no
+  // "Overwrite" on a conflict bar: replay that file's held contents with no
   // If-Match, which is the deliberate last-writer-wins the reader just asked
   // for. putFileContents already dropped the stale base, so this is
   // unconditional by construction.
-  const handleOverwriteConflict = useCallback(async () => {
-    if (!saveConflict) return
-    const { path, contents } = saveConflict
-    setSaveConflict(null)
-    const result = await putFileContents(path, contents)
-    if (!result.ok) alert(result.message)
-    else dismissStale(path)
-  }, [saveConflict, putFileContents, dismissStale])
+  const handleOverwriteConflict = useCallback(
+    async (filePath: string) => {
+      const contents = saveConflicts.get(filePath)
+      if (contents === undefined) return
+      dropConflict(filePath)
+      const result = await putFileContents(filePath, contents)
+      if (!result.ok) {
+        // Put it straight back: the bar is still the only copy of the text.
+        holdConflict(filePath, contents)
+        reportError(result.message)
+      } else dismissStale(filePath)
+    },
+    [saveConflicts, putFileContents, dismissStale, dropConflict, holdConflict, reportError],
+  )
+
+  // Paths whose apply is mid-flight. The Apply button stays lit until the
+  // fetch resolves, so without this a second click (or the toolbar's
+  // apply-everything) would issue a duplicate fetch and a second applyEdits
+  // against a document that already absorbed the first.
+  const applyingRef = useRef<Set<string>>(new Set())
 
   // Applying a queued change to a file with an open edit session goes through
   // the editor rather than the diff refetch: the write arrives as one undoable
   // edit, so the reader can read it in place and ⌘Z it away like their own
   // typing. Falls back to the refetch whenever there's no live editor to take
   // it — including the case where the session ended between event and click.
-  // Paths whose apply is mid-flight. The Apply button stays lit until the
-  // fetch resolves, so without this a second click (or the toolbar's
-  // apply-everything) would issue a duplicate fetch and a second applyEdits
-  // against a document that already absorbed the first.
-  const applyingRef = useRef<Set<string>>(new Set())
   const handleApplyStale = useCallback(
     async (filePath: string) => {
       if (applyingRef.current.has(filePath)) return
@@ -442,47 +495,58 @@ export function App() {
   // SelectionPill's "Delete" — splices the exact selected range out of the
   // working-tree file server-side and surfaces an Undo toast. Server owns
   // the actual undo buffer (POST /api/edits/undo by id); this is just the
-  // toast's lifecycle.
-  const [undoToast, setUndoToast] = useState<{ id: string; message: string } | null>(null)
-  const handleDeleteRange = useCallback(async (filePath: string, anchor: SelectionAnchor) => {
-    const res = await fetch('/api/edits/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        filePath,
-        startLine: anchor.startLine,
-        startColumn: anchor.startColumn,
-        endLine: anchor.endLine,
-        endColumn: anchor.endColumn,
-      }),
-    })
-    if (!res.ok) {
-      const msg = await res.text().catch(() => res.statusText)
-      alert(`Delete failed: ${msg}`)
-      return
-    }
-    const { undoId } = (await res.json()) as { undoId: string }
-    const preview = anchor.selectedText.replace(/\s+/g, ' ').trim()
-    setUndoToast({
-      id: undoId,
-      message: `Deleted "${preview.length > 40 ? preview.slice(0, 39) + '…' : preview}"`,
-    })
+  // toast's lifecycle. A queue, not a slot: each toast is the only handle on
+  // its undo id, so a second delete must not evict the first one's.
+  const [undoQueue, setUndoQueue] = useState<{ id: string; message: string }[]>([])
+  const handleDeleteRange = useCallback(
+    async (filePath: string, anchor: SelectionAnchor) => {
+      const res = await fetch('/api/edits/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filePath,
+          startLine: anchor.startLine,
+          startColumn: anchor.startColumn,
+          endLine: anchor.endLine,
+          endColumn: anchor.endColumn,
+        }),
+      })
+      if (!res.ok) {
+        const msg = await res.text().catch(() => res.statusText)
+        reportError(`Delete failed: ${msg}`)
+        return
+      }
+      const { undoId } = (await res.json()) as { undoId: string }
+      const preview = anchor.selectedText.replace(/\s+/g, ' ').trim()
+      setUndoQueue((prev) => [
+        ...prev,
+        {
+          id: undoId,
+          message: `Deleted "${preview.length > 40 ? preview.slice(0, 39) + '…' : preview}"`,
+        },
+      ])
+    },
+    [reportError],
+  )
+
+  const dismissUndo = useCallback((undoId: string) => {
+    setUndoQueue((prev) => prev.filter((t) => t.id !== undoId))
   }, [])
 
   const handleUndoDelete = useCallback(async () => {
-    if (!undoToast) return
-    const { id } = undoToast
-    setUndoToast(null)
+    const head = undoQueue[0]
+    if (!head) return
+    dismissUndo(head.id)
     const res = await fetch('/api/edits/undo', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ id: head.id }),
     })
     if (!res.ok) {
       const msg = await res.text().catch(() => res.statusText)
-      alert(`Undo failed: ${msg}`)
+      reportError(`Undo failed: ${msg}`)
     }
-  }, [undoToast])
+  }, [undoQueue, dismissUndo, reportError])
 
   useEffect(() => {
     try {
@@ -504,8 +568,8 @@ export function App() {
   const fileCacheRef = useRef<Map<string, FileCacheEntry>>(new Map())
 
   // `files`, `diffStats`, and `fileStatsMap` all come out of one per-file
-  // pass over `patch` — folding stats into the same walk that reparses a
-  // file avoids a second full-patch scan (previously a separate memo here).
+  // pass over `patch`: stats are accumulated by the same walk that reparses a
+  // file, so the merged patch is scanned once, not once per derived value.
   const { files, diffStats, fileStatsMap } = useMemo(() => {
     const prevCache = fileCacheRef.current
     const nextCache = new Map<string, FileCacheEntry>()
@@ -723,13 +787,16 @@ export function App() {
           onSave={handleSaveEditedFile}
         />
       )}
-      {saveConflict && (
-        <div className="save-conflict" role="alert">
+      {/* Conflicts sit lowest: a held edit outranks a failure notice, because
+          only the conflict bar is holding text the reader can still lose. */}
+      <div className="strip-stack">
+      {[...saveConflicts].map(([path, contents]) => (
+        <div key={path} className="save-conflict" role="alert">
           <span>
-            {saveConflict.path} changed on disk while you were editing, so your save was
-            refused. Your edit is still here.
+            {path} changed on disk while you were editing, so your save was refused. Your edit
+            is still here.
           </span>
-          <button className="btn btn-danger btn-sm" onClick={handleOverwriteConflict}>
+          <button className="btn btn-danger btn-sm" onClick={() => void handleOverwriteConflict(path)}>
             Overwrite
           </button>
           <button
@@ -738,19 +805,32 @@ export function App() {
               // Reopening the editor re-seeds from the refreshed diff, so
               // "Reopen" would quietly mean "throw the text away". Copy is the
               // honest exit: the reader keeps it and decides.
-              void navigator.clipboard?.writeText(saveConflict.contents)
-              setSaveConflict(null)
+              void navigator.clipboard?.writeText(contents)
+              dropConflict(path)
             }}
           >
             Copy &amp; dismiss
           </button>
         </div>
-      )}
-      {undoToast && (
+      ))}
+      {errors.map((e) => (
+        <div key={e.id} className="app-error" role="alert">
+          <span>{e.message}</span>
+          <button className="btn btn-secondary btn-sm" onClick={() => dismissError(e.id)}>
+            Dismiss
+          </button>
+        </div>
+      ))}
+      </div>
+      {undoQueue.length > 0 && (
         <UndoToast
-          message={undoToast.message}
+          // Keyed on the head's id so the next queued toast mounts fresh and
+          // gets its own auto-dismiss timer rather than inheriting the
+          // expiring one.
+          key={undoQueue[0].id}
+          message={undoToastLabel(undoQueue)!}
           onUndo={handleUndoDelete}
-          onDismiss={() => setUndoToast(null)}
+          onDismiss={() => dismissUndo(undoQueue[0].id)}
         />
       )}
     </div>

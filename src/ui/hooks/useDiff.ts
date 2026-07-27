@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { RefreshMode } from './useSettings'
-import type { FilesChangedEvent } from '../../types'
+import type { KritEvent } from '../../types'
 
 export interface BinaryFileInfo {
   path: string
@@ -49,29 +49,72 @@ export interface DiffOptions {
 }
 
 export interface UseDiffOptions extends DiffOptions {
+  // THE refresh policy, stated once; everything else here points at this.
+  //
   // Governs how ambient fs-watcher `files-changed` (batched) and direct-edit
-  // `file-changed` (single-file) events get applied. Does NOT gate
-  // `file-written` (an explicit save via the in-browser editor) or the
-  // path:null `krit refresh` signal — both of those are the user or agent
-  // asking directly, so they always apply immediately regardless of mode.
+  // `file-changed` (single-file) events get applied. `file-written` (an
+  // explicit save through the in-browser editor) and the path:null `krit
+  // refresh` signal bypass refreshMode entirely — those are the user or agent
+  // asking directly — EXCEPT for a path in editingFiles, which nothing
+  // refetches.
   refreshMode: RefreshMode
   // Files the user is currently "in" (open draft/suggest form, file-editor
   // modal) — only consulted in 'live-unless-active' mode. An identity change
   // here does not need to be cheap; it's read from a ref, not an effect dep.
   activeFiles: Set<string>
-  // Files with a live inline editor. Narrower than activeFiles and obeyed in
-  // every refresh mode, including by `file-written`, which otherwise refetches
-  // unconditionally: a refetch replaces the item's fileDiff, and for these
-  // paths that discards a live document and its undo history. Their changes
-  // queue in staleFiles instead and reach the editor through applyExternalEdit.
+  // Files with a live inline editor. Narrower than activeFiles, and the one
+  // exception carved out of the refreshMode rule above: a refetch replaces the
+  // item's fileDiff, and for these paths that discards a live document and its
+  // undo history. Their changes queue in staleFiles instead and reach the
+  // editor through applyExternalEdit.
   editingFiles: Set<string>
+}
+
+// Ordering for diff refetches, which HTTP gives us none of. Two fetches of the
+// same path are routinely in flight at once (a `file-written` and a watcher
+// tick 200ms apart), and if the older read resolves second it wins and the
+// diff settles on stale content with nothing left to correct it. So every
+// fetch takes a monotonic id and claims the paths it covers; on arrival a
+// response may only write the paths it is still the newest claim for. A full
+// reload covers every path, so it supersedes every scoped request outstanding
+// when it starts, and is itself dropped if anything started after it.
+export class DiffRequestLedger {
+  private seq = 0
+  private newestForPath = new Map<string, number>()
+  private newestFull = 0
+
+  beginFull(): number {
+    const id = ++this.seq
+    this.newestFull = id
+    this.newestForPath.clear()
+    return id
+  }
+
+  beginPaths(paths: Iterable<string>): number {
+    const id = ++this.seq
+    for (const p of paths) this.newestForPath.set(p, id)
+    return id
+  }
+
+  isCurrentFull(id: number): boolean {
+    return id === this.seq
+  }
+
+  // The subset of `paths` this response is still the authority on. Partial is
+  // normal and useful: a burst may have re-requested one path of five, and the
+  // other four are still this response's to write.
+  currentPaths(id: number, paths: readonly string[]): string[] {
+    if (this.newestFull > id) return []
+    return paths.filter((p) => this.newestForPath.get(p) === id)
+  }
 }
 
 // Replace (or remove, or append) several files' fragments within a full
 // unified patch, in a single pass over `fullPatch`'s lines. Mirrors the
-// server's extractFilePatch boundary logic so a batch refetch can be
-// spliced back into the client's merged patch without re-fetching every
-// other file, and without re-scanning the whole patch once per path.
+// boundary logic of `extract_file_patch` in krit/src/server.rs so a batch
+// refetch can be spliced back into the client's merged patch without
+// re-fetching every other file, and without re-scanning the whole patch once
+// per path.
 export function spliceFilePatches(fullPatch: string, fragments: Map<string, string>): string {
   const lines = fullPatch ? fullPatch.split('\n') : []
   const targetPrefix = 'diff --git a/'
@@ -173,16 +216,32 @@ export function useDiff(options: UseDiffOptions) {
   const editingFilesRef = useRef(options.editingFiles)
   editingFilesRef.current = options.editingFiles
 
+  const ledgerRef = useRef(new DiffRequestLedger())
+  // Scoped fetches still in flight. A full reload's answer contains all of
+  // theirs, so it aborts them rather than letting them resolve and re-write
+  // paths from an older read. Scoped requests don't abort each other: one
+  // controller can cover several paths, and only some of them are superseded
+  // — the ledger sorts that out at merge time instead.
+  const inFlightRef = useRef<Set<AbortController>>(new Set())
+  const isAbort = (err: unknown) => err instanceof Error && err.name === 'AbortError'
+
   const load = useCallback(() => {
     setLoading(true)
     setError(null)
+    const id = ledgerRef.current.beginFull()
+    for (const c of inFlightRef.current) c.abort()
+    inFlightRef.current.clear()
     return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json()
       })
-      .then((json) => setData(json))
-      .catch((err) => setError(err.message))
+      .then((json) => {
+        if (ledgerRef.current.isCurrentFull(id)) setData(json)
+      })
+      .catch((err) => {
+        if (!isAbort(err)) setError(err.message)
+      })
       .finally(() => setLoading(false))
   }, [options.staged, options.untracked])
 
@@ -198,32 +257,46 @@ export function useDiff(options: UseDiffOptions) {
       // full reload instead (see BATCH_REFETCH_MAX).
       if (!base || paths.length > BATCH_REFETCH_MAX) return load()
       const fileParams = paths.map((p) => `file=${encodeURIComponent(p)}`).join('&')
-      return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}&${fileParams}`)
+      const id = ledgerRef.current.beginPaths(paths)
+      const controller = new AbortController()
+      inFlightRef.current.add(controller)
+      return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}&${fileParams}`, {
+        signal: controller.signal,
+      })
         .then((res) => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`)
           return res.json()
         })
         .then((json: FileDiffData) => {
+          // Only the paths this response is still the newest read of; a path
+          // re-requested while this one was in flight belongs to that later
+          // request, and writing it here would install the older content.
+          const own = ledgerRef.current.currentPaths(id, paths)
+          if (own.length === 0) return
           // The response's `patch` is the concatenation of just these paths'
           // fragments (server contract) — split it back into per-path
           // fragments so each one can be spliced into its own slot in the
           // merged patch. A requested path absent from the response has no
           // pending diff (reverted between event and request); splice ''
           // for it, mirroring the single-file semantics.
-          const fragments = splitFilePatches(json.patch)
-          for (const p of paths) {
-            if (!fragments.has(p)) fragments.set(p, '')
-          }
+          const all = splitFilePatches(json.patch)
+          const fragments = new Map<string, string>()
+          for (const p of own) fragments.set(p, all.get(p) ?? '')
           setData((prev) => {
             const cur = prev ?? base
             const patch = spliceFilePatches(cur.patch, fragments)
-            const pathSet = new Set(paths)
-            const binaryFiles = [...cur.binaryFiles.filter((b) => !pathSet.has(b.path)), ...json.binaryFiles]
+            const pathSet = new Set(own)
+            const binaryFiles = [
+              ...cur.binaryFiles.filter((b) => !pathSet.has(b.path)),
+              ...json.binaryFiles.filter((b) => pathSet.has(b.path)),
+            ]
             const untrackedFiles = new Set(cur.untrackedFiles)
-            for (const p of paths) untrackedFiles.delete(p)
-            for (const f of json.untrackedFiles) untrackedFiles.add(f)
+            for (const p of own) untrackedFiles.delete(p)
+            for (const f of json.untrackedFiles) {
+              if (pathSet.has(f)) untrackedFiles.add(f)
+            }
             const fileContents = { ...cur.fileContents }
-            for (const p of paths) {
+            for (const p of own) {
               if (p in json.fileContents) {
                 fileContents[p] = json.fileContents[p]
               } else {
@@ -233,7 +306,12 @@ export function useDiff(options: UseDiffOptions) {
             return { ...cur, patch, binaryFiles, untrackedFiles: [...untrackedFiles], fileContents }
           })
         })
-        .catch((err) => setError(err.message))
+        .catch((err) => {
+          if (!isAbort(err)) setError(err.message)
+        })
+        .finally(() => {
+          inFlightRef.current.delete(controller)
+        })
     },
     [options.staged, options.untracked, load],
   )
@@ -250,7 +328,11 @@ export function useDiff(options: UseDiffOptions) {
     [commitStale],
   )
 
-  const unmarkStale = useCallback(
+  // Drop a path from the stale set without refetching its diff. For a file
+  // with an open edit session, the caller applies the change into the editor
+  // instead (see applyExternalEdit) — refetching would replace the item's
+  // fileDiff and take the live document, and its undo history, with it.
+  const dismissStale = useCallback(
     (path: string) => {
       if (!staleFilesRef.current.has(path)) return
       const next = new Set(staleFilesRef.current)
@@ -260,18 +342,12 @@ export function useDiff(options: UseDiffOptions) {
     [commitStale],
   )
 
-  // Drop a path from the stale set without refetching its diff. For a file
-  // with an open edit session, the caller applies the change into the editor
-  // instead (see applyExternalEdit) — refetching would replace the item's
-  // fileDiff and take the live document, and its undo history, with it.
-  const dismissStale = unmarkStale
-
   const applyStaleFile = useCallback(
     (path: string) => {
-      unmarkStale(path)
+      dismissStale(path)
       void loadFile(path)
     },
-    [loadFile, unmarkStale],
+    [loadFile, dismissStale],
   )
 
   // `skip` holds paths the caller is applying some other way — in practice
@@ -296,60 +372,70 @@ export function useDiff(options: UseDiffOptions) {
     void load()
   }, [load])
 
-  // SSE: react to file-written (explicit save, always applies immediately),
-  // file-changed (a single direct edit/undo — see api_edits_delete/undo in
-  // server.rs — gated by refreshMode same as before), and files-changed (the
-  // ambient fs-watcher's batched replacement for the old per-file
-  // file-changed fanout — one event per debounced tick, 1..N paths, gated by
-  // refreshMode per path). `path: null` on file-written is the `krit
-  // refresh` fallback and always does a full reload — both file-written and
-  // that fallback are the user/agent asking directly, so they bypass
-  // refreshMode entirely.
+  // SSE: file-written (an explicit save), file-changed (a single direct
+  // edit/undo — see api_edits_delete/undo in server.rs), and files-changed
+  // (the ambient fs-watcher's batched replacement for the old per-file
+  // file-changed fanout — one event per debounced tick, 1..N paths). Which of
+  // those apply and which queue is UseDiffOptions.refreshMode's rule; this
+  // effect only implements it. `path: null` on file-written is the `krit
+  // refresh` fallback and does a full reload.
   useEffect(() => {
-    const es = new EventSource('/api/events')
+    // `role=ui` is what makes this subscriber count as a browser: the server
+    // defaults an unstated role to a CLI client, which neither holds the
+    // review server alive nor gates the Done-reviewing button.
+    const es = new EventSource('/api/events?role=ui')
     es.addEventListener('message', (ev) => {
       try {
-        const parsed = JSON.parse(ev.data)
-        if (parsed.type === 'files-changed') {
-          const paths = (parsed as FilesChangedEvent).paths
+        // Typed against the wire union so a Rust-side rename fails `tsc`
+        // rather than silently stopping the refresh loop.
+        const event = JSON.parse(ev.data) as KritEvent
+        if (event.type === 'files-changed') {
+          const paths = event.paths
           if (!Array.isArray(paths) || paths.length === 0) return
+          // Partition, rather than deciding for the batch as a whole: the
+          // editing-file exception is per path in every mode, and so is
+          // live-unless-active's deferral of files the user is currently "in"
+          // (open draft/suggest form, file-editor modal). Whatever's left
+          // applies in one batch refetch.
           const mode = refreshModeRef.current
-          if (mode === 'manual') {
-            for (const p of paths) markStale(p)
-            return
-          }
-          if (mode === 'ultra') {
-            void loadFiles(paths)
-            return
-          }
-          // live-unless-active: defer the subset the user is currently "in"
-          // (open draft/suggest form, file-editor modal); apply the rest in
-          // one batch refetch.
+          const editing = editingFilesRef.current
           const active = activeFilesRef.current
           const toApply: string[] = []
           for (const p of paths) {
-            if (active.has(p)) markStale(p)
+            const defer =
+              editing.has(p) || mode === 'manual' || (mode === 'live-unless-active' && active.has(p))
+            if (defer) markStale(p)
             else toApply.push(p)
           }
           void loadFiles(toApply)
           return
         }
-        // A path with a live editor never refetches, in any mode: the refetch
-        // would swap out the item's fileDiff and take the open document with
-        // it. Queue it instead — applyExternalEdit is how it reaches the
-        // editor. Checked before the per-type branches below so it also
-        // covers `file-written`, which otherwise applies unconditionally.
-        if (parsed.path && editingFilesRef.current.has(parsed.path)) {
-          markStale(parsed.path)
+        if (event.type !== 'file-written' && event.type !== 'file-changed') {
+          // Every other variant belongs to another consumer (useComments,
+          // useReviewState). Enumerated rather than defaulted so a new Rust
+          // variant has to be considered here.
+          const other: Exclude<KritEvent, { type: 'file-written' | 'file-changed' | 'files-changed' }> =
+            event
+          void other
           return
         }
-        if (parsed.type !== 'file-written' && parsed.type !== 'file-changed') return
-        const path: string | undefined = parsed.path ?? undefined
+        const path = event.path
         if (!path) {
+          // file-written's `path: null` — the `krit refresh` fallback.
           void load()
           return
         }
-        if (parsed.type === 'file-written') {
+        // A path with a live editor never refetches, in any mode: the refetch
+        // would swap out the item's fileDiff and take the open document with
+        // it. Queue it instead — applyExternalEdit is how it reaches the
+        // editor. Checked ahead of the per-type split below so it also covers
+        // `file-written`, which otherwise applies unconditionally; the
+        // files-changed branch above applies the same rule per path.
+        if (editingFilesRef.current.has(path)) {
+          markStale(path)
+          return
+        }
+        if (event.type === 'file-written') {
           void loadFile(path)
           return
         }

@@ -31,6 +31,16 @@ function useColorScheme(): 'light' | 'dark' {
 
 export function FileEditorModal({ filePath, initialContents, onClose, onSave }: Props) {
   const [contents, setContents] = useState(initialContents)
+  // `initialContents` is both the seed and the baseline `dirty` measures
+  // against, so it has to be re-read if the parent loads the file again while
+  // the modal is open — otherwise the editor shows someone else's text and
+  // calls it the reader's unsaved work. A fresh load is a fresh session, so
+  // reseed the document with it too.
+  const [baseline, setBaseline] = useState(initialContents)
+  if (baseline !== initialContents) {
+    setBaseline(initialContents)
+    setContents(initialContents)
+  }
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   // Closing with unsaved edits asks first, as an inline strip rather than a
@@ -43,7 +53,7 @@ export function FileEditorModal({ filePath, initialContents, onClose, onSave }: 
   const scheme = useColorScheme()
   const cmExtensions = useMemo(() => [pierreSyntaxHighlighting(scheme), ...langExt], [langExt, scheme])
 
-  const dirty = contents !== initialContents
+  const dirty = contents !== baseline
 
   const handleSave = async () => {
     if (!dirty || saving) return

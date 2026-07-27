@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { KritEvent } from '../../types'
 
 export interface ReviewState {
   /** Number of CLI watchers currently subscribed (i.e. processes ready to react to Submit). */
@@ -25,23 +26,45 @@ export function useReviewState(): ReviewState {
   })
 
   useEffect(() => {
-    const es = new EventSource('/api/events')
+    // `role=ui` is what makes this subscriber count as a browser: the server
+    // defaults an unstated role to a CLI client, which neither holds the
+    // review server alive nor gates the Done-reviewing button. (Two
+    // EventSources per tab is the v1 client-count contract, not a leak.)
+    const es = new EventSource('/api/events?role=ui')
     es.onmessage = (e) => {
-      let msg: { type?: string; watcherCount?: number; uiCount?: number; agentCount?: number; timestamp?: number }
+      let event: KritEvent
       try {
-        msg = JSON.parse(e.data)
+        // Typed against the wire union so a Rust-side rename fails `tsc`
+        // rather than quietly freezing the counts at zero.
+        event = JSON.parse(e.data) as KritEvent
       } catch {
         return
       }
-      if (msg.type === 'state') {
-        setState((prev) => ({
-          ...prev,
-          watcherCount: msg.watcherCount ?? prev.watcherCount,
-          uiCount: msg.uiCount ?? prev.uiCount,
-          agentCount: msg.agentCount ?? prev.agentCount,
-        }))
-      } else if (msg.type === 'submitted') {
-        setState((prev) => ({ ...prev, submittedAt: msg.timestamp ?? Date.now() }))
+      switch (event.type) {
+        case 'state':
+          setState((prev) => ({
+            ...prev,
+            watcherCount: event.watcherCount,
+            uiCount: event.uiCount,
+            agentCount: event.agentCount,
+          }))
+          return
+        case 'submitted':
+          setState((prev) => ({ ...prev, submittedAt: event.timestamp }))
+          return
+        // Everything else belongs to another consumer (useDiff, useComments).
+        // Enumerated rather than defaulted so a new Rust variant has to be
+        // considered here; not every variant reaches every stream.
+        case 'clients':
+        case 'comment-added':
+        case 'comment-updated':
+        case 'reply-added':
+        case 'file-changed':
+        case 'files-changed':
+        case 'file-written':
+        case 'user-edit':
+        case 'review-ended':
+          return
       }
     }
     es.onerror = () => {

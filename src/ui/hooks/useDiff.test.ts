@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { spliceFilePatches, splitFilePatches, useDiff, type UseDiffOptions } from './useDiff'
+import {
+  DiffRequestLedger,
+  spliceFilePatches,
+  splitFilePatches,
+  useDiff,
+  type UseDiffOptions,
+} from './useDiff'
 
 // One file's unified-diff fragment. Kept tiny; the merge logic only cares
 // about `diff --git` boundaries and the b/-side path, not hunk contents.
@@ -302,5 +308,107 @@ describe('useDiff — draining the queue', () => {
 
     await waitFor(() => expect(result.current.staleFiles.has('src/a.rs')).toBe(false))
     expect(requested).toEqual([])
+  })
+})
+
+describe('DiffRequestLedger', () => {
+  it('lets a scoped response write only the paths nothing newer has claimed', () => {
+    const ledger = new DiffRequestLedger()
+    const first = ledger.beginPaths(['src/a.rs', 'src/b.rs'])
+    const second = ledger.beginPaths(['src/a.rs'])
+    // The overlap belongs to the later request even though it started second;
+    // the rest of the older batch is still the older request's to deliver.
+    expect(ledger.currentPaths(first, ['src/a.rs', 'src/b.rs'])).toEqual(['src/b.rs'])
+    expect(ledger.currentPaths(second, ['src/a.rs'])).toEqual(['src/a.rs'])
+  })
+
+  it('drops a scoped response entirely once a full reload has started', () => {
+    const ledger = new DiffRequestLedger()
+    const scoped = ledger.beginPaths(['src/a.rs'])
+    ledger.beginFull()
+    expect(ledger.currentPaths(scoped, ['src/a.rs'])).toEqual([])
+  })
+
+  it('drops a full reload superseded by anything that started after it', () => {
+    const ledger = new DiffRequestLedger()
+    const full = ledger.beginFull()
+    expect(ledger.isCurrentFull(full)).toBe(true)
+    ledger.beginPaths(['src/a.rs'])
+    expect(ledger.isCurrentFull(full)).toBe(false)
+  })
+
+  it('keeps a scoped request current across an unrelated path being claimed', () => {
+    const ledger = new DiffRequestLedger()
+    const mine = ledger.beginPaths(['src/a.rs'])
+    ledger.beginPaths(['src/b.rs'])
+    expect(ledger.currentPaths(mine, ['src/a.rs'])).toEqual(['src/a.rs'])
+  })
+})
+
+describe('useDiff — files-changed and live editors', () => {
+  it('spares an editing file from an ultra-mode batch and applies the rest', async () => {
+    // ultra applies everything it hears; a live editor is the one exception,
+    // because the refetch replaces the document being typed in.
+    const { result } = renderUseDiff({
+      refreshMode: 'ultra',
+      editingFiles: new Set(['src/a.rs']),
+    })
+    await waitFor(() => expect(result.current.initialLoading).toBe(false))
+    requested = []
+
+    act(() => FakeEventSource.last!.emit({ type: 'files-changed', paths: ['src/a.rs', 'src/b.rs'] }))
+
+    await waitFor(() => expect(result.current.staleFiles.has('src/a.rs')).toBe(true))
+    expect(requested.length).toBe(1)
+    expect(fetchedPathsFor(requested[0])).toEqual(['src/b.rs'])
+  })
+
+  it('still applies the whole batch in ultra mode when nothing is being edited', async () => {
+    const { result } = renderUseDiff({ refreshMode: 'ultra' })
+    await waitFor(() => expect(result.current.initialLoading).toBe(false))
+    requested = []
+
+    act(() => FakeEventSource.last!.emit({ type: 'files-changed', paths: ['src/a.rs', 'src/b.rs'] }))
+
+    await waitFor(() => expect(requested.length).toBe(1))
+    expect(fetchedPathsFor(requested[0])).toEqual(['src/a.rs', 'src/b.rs'])
+    expect(result.current.staleFiles.size).toBe(0)
+  })
+})
+
+describe('useDiff — out-of-order responses', () => {
+  it('ignores an older refetch of a path that resolves after a newer one', async () => {
+    // The burst case the batching exists for: two reads of one file in flight,
+    // and HTTP puts no order on which lands first. If the older read wins, the
+    // diff settles on content that is already gone and nothing corrects it.
+    const pending: Array<(patch: string) => void> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        requested.push(url)
+        const paths = fetchedPathsFor(url)
+        if (paths.length === 0) return { ok: true, json: async () => diffResponse(['src/a.rs']) }
+        const patch = await new Promise<string>((resolve) => pending.push(resolve))
+        return { ok: true, json: async () => ({ ...diffResponse([]), patch }) }
+      }),
+    )
+    const { result } = renderUseDiff({ refreshMode: 'ultra' })
+    await waitFor(() => expect(result.current.initialLoading).toBe(false))
+
+    act(() => FakeEventSource.last!.emit({ type: 'file-written', path: 'src/a.rs' }))
+    await waitFor(() => expect(pending.length).toBe(1))
+    act(() => FakeEventSource.last!.emit({ type: 'file-written', path: 'src/a.rs' }))
+    await waitFor(() => expect(pending.length).toBe(2))
+
+    const newer = fragment('src/a.rs', '+newest')
+    const older = fragment('src/a.rs', '+stale')
+    await act(async () => {
+      pending[1](newer)
+      pending[0](older)
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(result.current.patch).toContain('+newest'))
+    expect(result.current.patch).not.toContain('+stale')
   })
 })
