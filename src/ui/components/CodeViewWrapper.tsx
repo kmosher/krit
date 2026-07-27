@@ -200,6 +200,43 @@ function bumpVersion(item: CodeViewItem<Metadata>): number {
   return v + 1
 }
 
+type DiffItem = Extract<CodeViewItem<Metadata>, { type: 'diff' }>
+
+// Push a per-file change into CodeView's item list.
+//
+// Every sync below has the same body: walk `files`, ask whether this file
+// moved since the last run, and for the ones that did, fetch the item,
+// mutate it, bump `version` (CodeView re-renders an item only when that
+// changes), and hand it back. Each caller supplies only the two parts that
+// differ — `changed`, and `mutate` for whatever field it owns.
+//
+// `mutate` is optional because a bump alone is meaningful: the header
+// renderers read viewedFiles/staleFiles/commentCounts through their closures,
+// so re-running them is the entire point of those syncs.
+//
+// Callers keep their own last-value snapshot in a ref and overwrite it after
+// the walk. That bookkeeping stays with the caller rather than moving in
+// here: `changed` is the only thing that knows what shape the snapshot is,
+// and a helper that guessed would be wrong for the annotations sync (per-file
+// deep compare) and the stale sync (which deliberately updates its snapshot
+// for files it skipped).
+function syncItems(
+  viewer: CodeViewHandle<Metadata> | null,
+  files: FileDiffMetadata[],
+  changed: (name: string) => boolean,
+  mutate?: (item: DiffItem, name: string) => void,
+): void {
+  if (!viewer) return
+  for (const file of files) {
+    if (!changed(file.name)) continue
+    const item = viewer.getItem(file.name)
+    if (!item || item.type !== 'diff') continue
+    mutate?.(item, file.name)
+    item.version = bumpVersion(item)
+    viewer.updateItem(item)
+  }
+}
+
 // File change-type → short label. CodeView's FileDiffMetadata.type uses the
 // patch-parser's vocabulary; we squash rename-pure/rename-changed since the
 // distinction isn't useful at a glance.
@@ -410,16 +447,15 @@ export const CodeViewWrapper = memo(
         return
       }
 
-      const viewer = viewerRef.current
-      if (!viewer) return
-      for (const file of files) {
-        if (prevFiles.get(file.name) === file) continue
-        const item = viewer.getItem(file.name)
-        if (!item || item.type !== 'diff') continue
-        item.fileDiff = file
-        item.version = bumpVersion(item)
-        viewer.updateItem(item)
-      }
+      syncItems(
+        viewerRef.current,
+        files,
+        (name) => prevFiles.get(name) !== nextFiles.get(name),
+        (item, name) => {
+          const next = nextFiles.get(name)
+          if (next) item.fileDiff = next
+        },
+      )
     }, [files])
 
     useLayoutEffect(() => {
@@ -431,19 +467,24 @@ export const CodeViewWrapper = memo(
 
     const lastAnnotationsRef = useRef<Map<string, DiffLineAnnotation<Metadata>[]>>(new Map())
     useEffect(() => {
-      const viewer = viewerRef.current
-      if (!viewer) return
+      const merged = new Map<string, DiffLineAnnotation<Metadata>[]>()
       for (const file of files) {
-        const next = mergeAnnotations(fileAnnotationsMap.get(file.name) ?? [], pending, file.name)
-        const prev = lastAnnotationsRef.current.get(file.name)
-        if (annotationsEqual(prev, next)) continue
-        const item = viewer.getItem(file.name)
-        if (!item || item.type !== 'diff') continue
-        item.annotations = next
-        item.version = bumpVersion(item)
-        viewer.updateItem(item)
-        lastAnnotationsRef.current.set(file.name, next)
+        merged.set(
+          file.name,
+          mergeAnnotations(fileAnnotationsMap.get(file.name) ?? [], pending, file.name),
+        )
       }
+      syncItems(
+        viewerRef.current,
+        files,
+        (name) => !annotationsEqual(lastAnnotationsRef.current.get(name), merged.get(name) ?? []),
+        (item, name) => {
+          const next = merged.get(name)
+          if (!next) return
+          item.annotations = next
+          lastAnnotationsRef.current.set(name, next)
+        },
+      )
     }, [files, fileAnnotationsMap, pending])
 
     // Viewed-state changes drive two things: re-render the header (chevron +
@@ -453,27 +494,23 @@ export const CodeViewWrapper = memo(
     // for any viewed-toggle since renderHeaderPrefix reads viewedFiles via closure.
     const lastViewedRef = useRef<Set<string>>(new Set())
     useEffect(() => {
-      const viewer = viewerRef.current
-      if (!viewer) return
       const prev = lastViewedRef.current
-      const next = viewedFiles
-      for (const file of files) {
-        const before = prev.has(file.name)
-        const after = next.has(file.name)
-        if (before === after) continue
-        const item = viewer.getItem(file.name)
-        if (!item || item.type !== 'diff') continue
-        // Auto-collapse on viewed, auto-expand on un-viewed. The user can
-        // still manually re-expand with the chevron after marking viewed.
-        // Never collapse out from under a live editor: that would make Pierre
-        // end the session and write the file, which is not what ticking a
-        // checkbox asked for. The header still needs its bump below, so this
-        // suppresses only the collapse.
-        if (!(after && editingFiles.has(file.name))) item.collapsed = after
-        item.version = bumpVersion(item)
-        viewer.updateItem(item)
-      }
-      lastViewedRef.current = new Set(next)
+      syncItems(
+        viewerRef.current,
+        files,
+        (name) => prev.has(name) !== viewedFiles.has(name),
+        (item, name) => {
+          // Auto-collapse on viewed, auto-expand on un-viewed. The user can
+          // still manually re-expand with the chevron after marking viewed.
+          // Never collapse out from under a live editor: that would make
+          // Pierre end the session and write the file, which is not what
+          // ticking a checkbox asked for. syncItems still bumps the version,
+          // so this suppresses only the collapse, not the header re-render.
+          const after = viewedFiles.has(name)
+          if (!(after && editingFiles.has(name))) item.collapsed = after
+        },
+      )
+      lastViewedRef.current = new Set(viewedFiles)
     }, [files, viewedFiles])
 
     // Inline edit mode. Pierre ignores `edit` while an item is collapsed, so
@@ -481,20 +518,17 @@ export const CodeViewWrapper = memo(
     // on a collapsed (viewed, or auto-collapsed) file.
     const lastEditingRef = useRef<Set<string>>(new Set())
     useEffect(() => {
-      const viewer = viewerRef.current
-      if (!viewer) return
       const prev = lastEditingRef.current
-      for (const file of files) {
-        const before = prev.has(file.name)
-        const after = editingFiles.has(file.name)
-        if (before === after) continue
-        const item = viewer.getItem(file.name)
-        if (!item || item.type !== 'diff') continue
-        item.edit = after
-        if (after) item.collapsed = false
-        item.version = bumpVersion(item)
-        viewer.updateItem(item)
-      }
+      syncItems(
+        viewerRef.current,
+        files,
+        (name) => prev.has(name) !== editingFiles.has(name),
+        (item, name) => {
+          const after = editingFiles.has(name)
+          item.edit = after
+          if (after) item.collapsed = false
+        },
+      )
       lastEditingRef.current = new Set(editingFiles)
     }, [files, editingFiles])
 
@@ -514,17 +548,12 @@ export const CodeViewWrapper = memo(
     // handles staleness moving while a session is already open.
     const lastStaleRef = useRef<Set<string>>(new Set())
     useEffect(() => {
-      const viewer = viewerRef.current
-      if (!viewer) return
       const prev = lastStaleRef.current
-      for (const file of files) {
-        if (!editingFiles.has(file.name)) continue
-        if (prev.has(file.name) === staleFiles.has(file.name)) continue
-        const item = viewer.getItem(file.name)
-        if (!item || item.type !== 'diff') continue
-        item.version = bumpVersion(item)
-        viewer.updateItem(item)
-      }
+      syncItems(
+        viewerRef.current,
+        files,
+        (name) => editingFiles.has(name) && prev.has(name) !== staleFiles.has(name),
+      )
       lastStaleRef.current = new Set(staleFiles)
     }, [files, staleFiles, editingFiles])
 
@@ -532,18 +561,12 @@ export const CodeViewWrapper = memo(
     // any file whose count changed so renderHeaderMetadata re-runs.
     const lastCountsRef = useRef<Record<string, number>>({})
     useEffect(() => {
-      const viewer = viewerRef.current
-      if (!viewer) return
       const prev = lastCountsRef.current
-      for (const file of files) {
-        const before = prev[file.name] ?? 0
-        const after = commentCounts[file.name] ?? 0
-        if (before === after) continue
-        const item = viewer.getItem(file.name)
-        if (!item || item.type !== 'diff') continue
-        item.version = bumpVersion(item)
-        viewer.updateItem(item)
-      }
+      syncItems(
+        viewerRef.current,
+        files,
+        (name) => (prev[name] ?? 0) !== (commentCounts[name] ?? 0),
+      )
       lastCountsRef.current = commentCounts
     }, [files, commentCounts])
 
@@ -553,18 +576,12 @@ export const CodeViewWrapper = memo(
     // this keeps the data path consistent.
     const lastStatsRef = useRef<Record<string, { additions: number; deletions: number }>>({})
     useEffect(() => {
-      const viewer = viewerRef.current
-      if (!viewer) return
       const prev = lastStatsRef.current
-      for (const file of files) {
-        const a = prev[file.name]
-        const b = fileStatsMap[file.name]
-        if (a?.additions === b?.additions && a?.deletions === b?.deletions) continue
-        const item = viewer.getItem(file.name)
-        if (!item || item.type !== 'diff') continue
-        item.version = bumpVersion(item)
-        viewer.updateItem(item)
-      }
+      syncItems(viewerRef.current, files, (name) => {
+        const a = prev[name]
+        const b = fileStatsMap[name]
+        return a?.additions !== b?.additions || a?.deletions !== b?.deletions
+      })
       lastStatsRef.current = fileStatsMap
     }, [files, fileStatsMap])
 
