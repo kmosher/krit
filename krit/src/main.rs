@@ -28,7 +28,9 @@ Usage: krit [options] [-- <git diff args>]
 Options:
   -p, --port <port>  Port to run the server on (default: random available port)
   --host <host>      Host address to bind to (default: 127.0.0.1). Pass
-                     0.0.0.0 to expose the server to the local network.
+                     0.0.0.0 to expose the server to the local network, in
+                     which case krit mints an access token and off-machine
+                     clients must open the tokenized URL it prints.
   --no-open          Don't open the browser automatically
   -v, --version      Show version number
   -h, --help         Show this help message
@@ -40,7 +42,9 @@ Subcommands (talk to the running krit server for the current session):
   resolve <id>                Mark a comment resolved
   reopen <id>                 Reopen a resolved comment
   wait-for-submit             Block until the user clicks Done reviewing in the browser UI
-                              (exit 0 on submit, 2 on disconnect)
+                              (exit 0 on submit, 1 if no server is reachable or
+                              the state file is unusable, 2 if the connection
+                              drops before submit)
   refresh                     Tell the browser tab to refetch the diff (after edits
                               made outside the in-browser editor)
 
@@ -81,7 +85,10 @@ fn main() {
         if is_before_dash_dash && raw_args[idx] == "watch" {
             eprintln!("`krit watch` is not a subcommand. Subscribe to the event stream directly:");
             eprintln!("  ws://localhost:<port>/api/events-ws   (port from `krit state`)");
-            std::process::exit(2);
+            // 64 (EX_USAGE), not 2: scripts gate the batch review flow on
+            // wait-for-submit's exit codes, where 2 means "disconnected
+            // before submit".
+            std::process::exit(64);
         }
     }
 
@@ -193,12 +200,22 @@ async fn serve(
     let state_path = default_state_path();
     let comment_store = store::CommentStore::new(Some(comments_store_path()));
 
+    // A bind that reaches other machines exposes the file-read and
+    // file-write routes to everyone on the network, so it gets a token; a
+    // loopback bind gets none and behaves exactly as it always has.
+    let api_token = server::mint_api_token(&host);
+    let token_query = match &api_token {
+        Some(t) => format!("?krit_token={}", urlencode(t)),
+        None => String::new(),
+    };
+
     let hub = hub::Hub::new();
     let app_state = server::new_state(
         hub.clone(),
         comment_store,
         repo_root.clone(),
         custom_diff_args,
+        api_token.clone(),
     );
 
     let bind_addr = format!("{}:{}", host, port_arg.unwrap_or(0));
@@ -225,6 +242,13 @@ async fn serve(
     let local_url = format!("http://{host}:{actual_port}");
 
     println!("krit server running at {local_url}");
+    if api_token.is_some() {
+        // The state file stays token-free on purpose: subcommands connect
+        // over loopback and never need it, so the secret has no reason to
+        // sit in a temp file.
+        println!("This bind is reachable from other machines, so they must use the access token:");
+        println!("  {local_url}{token_query}");
+    }
     let write_result = write_state(
         &KritState {
             port: actual_port,
@@ -284,10 +308,13 @@ async fn serve(
         hub.set_exit_cleanup(move || remove_state_if_owned(pid, &state_path));
     }
 
+    // Tokenized even though this browser reaches us over loopback and would
+    // be admitted anyway — one launch URL, valid from wherever it is opened,
+    // beats a URL whose validity depends on which interface answered it.
     let open_url = if host == "0.0.0.0" {
-        format!("http://127.0.0.1:{actual_port}")
+        format!("http://127.0.0.1:{actual_port}{token_query}")
     } else {
-        local_url.clone()
+        format!("{local_url}{token_query}")
     };
     if !no_open {
         launch_review_ui(&open_url);
@@ -305,7 +332,7 @@ async fn serve(
             }
         });
     } else {
-        print_manual_url_hint(&local_url);
+        print_manual_url_hint(&format!("{local_url}{token_query}"));
     }
 
     // Always-on fs-watcher; sync callback (broadcast::send is sync), safe
@@ -347,9 +374,14 @@ async fn serve(
 
     let router = server::build_router(app_state);
     let hub_for_shutdown = hub.clone();
-    let result = axum::serve(listener, router)
-        .with_graceful_shutdown(async move { hub_for_shutdown.shutdown.notified().await })
-        .await;
+    // with_connect_info, because the token check asks whether the peer is
+    // this machine; without it every request looks remote.
+    let result = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { hub_for_shutdown.shutdown.notified().await })
+    .await;
 
     remove_state_if_owned(std::process::id(), &state_path);
     if let Err(err) = result {

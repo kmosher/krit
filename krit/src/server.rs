@@ -5,6 +5,7 @@
 use crate::edits::{DeleteRange, splice_delete_range, splice_insert_text};
 use crate::git;
 use crate::hub::{Hub, Role};
+use crate::pathsafe::is_safe_path;
 use crate::reanchor::reanchor_file_comments;
 use crate::settings::{load_settings, save_settings};
 use crate::store::{CommentStore, UpdateFields};
@@ -51,6 +52,10 @@ struct UndoEntry {
     start_line: u32,
     start_column: u32,
     deleted_text: String,
+    /// The file's tag as the delete left it. The undo re-inserts at a raw
+    /// line/column, so it must refuse a file that anything else has touched
+    /// since — those coordinates would otherwise land in unrelated text.
+    expected_tag: String,
 }
 
 pub struct Inner {
@@ -58,8 +63,15 @@ pub struct Inner {
     pub store: Mutex<CommentStore>,
     pub repo_root: PathBuf,
     pub custom_diff_args: Option<Vec<String>>,
+    /// `Some` only when the bind reaches past this machine — see
+    /// `mint_api_token` and `require_api_token`.
+    pub api_token: Option<String>,
     viewed: Mutex<HashSet<String>>,
     undo: Mutex<Vec<UndoEntry>>,
+    /// Serializes the If-Match check and the write it guards. Without it two
+    /// PUTs carrying the same valid tag both pass the check and both write,
+    /// which is the loss the tag exists to prevent.
+    file_write: Mutex<()>,
     // (value, fetched_at) — see BRANCH_CACHE_TTL.
     branch_cache: Mutex<Option<(String, Instant)>>,
 }
@@ -79,21 +91,24 @@ pub fn new_state(
     store: CommentStore,
     repo_root: PathBuf,
     custom_diff_args: Option<Vec<String>>,
+    api_token: Option<String>,
 ) -> AppState {
     Arc::new(Inner {
         hub,
         store: Mutex::new(store),
         repo_root,
         custom_diff_args,
+        api_token,
         viewed: Mutex::new(HashSet::new()),
         undo: Mutex::new(Vec::new()),
+        file_write: Mutex::new(()),
         branch_cache: Mutex::new(None),
     })
 }
 
-/// `state.repo_root`'s own basename — the repo name without forking `git`
-/// (the old `git::repo_name()` re-derived it via `rev-parse --show-toplevel`
-/// every call; the server already knows its root at startup).
+/// `state.repo_root`'s own basename. The server knows its root at startup, so
+/// this answers without forking — unlike `git::repo_name()`, which is for
+/// callers that have no root in hand and must ask `rev-parse --show-toplevel`.
 fn repo_name_from_root(state: &AppState) -> String {
     state
         .repo_root
@@ -157,6 +172,13 @@ fn mime_for(path: &str) -> &'static str {
         "woff2" => "font/woff2",
         _ => "application/octet-stream",
     }
+}
+
+/// A client-supplied repo-relative path that is safe to hand to `git` as a
+/// pathspec: traversal-free (`is_safe_path`) and free of pathspec magic,
+/// which git spells with a leading `:` (`:(glob)`, `:(exclude)`, `:/`).
+fn is_plain_repo_path(path: &str) -> bool {
+    !path.is_empty() && !path.starts_with(':') && is_safe_path(path)
 }
 
 // ---------- diff assembly ----------
@@ -323,6 +345,17 @@ async fn api_diff(
         .filter(|(k, _)| k == "file")
         .map(|(_, v)| v.clone())
         .collect();
+    // These reach `git diff --` as pathspecs and double as the scoping keys
+    // for fileContents/binaryFiles, so only a plain repo-relative path is
+    // usable: pathspec magic would widen or redirect the diff while matching
+    // none of the keys.
+    if let Some(bad) = files.iter().find(|f| !is_plain_repo_path(f)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": format!("invalid file param: {bad}")})),
+        )
+            .into_response();
+    }
 
     // Computed once regardless of scoping, and threaded into git_diff /
     // git_diff_paths below instead of letting either recompute it — the
@@ -360,8 +393,9 @@ async fn api_diff(
         };
         diffed.map(|p| (p, refs))
     };
-    // A failed git diff (typo'd ref, unreadable object) is an error the
-    // reviewer must see — not an empty "no changes" review (v1 threw a 500).
+    // A failed git diff (typo'd ref, unreadable object) 500s, as in v1: an
+    // empty patch is indistinguishable from a clean tree, so serving one
+    // would show the reviewer a "no changes" review that isn't true.
     let (patch, refs) = match patch_result {
         Ok(pr) => pr,
         Err(msg) => {
@@ -373,13 +407,8 @@ async fn api_diff(
         }
     };
 
-    // No fork: the server already knows its own root, so the basename is
-    // free — `git::repo_name()` re-derived the same answer via
-    // `rev-parse --show-toplevel` on every single request.
     let repo_name = repo_name_from_root(&state);
-    // A full refetch (no file= params) recomputes AND refreshes the branch
-    // cache; a scoped refetch — the hot path a files-changed burst drives —
-    // reads the cache instead of forking `git` again (see BRANCH_CACHE_TTL).
+    // A full refetch refreshes the branch cache; a scoped one reads it.
     let branch = if files.is_empty() {
         refreshed_branch_name(&state)
     } else {
@@ -453,6 +482,11 @@ async fn api_diff(
 
 // ---------- file content ----------
 
+/// The ETag here is a concurrency token for PUT's If-Match, not a cache
+/// validator: inbound If-None-Match is ignored and every GET re-sends the
+/// body. `version=old` serves the HEAD blob, whose tag If-Match could never
+/// satisfy — a token that can only produce a permanent 412 is not handed out
+/// at all.
 async fn api_file_content_get(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -471,14 +505,15 @@ async fn api_file_content_get(
         )
             .into_response();
     };
-    // ETag over the bytes we're about to return, so a client that seeds an
-    // editor from this response can hand the tag back on PUT and find out
-    // whether anything else wrote the file in between.
+    if version.as_str() != "new" {
+        return ([(header::CONTENT_TYPE, mime_for(path))], content).into_response();
+    }
     let tag = git::content_tag(&content);
     (
         [
             (header::CONTENT_TYPE, mime_for(path)),
             (header::ETAG, tag.as_str()),
+            (header::CACHE_CONTROL, "no-cache"),
         ],
         content,
     )
@@ -501,19 +536,26 @@ async fn api_file_content_put(
     // on disk gets its write refused if that's no longer true, instead of
     // silently winning the race. Omitting If-Match keeps the original
     // last-writer-wins behaviour, which every pre-existing caller relies on.
+    // The check and the write it guards share one lock, or two PUTs holding
+    // the same tag would both pass it and the loser's content would vanish.
+    let write_guard = lock(&state.file_write);
     if let Some(expected) = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()) {
-        if expected != "*" {
-            let actual = git::working_tree_content_tag(&state.repo_root, path);
-            if actual.as_deref() != Some(expected) {
-                return (
-                    StatusCode::PRECONDITION_FAILED,
-                    axum::Json(json!({
-                        "error": "file changed on disk since it was read",
-                        "etag": actual,
-                    })),
-                )
-                    .into_response();
-            }
+        let actual = git::working_tree_content_tag(&state.repo_root, path);
+        // RFC 7232: `*` asserts only that a representation exists.
+        let matched = if expected == "*" {
+            actual.is_some()
+        } else {
+            actual.as_deref() == Some(expected)
+        };
+        if !matched {
+            return (
+                StatusCode::PRECONDITION_FAILED,
+                axum::Json(json!({
+                    "error": "file changed on disk since it was read",
+                    "etag": actual,
+                })),
+            )
+                .into_response();
         }
     }
     if !git::write_working_tree_file(&state.repo_root, path, contents) {
@@ -523,6 +565,7 @@ async fn api_file_content_put(
         )
             .into_response();
     }
+    drop(write_guard);
     // Re-anchor before broadcasting, so by the time watchers refetch,
     // comment positions already reflect the edit.
     reanchor_and_broadcast(&state, path);
@@ -569,7 +612,14 @@ async fn api_edits_delete(
         end_line: end_line as u32,
         end_column: end_column as u32,
     };
-    let Some(deleted_text) = splice_delete_range(&state.repo_root, &range) else {
+    // One writer at a time, and the post-delete tag is read under the same
+    // lock that produced it — an undo checks against exactly these bytes.
+    let spliced = {
+        let _guard = lock(&state.file_write);
+        let text = splice_delete_range(&state.repo_root, &range);
+        text.zip(git::working_tree_content_tag(&state.repo_root, file_path))
+    };
+    let Some((deleted_text, expected_tag)) = spliced else {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "delete failed (unsafe path, unreadable file, or range no longer matches the file on disk)"}))).into_response();
     };
 
@@ -582,6 +632,7 @@ async fn api_edits_delete(
             start_line: range.start_line,
             start_column: range.start_column,
             deleted_text: deleted_text.clone(),
+            expected_tag,
         });
         if undo.len() > UNDO_BUFFER_CAP {
             undo.remove(0);
@@ -625,18 +676,27 @@ async fn api_edits_undo(
             }
         }
     };
-    if !splice_insert_text(
-        &state.repo_root,
-        &entry.file_path,
-        entry.start_line,
-        entry.start_column,
-        &entry.deleted_text,
-    ) {
+    let spliced = {
+        let _guard = lock(&state.file_write);
+        splice_insert_text(
+            &state.repo_root,
+            &entry.file_path,
+            entry.start_line,
+            entry.start_column,
+            &entry.deleted_text,
+            &entry.expected_tag,
+        )
+    };
+    if let Err(err) = spliced {
+        // 409 for the one failure the caller can act on — re-read the file and
+        // decide — and 400 for the rest, which no retry fixes.
+        let status = match err {
+            crate::edits::SpliceError::ContentChanged => StatusCode::CONFLICT,
+            _ => StatusCode::BAD_REQUEST,
+        };
         return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(
-                json!({"error": "undo failed (file changed since the delete, or became unwritable)"}),
-            ),
+            status,
+            axum::Json(json!({"error": format!("undo failed ({err})")})),
         )
             .into_response();
     }
@@ -708,7 +768,36 @@ async fn api_comments_post(
     State(state): State<AppState>,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
-    let line_number = body["lineNumber"].as_u64().unwrap_or(0) as u32;
+    // filePath/side/lineNumber are the anchor: a comment stored with a
+    // defaulted one is durable garbage that no filter and no UI can place, so
+    // they are required and checked against the shared schema's domains
+    // rather than defaulted.
+    let (Some(file_path), Some(side), Some(line_number)) = (
+        body["filePath"].as_str(),
+        body["side"].as_str(),
+        body["lineNumber"].as_u64(),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "filePath, side and lineNumber required"})),
+        )
+            .into_response();
+    };
+    if !is_plain_repo_path(file_path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "invalid filePath"})),
+        )
+            .into_response();
+    }
+    if side != "deletions" && side != "additions" {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "side must be 'deletions' or 'additions'"})),
+        )
+            .into_response();
+    }
+    let line_number = line_number as u32;
     // Clamp endLine to never precede lineNumber — inverted ranges from a
     // buggy client would silently confuse every downstream consumer.
     let end_line = (body["endLine"].as_u64().unwrap_or(line_number as u64) as u32).max(line_number);
@@ -738,10 +827,12 @@ async fn api_comments_post(
 
     let comment = ReviewComment {
         id: uuid::Uuid::new_v4().to_string(),
-        file_path: body["filePath"].as_str().unwrap_or_default().to_string(),
-        side: body["side"].as_str().unwrap_or_default().to_string(),
+        file_path: file_path.to_string(),
+        side: side.to_string(),
         line_number,
-        end_line: Some(end_line),
+        // Absent, not echoed, for a single-line comment — the shape types.rs
+        // documents and its snapshot test pins.
+        end_line: (end_line != line_number).then_some(end_line),
         line_content: body["lineContent"].as_str().unwrap_or_default().to_string(),
         body: body["body"].as_str().unwrap_or_default().to_string(),
         status: status.to_string(),
@@ -806,6 +897,18 @@ async fn api_comment_put(
     axum::Json(payload): axum::Json<Value>,
 ) -> Response {
     let new_status = payload["status"].as_str().map(|s| s.to_string());
+    // The three-way union src/types.ts declares. A status outside it matches
+    // no filter anywhere — `krit comments open` and `resolved` both skip it
+    // while the agent stream still shows it.
+    if let Some(s) = &new_status
+        && !matches!(s.as_str(), "open" | "resolved" | "draft")
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "status must be 'open', 'resolved' or 'draft'"})),
+        )
+            .into_response();
+    }
     let (was_draft, updated) = {
         let mut store = lock(&state.store);
         // Only meaningful when a status change was requested (matching v1's
@@ -941,10 +1044,15 @@ async fn api_events(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, std::convert::Infallible>>> {
-    let role = if params.get("role").map(|s| s.as_str()) == Some("cli") {
-        Role::Cli
-    } else {
+    // Only an explicit role=ui counts as a browser. Presence gates idle
+    // shutdown and the Done-reviewing button, so an unlabelled subscriber —
+    // a curl, a script, a consumer written against the v1 endpoint — must not
+    // be able to hold a review open forever by omitting a parameter it never
+    // knew about.
+    let role = if params.get("role").map(|s| s.as_str()) == Some("ui") {
         Role::Ui
+    } else {
+        Role::Cli
     };
     let (mut rx, guard) = state.hub.subscribe(role);
     let initial = state.hub.state_event();
@@ -1095,6 +1203,176 @@ async fn serve_ui(uri: axum::http::Uri) -> Response {
     }
 }
 
+/// The host part of an `authority` (`host`, `host:port`, `[v6]:port`).
+fn authority_host(authority: &str) -> &str {
+    match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => authority.split(':').next().unwrap_or(authority),
+    }
+}
+
+/// True for an authority that names this machine directly rather than through
+/// DNS: a literal address, or `localhost`.
+fn is_local_authority(authority: &str) -> bool {
+    let host = authority_host(authority);
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// DNS-rebinding defense. A loopback client needs no token (see
+/// `require_api_token`), so a page the user merely visits could otherwise
+/// point a hostname it owns at that port and drive the API — including
+/// reading file contents — as same-origin requests from the one position
+/// that is exempt. Names resolved through DNS are therefore refused;
+/// only literal addresses and `localhost`, neither of which an attacker can
+/// repoint, are honoured. A cross-site `Origin` is refused for the same
+/// reason; a request with no Origin at all is a non-browser client (the CLI,
+/// the agent's ws Monitor, curl) and passes.
+async fn guard_local_requests(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.to_string())
+        .or_else(|| req.uri().authority().map(|a| a.to_string()));
+    if !host.as_deref().map(is_local_authority).unwrap_or(false) {
+        return (StatusCode::FORBIDDEN, "krit: refusing a non-local Host").into_response();
+    }
+    if let Some(origin) = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        let authority = origin
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(origin);
+        if !is_local_authority(authority) {
+            return (StatusCode::FORBIDDEN, "krit: refusing a cross-site Origin").into_response();
+        }
+    }
+    next.run(req).await
+}
+
+// ---------- access token ----------
+//
+// The token travels as `krit_token`: a query param on the launch URL, which
+// the first response converts into a cookie the browser replays on every
+// later request. fetch, EventSource and WebSocket all send same-origin
+// cookies, so nothing in the UI has to know the token exists.
+
+/// True for a bind that only accepts connections originating on this machine.
+pub fn is_loopback_bind(host: &str) -> bool {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// The session's API token, minted only for a bind that is reachable from
+/// other machines. A loopback bind gets `None`: the port is already
+/// unreachable off-box, so there is no secret to print, store or leak, and
+/// every existing local workflow keeps working untouched.
+///
+/// 122 bits from the OS CSPRNG — `uuid` v4 draws from `getrandom`, which is
+/// why this needs no crate of its own.
+pub fn mint_api_token(host: &str) -> Option<String> {
+    (!is_loopback_bind(host)).then(|| uuid::Uuid::new_v4().simple().to_string())
+}
+
+fn token_from_query(query: &str) -> Option<&str> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("krit_token="))
+}
+
+fn token_from_cookie(cookie_header: &str) -> Option<&str> {
+    cookie_header
+        .split(';')
+        .map(str::trim)
+        .find_map(|pair| pair.strip_prefix("krit_token="))
+}
+
+/// Length-independent-of-position comparison: a byte-by-byte early return
+/// would let a caller who can time requests recover the token one byte at a
+/// time.
+fn secret_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// The whole authorization rule, in one predicate.
+///
+/// No token (loopback bind) means the server is exactly as open as it always
+/// was. With a token, a peer that is this machine still needs none — the CLI
+/// subcommands, the agent's WebSocket and the auto-opened browser all connect
+/// over loopback even when the listener is bound to `0.0.0.0`, so the two
+/// modes differ only for the requests that a loopback bind would never have
+/// accepted at all.
+fn is_authorized(token: Option<&str>, peer_is_local: bool, presented: Option<&str>) -> bool {
+    match token {
+        None => true,
+        Some(_) if peer_is_local => true,
+        Some(expected) => presented.map(|p| secret_eq(p, expected)) == Some(true),
+    }
+}
+
+async fn require_api_token(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(expected) = state.api_token.as_deref() else {
+        return next.run(req).await;
+    };
+    // Absent connect info fails closed: without a peer address there is no
+    // evidence the request came from this machine.
+    let peer_is_local = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0.ip().is_loopback())
+        .unwrap_or(false);
+    let (authorized, carried_in_url) = {
+        let from_query = req.uri().query().and_then(token_from_query);
+        let from_cookie = req
+            .headers()
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(token_from_cookie);
+        (
+            is_authorized(Some(expected), peer_is_local, from_query.or(from_cookie)),
+            from_query.is_some(),
+        )
+    };
+    if !authorized {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "krit: this server is bound to a non-loopback address, so requests from other \
+             machines must carry the access token krit printed at startup \
+             (?krit_token=... on the URL, which then sets a cookie)",
+        )
+            .into_response();
+    }
+    let mut res = next.run(req).await;
+    // Hand the browser a cookie the moment it arrives with the token in the
+    // URL, so the token need not be threaded through every later API call.
+    // HttpOnly keeps it out of `document.cookie`; SameSite=Strict keeps a
+    // third-party page from riding it.
+    if carried_in_url
+        && let Ok(value) = header::HeaderValue::from_str(&format!(
+            "krit_token={expected}; Path=/; HttpOnly; SameSite=Strict"
+        ))
+    {
+        res.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    res
+}
+
 /// KRIT_LOG=1 traces every request — debugging aid for embedded-webview
 /// clients where devtools aren't reachable.
 async fn log_requests(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
@@ -1109,6 +1387,7 @@ async fn log_requests(req: axum::extract::Request, next: axum::middleware::Next)
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let auth_state = state.clone();
     Router::new()
         .route("/api/diff", get(api_diff))
         .route(
@@ -1135,6 +1414,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/events-ws", get(api_events_ws))
         .fallback(serve_ui)
         .layer(axum::middleware::from_fn(log_requests))
+        // Above the log and every handler, below the rebinding guard:
+        // rebinding protection and authentication are independent controls,
+        // and neither answer depends on the other's.
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            require_api_token,
+        ))
+        // Outermost: a rebound request is refused before any handler or the
+        // request log sees it.
+        .layer(axum::middleware::from_fn(guard_local_requests))
         .with_state(state)
 }
 #[cfg(test)]
@@ -1151,6 +1440,7 @@ mod tests {
             Hub::new(),
             CommentStore::new(None),
             std::env::current_dir().unwrap(),
+            None,
             None,
         )
     }
@@ -1248,6 +1538,175 @@ mod tests {
         let files_set: HashSet<&str> = ["img.png"].into_iter().collect();
         let scoped = filter_paths_by_set(&untracked, &files_set);
         assert_eq!(scoped, vec![&"img.png".to_string()]);
+    }
+
+    // ---------- request-origin guard ----------
+
+    #[test]
+    fn local_authorities_are_accepted() {
+        assert!(is_local_authority("127.0.0.1:8080"));
+        assert!(is_local_authority("localhost:8080"));
+        assert!(is_local_authority("LocalHost"));
+        assert!(is_local_authority("[::1]:8080"));
+        assert!(is_local_authority("192.168.1.7:8080"));
+    }
+
+    #[test]
+    fn dns_names_are_rejected() {
+        // The rebinding vector: a name the attacker controls, resolving to
+        // this loopback port.
+        assert!(!is_local_authority("evil.example.com:8080"));
+        assert!(!is_local_authority("localhost.evil.com"));
+        assert!(!is_local_authority("null"));
+    }
+
+    // ---------- access token ----------
+
+    #[test]
+    fn only_a_non_loopback_bind_mints_a_token() {
+        assert!(is_loopback_bind("127.0.0.1"));
+        assert!(is_loopback_bind("127.5.5.5"));
+        assert!(is_loopback_bind("::1"));
+        assert!(is_loopback_bind("localhost"));
+        assert!(!is_loopback_bind("0.0.0.0"));
+        assert!(!is_loopback_bind("192.168.1.7"));
+        assert!(mint_api_token("127.0.0.1").is_none());
+        let token = mint_api_token("0.0.0.0").expect("non-loopback bind mints a token");
+        assert_eq!(token.len(), 32);
+        assert_ne!(token, mint_api_token("0.0.0.0").unwrap());
+    }
+
+    #[test]
+    fn authorization_turns_on_only_for_off_machine_peers() {
+        // Loopback bind: no token exists, so nothing is ever demanded.
+        assert!(is_authorized(None, true, None));
+        assert!(is_authorized(None, false, None));
+        // Token minted, but a peer on this machine is exempt — that is what
+        // keeps the CLI, the agent ws and the auto-opened tab working.
+        assert!(is_authorized(Some("secret"), true, None));
+        // Off-machine: missing, wrong and right.
+        assert!(!is_authorized(Some("secret"), false, None));
+        assert!(!is_authorized(Some("secret"), false, Some("")));
+        assert!(!is_authorized(Some("secret"), false, Some("secre")));
+        assert!(!is_authorized(Some("secret"), false, Some("Secret")));
+        assert!(is_authorized(Some("secret"), false, Some("secret")));
+    }
+
+    #[test]
+    fn token_is_read_from_either_query_or_cookie() {
+        assert_eq!(token_from_query("krit_token=abc"), Some("abc"));
+        assert_eq!(token_from_query("file=x&krit_token=abc"), Some("abc"));
+        assert_eq!(token_from_query("krit_tokens=abc"), None);
+        assert_eq!(token_from_query("file=x"), None);
+        assert_eq!(token_from_cookie("krit_token=abc"), Some("abc"));
+        assert_eq!(token_from_cookie("other=1; krit_token=abc"), Some("abc"));
+        assert_eq!(token_from_cookie("other=1"), None);
+    }
+
+    // ---------- token middleware, end to end ----------
+
+    const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    /// Serves `build_router` on a fresh loopback port and returns it.
+    /// `with_connect_info` false drops the peer address, which is exactly how
+    /// the middleware sees an off-machine request: it fails closed, so this
+    /// exercises the token-required path without needing a second host.
+    fn spawn_server(
+        rt: &tokio::runtime::Runtime,
+        token: Option<String>,
+        with_connect_info: bool,
+    ) -> u16 {
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let router = build_router(new_state(
+                Hub::new(),
+                CommentStore::new(None),
+                std::env::current_dir().unwrap(),
+                None,
+                token,
+            ));
+            tokio::spawn(async move {
+                let _ = if with_connect_info {
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .await
+                } else {
+                    axum::serve(listener, router).await
+                };
+            });
+            port
+        })
+    }
+
+    #[test]
+    fn a_loopback_peer_is_served_without_a_token() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let port = spawn_server(&rt, Some(TEST_TOKEN.to_string()), true);
+        let res = ureq::get(&format!("http://127.0.0.1:{port}/api/comments"))
+            .call()
+            .expect("loopback peer needs no token even with one minted");
+        assert_eq!(res.status(), 200);
+    }
+
+    #[test]
+    fn a_loopback_bind_mints_nothing_and_demands_nothing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // No token and no peer address: still open, because a loopback bind
+        // must behave exactly as it did before any of this existed.
+        let port = spawn_server(&rt, None, false);
+        let res = ureq::get(&format!("http://127.0.0.1:{port}/api/comments"))
+            .call()
+            .expect("no token configured means no token required");
+        assert_eq!(res.status(), 200);
+    }
+
+    #[test]
+    fn an_off_machine_peer_needs_the_right_token() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let port = spawn_server(&rt, Some(TEST_TOKEN.to_string()), false);
+        let base = format!("http://127.0.0.1:{port}/api/comments");
+
+        // 401, not a 404 or a hang: the caller learns what is wrong.
+        let missing = ureq::get(&base).call().unwrap_err();
+        assert!(matches!(&missing, ureq::Error::Status(401, _)), "{missing}");
+        let wrong = ureq::get(&format!("{base}?krit_token=wrong"))
+            .call()
+            .unwrap_err();
+        assert!(matches!(&wrong, ureq::Error::Status(401, _)), "{wrong}");
+
+        // The token in the URL is accepted and handed back as a cookie, which
+        // is the whole reason the UI needs no change.
+        let ok = ureq::get(&format!("{base}?krit_token={TEST_TOKEN}"))
+            .call()
+            .expect("the minted token is accepted");
+        assert_eq!(ok.status(), 200);
+        let cookie = ok.header("set-cookie").expect("token becomes a cookie");
+        assert!(
+            cookie.starts_with(&format!("krit_token={TEST_TOKEN}")),
+            "{cookie}"
+        );
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+
+        // And that cookie alone authorizes the next request.
+        let replayed = ureq::get(&base)
+            .set("Cookie", &format!("krit_token={TEST_TOKEN}"))
+            .call()
+            .expect("the cookie authorizes later calls");
+        assert_eq!(replayed.status(), 200);
+    }
+
+    // ---------- pathspec-safe file params ----------
+
+    #[test]
+    fn rejects_pathspec_magic_and_traversal() {
+        assert!(is_plain_repo_path("src/main.rs"));
+        assert!(!is_plain_repo_path(""));
+        assert!(!is_plain_repo_path(":(exclude)src/*"));
+        assert!(!is_plain_repo_path(":/"));
+        assert!(!is_plain_repo_path("../etc/passwd"));
     }
 
     // ---------- branch-name TTL cache ----------
