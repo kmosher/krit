@@ -51,9 +51,7 @@ exist.
   `dist/` is gitignored and `build.rs` runs vite, a from-source build of the
   Rust binary needs that exact version to still be on the registry — move to
   1.3.0 final once it publishes. An exact pin has no caret for `pnpm update`
-  to follow, so nothing will prompt you. Note `pnpm install` can silently
-  drop back to 1.2.12 under a `minimumReleaseAge` policy; reinstall with
-  `--config.minimumReleaseAge=0`.
+  to follow, so nothing will prompt you.
 
 - Comment/suggest **drafts don't survive a page reload** (persistence is the
   planned "Stage 8" in docs/design/live-review.md). Warn before advising a
