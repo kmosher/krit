@@ -6,6 +6,12 @@
 > proved out — its exit-code contract moved to ws close semantics (see
 > `skills/diffx/SKILL.md` Step 5), and `diffx wait-for-submit` remains the
 > batch-flow entry point. This doc is retained as design rationale.
+>
+> The project is now `krit` (Rust server, same wire API); "diffx" below is the
+> historical name. **Stage 2's refresh policy has since been superseded by
+> inline editing — read "Inline editing (2026-07)" at the bottom before
+> relying on anything here about `file-written`, refresh modes, or what makes
+> a file "active".**
 
 Design plan for a coordinated set of changes to diffx (`~/ai-tools/diffx`).
 Goal: make diffx work equally well for its two real usage modes — (1) bespoke
@@ -168,12 +174,15 @@ this pass — see that entry below.
   save or `diffx refresh` — both are the user/agent asking directly, so they
   always apply immediately. Only ambient fs-watcher discovery
   (`file-changed`) is subject to manual/live-unless-active/ultra policy.
+  *(Superseded: an open inline edit session now defers every event type,
+  `file-written` included. See below.)*
 - **Stage 2 — "active" file = open draft or open FileEditorModal.**
   live-unless-active's activity signal doesn't (yet) include "the file is
   currently in the scrolled viewport" — only an open comment/suggest draft
   or the file-editor modal counts. Scroll-position activity would need
   wiring `onActiveFileChange` into the same set and wasn't worth the extra
-  surface for this pass.
+  surface for this pass. *(Superseded: an open inline edit session is a third
+  activity signal, and a stronger one. See below.)*
 - **Stage 3 — re-anchoring scoped to open, additions-side comments.**
   Deletion-side comments anchor to the diff's "old" side, which by
   definition has no live counterpart in the working tree to re-anchor
@@ -241,3 +250,72 @@ this pass — see that entry below.
 - **Stage 8 — no undo-buffer persistence.** The design's "persist ...
   undo buffer" doesn't apply: no undo buffer exists (that's Stage 6's, not
   built this pass). Only comments (including drafts) persist.
+
+## Inline editing (2026-07)
+
+`@pierre/diffs` 1.3.0 brought an editor of its own (`item.edit`, `EditProvider`,
+`onItemEditComplete`), and it — not `FileEditorModal` — is now the main editing
+flow: you type in the diff, in place, on the lines you were reading.
+`FileEditorModal` stays as the drop-back for "I want the whole file, including
+the parts the diff doesn't show", reached from the ⤢ in the file header.
+
+This changes the refresh policy above in three ways.
+
+**An open edit session defers every event type, in every refresh mode.** The
+Stage 2 split — ambient discovery is gated, direct writes always apply — was
+built when nothing in the UI held document state that a refetch could destroy.
+An edit session does: the refetch replaces the item's `fileDiff`, and the live
+editor is rendering from it. So `editingFiles` is checked in `useDiff` ahead of
+the per-event branches, and it wins over `ultra` and over `file-written` too.
+This is the only case where a mode says "apply immediately" and krit doesn't.
+
+**A queued change is offered, not applied.** The file header grows an Apply
+button; taking it fetches the working-tree content and hands the delta to the
+live editor via `Editor.applyEdits`, which Pierre makes history-equivalent to
+typing — so the agent's write arrives as *one* undo step the reader can ⌘Z away
+like their own. `computeSingleEdit` (`src/ui/utils/textEdits.ts`) turns the two
+full texts into that one replacement; it deliberately produces a single
+possibly-wide range rather than a minimal edit script, because a wide range is
+one undo entry and correctness at the surrogate-pair and CRLF boundaries is
+easier to state than to diff.
+
+**Saving is checked, not just conventional.** Ending a session writes the whole
+file, so a queued change outstanding at Done would be clobbered. Two mechanisms,
+deliberately layered:
+
+- The header asks — inline, never `confirm()`. A native modal freezes the page
+  for anything driving the browser programmatically, and krit's whole reason to
+  exist is being driven by an agent. The same rule holds for
+  `FileEditorModal`'s discard prompt.
+- `PUT /api/file-content` honors `If-Match` against an ETag over the
+  working-tree bytes and answers **412** on a mismatch. The question above is a
+  convention, and every convention loses a race eventually; this is the part
+  that can't be raced past. It is opt-in per request — a PUT without `If-Match`
+  is last-writer-wins, as it always was — so no existing caller changed
+  behaviour. A refused inline save is held in a conflict bar rather than
+  reported as lost, since Pierre has torn the editor down by the time the
+  server answers.
+
+**Deferred remounts.** A file appearing or vanishing from the diff normally
+remounts the whole CodeView (see the Stage 1 decision above). That destroys
+every editor instance, and Pierre's teardown path pushes no completion — the
+typing would go silently. So the remount is owed rather than taken while any
+session is open, and runs when the last one closes. The item list stays one
+file stale until then, which is the same bargain `live-unless-active` already
+makes.
+
+### Still open
+
+- **`file-written{path}` remains agent-visible** (`agent_visible` in
+  `server.rs` filters only `path: None`). Inline Done makes it fire where the
+  modal used to be a rare event, but the rate is still one frame per completed
+  human edit session — bounded by a person clicking a button, which is exactly
+  the human-originated signal that filter is meant to let through. Kept on
+  purpose; revisit if an agent ever starts calling `PUT /api/file-content`
+  itself, at which point it would be paying to hear its own writes.
+- **Drafts still don't survive a reload.** Stage 8 persisted comments, not
+  in-progress form text; an inline edit session is likewise memory-only. Warn
+  before advising a refresh mid-review.
+- **An edit session and a comment draft open on the same file at once is
+  untested.** Both live in Pierre's shadow root, historically where the WebKit
+  trouble was.
