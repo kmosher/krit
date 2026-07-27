@@ -309,6 +309,16 @@ body {
     background: transparent;
 }
 
+.btn-danger {
+    background: transparent;
+    color: var(--danger);
+    border-color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
 .btn-sm {
     padding: 4px 12px;
     font-size: 12px;
@@ -504,6 +514,32 @@ body {
     background: color-mix(in srgb, var(--warning) 22%, transparent);
 }
 
+/* "Done was pressed but a change is queued" — the in-header stand-in for the
+   confirm() dialog this used to be. Same warning palette as the Apply button
+   it sits next to, since they're two answers to the same question. */
+.codeview-confirm-save {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    font-size: 11px;
+    color: var(--warning);
+}
+
+.codeview-confirm-save-btn {
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--warning);
+    border: 1px solid var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+
+.codeview-confirm-save-btn:hover {
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+}
+
 .codeview-edit-btn-secondary {
     margin-left: 4px;
     padding: 2px 6px;
@@ -549,6 +585,22 @@ body {
     font-size: 12px;
     color: var(--warning, #d97706);
 }
+.editor-modal-confirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    font-size: 12px;
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
+    border-bottom: 1px solid var(--border);
+}
+
+.editor-modal-confirm .btn {
+    padding: 4px 12px;
+    font-size: 12px;
+}
+
 .editor-modal-error {
     padding: 8px 16px;
     color: var(--danger, #d1242f);

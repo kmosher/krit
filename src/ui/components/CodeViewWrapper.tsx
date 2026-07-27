@@ -144,6 +144,10 @@ interface Props {
   // being edited — everywhere else the file tree and toolbar already say so.
   staleFiles: Set<string>
   onApplyStale(filePath: string): void
+  // Files whose Done click is waiting on a "save over the queued change?"
+  // answer. The header renders the question; App owns the set.
+  confirmSaveFiles: Set<string>
+  onCancelSaveConfirm(filePath: string): void
   // An inline edit session ended having changed something. Fires once per
   // session, not per keystroke; the parent writes `contents` to the working
   // tree. Pierre skips it entirely for sessions that made no changes.
@@ -282,6 +286,8 @@ export const CodeViewWrapper = memo(
       onEditComplete,
       staleFiles,
       onApplyStale,
+      confirmSaveFiles,
+      onCancelSaveConfirm,
       onActiveDraftsChange,
     },
     ref,
@@ -540,22 +546,27 @@ export const CodeViewWrapper = memo(
       setStructuralRevision((r) => r + 1)
     }, [editingFiles])
 
-    // renderHeaderPrefix reads staleFiles through its closure, so an item whose
-    // staleness flipped needs a version bump to re-run it and show (or drop)
-    // the Apply button. Only files being edited render it, so only those need
-    // the bump. The other order — stale first, edit second — is covered by the
-    // edit effect above, which bumps unconditionally on entry; this one only
-    // handles staleness moving while a session is already open.
-    const lastStaleRef = useRef<Set<string>>(new Set())
+    // renderHeaderPrefix reads staleFiles and confirmSaveFiles through its
+    // closure, so an item whose queued-change state moved needs a version bump
+    // to re-run it and show (or drop) the Apply button and the save-anyway
+    // question. Only files being edited render either, so only those need the
+    // bump. The other order — one of these flipping first, edit second — is
+    // covered by the edit effect above, which bumps unconditionally on entry;
+    // this one handles movement while a session is already open.
+    const lastEditHeaderRef = useRef<Map<string, string>>(new Map())
     useEffect(() => {
-      const prev = lastStaleRef.current
+      const prev = lastEditHeaderRef.current
+      const next = new Map<string, string>()
+      for (const file of files) {
+        next.set(file.name, `${staleFiles.has(file.name)}:${confirmSaveFiles.has(file.name)}`)
+      }
       syncItems(
         viewerRef.current,
         files,
-        (name) => editingFiles.has(name) && prev.has(name) !== staleFiles.has(name),
+        (name) => editingFiles.has(name) && prev.get(name) !== next.get(name),
       )
-      lastStaleRef.current = new Set(staleFiles)
-    }, [files, staleFiles, editingFiles])
+      lastEditHeaderRef.current = next
+    }, [files, staleFiles, confirmSaveFiles, editingFiles])
 
     // Push comment-count changes into header metadata. We bump version for
     // any file whose count changed so renderHeaderMetadata re-runs.
@@ -896,6 +907,8 @@ export const CodeViewWrapper = memo(
         if (item.type !== 'diff') return null
         const viewed = viewedFiles.has(item.id)
         const editing = editingFiles.has(item.id)
+        const stale = staleFiles.has(item.id)
+        const confirmingSave = editing && confirmSaveFiles.has(item.id)
         const empty =
           item.fileDiff.splitLineCount === 0 && item.fileDiff.unifiedLineCount === 0
         return (
@@ -937,7 +950,7 @@ export const CodeViewWrapper = memo(
             >
               {editing ? 'Done' : 'Edit'}
             </button>
-            {editing && staleFiles.has(item.id) && (
+            {editing && stale && (
               <button
                 type="button"
                 className="codeview-stale-btn"
@@ -950,6 +963,35 @@ export const CodeViewWrapper = memo(
               >
                 ⚠ changed on disk — Apply
               </button>
+            )}
+            {confirmingSave && (
+              <span className="codeview-confirm-save" role="alert">
+                Save over it?
+                <button
+                  type="button"
+                  className="codeview-confirm-save-btn"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    // Second Done — App reads the pending question as the
+                    // answer and lets the save through.
+                    onToggleEdit(item.id)
+                  }}
+                >
+                  Save anyway
+                </button>
+                <button
+                  type="button"
+                  className="codeview-confirm-save-btn"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    onCancelSaveConfirm(item.id)
+                  }}
+                >
+                  Keep editing
+                </button>
+              </span>
             )}
             {onEditFile && !editing && (
               <button

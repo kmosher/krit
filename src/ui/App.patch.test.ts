@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { splitPatchFragments, computeFileStats, parseFileFragment } from './App'
+import { splitPatchFragments, computeFileStats, parseFileFragment, editToggleAction } from './App'
 import type { FileContentsMap } from './hooks/useDiff'
 
 function fragment(path: string, additions = 1, deletions = 1): string {
@@ -71,5 +71,24 @@ describe('parseFileFragment', () => {
     expect(file.name).toBe('src/weird.rs')
     expect(file.isPartial).toBe(true)
     expect(file.hunks).toEqual([])
+  })
+})
+
+describe('editToggleAction', () => {
+  it('toggles freely when nothing is queued', () => {
+    expect(editToggleAction({ editing: false, stale: false, confirming: false })).toBe('toggle')
+    expect(editToggleAction({ editing: true, stale: false, confirming: false })).toBe('toggle')
+  })
+
+  it('asks before saving over a queued change', () => {
+    expect(editToggleAction({ editing: true, stale: true, confirming: false })).toBe('ask')
+  })
+
+  it('lets the save through once the question is already up', () => {
+    expect(editToggleAction({ editing: true, stale: true, confirming: true })).toBe('toggle')
+  })
+
+  it('never asks on the way in — a queued change is not a reason to refuse to open an editor', () => {
+    expect(editToggleAction({ editing: false, stale: true, confirming: false })).toBe('toggle')
   })
 })

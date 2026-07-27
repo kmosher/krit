@@ -132,6 +132,18 @@ interface FileCacheEntry {
   stats: { additions: number; deletions: number }
 }
 
+// What a click on a file's Edit/Done button should do. Split out so the one
+// rule that matters here — a session with a queued change never saves on the
+// first Done, and always saves on the second — is checkable without standing
+// up a CodeView.
+export function editToggleAction(state: {
+  editing: boolean
+  stale: boolean
+  confirming: boolean
+}): 'toggle' | 'ask' {
+  return state.editing && state.stale && !state.confirming ? 'ask' : 'toggle'
+}
+
 export function App() {
   const { settings, loaded, updateSettings } = useSettings()
   // Active file editor: path + the working-tree contents loaded for editing.
@@ -216,29 +228,46 @@ export function App() {
     }
   }, [editingFile])
 
-  // Ending a session saves, and the save is a whole-file overwrite with no
-  // base-version check server-side — so leaving edit mode with a queued change
-  // outstanding would silently drop whatever wrote the file while you typed.
-  // The queued change is the one thing the editor cannot merge for you, so ask
-  // rather than pick: stay in edit mode (Apply, then decide) or overwrite.
+  // Files where Done was pressed while a change was queued, and the "save
+  // anyway?" question is on screen. Rendered into the file header rather than
+  // asked with confirm(): a native dialog blocks the page for anything driving
+  // the browser programmatically, and being driven by an agent is the workflow
+  // krit exists for.
+  const [confirmSaveFiles, setConfirmSaveFiles] = useState<Set<string>>(() => new Set())
+  const clearConfirmSave = useCallback((filePath: string) => {
+    setConfirmSaveFiles((prev) => {
+      if (!prev.has(filePath)) return prev
+      const next = new Set(prev)
+      next.delete(filePath)
+      return next
+    })
+  }, [])
+
+  // Ending a session saves, and the save is a whole-file overwrite — so leaving
+  // edit mode with a queued change outstanding would drop whatever wrote the
+  // file while you typed. The queued change is the one thing the editor cannot
+  // merge for you, so ask rather than pick: the header offers Apply (pull it in
+  // first), Save anyway, or Keep editing. A second Done with the question
+  // already up is the "save anyway" answer.
   const handleToggleEdit = useCallback(
     (filePath: string) => {
-      const leaving = inlineEditFiles.has(filePath)
-      if (leaving && staleFiles.has(filePath)) {
-        const overwrite = confirm(
-          `${filePath} changed on disk while you were editing.\n\n` +
-            `Saving now overwrites that change.\n\n` +
-            `OK to save anyway, or Cancel to keep editing (use Apply to pull the change in first).`,
-        )
-        if (!overwrite) return
+      const action = editToggleAction({
+        editing: inlineEditFiles.has(filePath),
+        stale: staleFiles.has(filePath),
+        confirming: confirmSaveFiles.has(filePath),
+      })
+      if (action === 'ask') {
+        setConfirmSaveFiles((prev) => new Set(prev).add(filePath))
+        return
       }
+      clearConfirmSave(filePath)
       setInlineEditFiles((prev) => {
         const next = new Set(prev)
         if (!next.delete(filePath)) next.add(filePath)
         return next
       })
     },
-    [inlineEditFiles, staleFiles],
+    [inlineEditFiles, staleFiles, confirmSaveFiles, clearConfirmSave],
   )
 
   // Inline edit session ended with changes. Pierre tears the editor down before
@@ -267,8 +296,9 @@ export function App() {
       // file-written refetch supersedes it either way. Without this the badge
       // would stay lit against a file that no longer differs from disk.
       dismissStale(filePath)
+      clearConfirmSave(filePath)
     },
-    [dismissStale],
+    [dismissStale, clearConfirmSave],
   )
 
   // Applying a queued change to a file with an open edit session goes through
@@ -285,6 +315,9 @@ export function App() {
     async (filePath: string) => {
       if (applyingRef.current.has(filePath)) return
       applyingRef.current.add(filePath)
+      // Pulling the change in answers the "save anyway?" question — there is
+      // nothing left to clobber once it's in the document.
+      clearConfirmSave(filePath)
       try {
         if (inlineEditFiles.has(filePath)) {
           const res = await fetch(
@@ -304,7 +337,7 @@ export function App() {
         applyingRef.current.delete(filePath)
       }
     },
-    [inlineEditFiles, applyStaleFile, dismissStale],
+    [inlineEditFiles, applyStaleFile, dismissStale, clearConfirmSave],
   )
 
   // The toolbar's refresh button, which means three different things: with
@@ -591,6 +624,8 @@ export function App() {
             onEditComplete={handleInlineEditComplete}
             staleFiles={staleFiles}
             onApplyStale={handleApplyStale}
+            confirmSaveFiles={confirmSaveFiles}
+            onCancelSaveConfirm={clearConfirmSave}
             onActiveDraftsChange={setActiveDraftFiles}
           />
         </main>
