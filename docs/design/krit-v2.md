@@ -72,12 +72,12 @@ Vertical slices, each leaving a runnable demo — never an 80%-done valley:
 5. **Polish**: drafts, char-anchored comments, suggest-edit apply — contract
    parity checklist against v1.
 
-**Status: landed on `main` (2026-07-22) — krit is the primary tool; the v1
-Node CLI stays installed as fallback. All five slices are live-verified.** Beyond the skeleton, krit also
+**Status: landed on `main` (2026-07-22) — krit is the only tool; all five
+slices are live-verified.** Beyond the skeleton, krit also
 carries: a `.gitignore`-aware watcher (`git check-ignore` per changed path),
 a human-only agent event stream (agents don't hear their own edits), the
-`launcher: "app"` deep-link path (reuses the `diffx://` scheme the desktop
-app claims — a `krit://` identity would be an app-side change), and
+`launcher: "app"` deep-link path (`krit://review?url=…`, the scheme the
+desktop app registers), and
 `KRIT_LOG=1` request tracing for debugging embedded-webview clients. krit is
 now in field use; remaining work is bugfixes from real sessions plus the
 tracks below.
@@ -88,13 +88,10 @@ subscribers, and the v1 UI opens two EventSources per tab (`useDiff` +
 
 ## Coexistence with v1
 
-- v1 (`diffx`, Node) stays installed and untouched on `main`; krit lives on
-  the `v2` branch.
-- Disjoint namespaces: binary `krit`, state file
-  `$CLAUDE_TMPDIR/krit-state.json`, own port. A v2 bug mid-review means:
-  kill krit, launch `diffx`, same workflow.
-- The skill grows a krit variant (or a binary probe) once slice 3 lands;
-  until then the skill remains v1-only.
+Over. The v1 Node CLI was removed in 2026-07; krit on `main` is the only
+implementation, and the skill targets it exclusively. The disjoint namespace
+chosen for the side-by-side period (binary `krit`, state file
+`$CLAUDE_TMPDIR/krit-state.json`, own port) is simply what krit uses now.
 
 ## Frontend track (independent, same branch)
 

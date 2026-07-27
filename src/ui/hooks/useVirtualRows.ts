@@ -1,10 +1,10 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import type { DependencyList, RefObject, UIEvent } from 'react'
 
-// Fixed-row-height windowing, shared by FileTree and CommentTracker: both
-// hand-rolled the same scrollTop state + onScroll handler, a
-// ResizeObserver-driven viewport-height effect, and the same
-// startIndex/endIndex formula before this was pulled out.
+// Fixed-row-height windowing for the two sidebars (FileTree and
+// CommentTracker), which share one scrollTop + measured-viewport model and one
+// startIndex/endIndex formula. The main diff pane is not a caller — Pierre
+// virtualizes that itself.
 
 export interface UseVirtualRowsOptions {
   /** Total row count before windowing. */

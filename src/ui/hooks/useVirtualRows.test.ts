@@ -47,18 +47,24 @@ describe('computeRowWindow', () => {
   })
 })
 
-// Smoke test that the hook itself mounts under happy-dom + Testing Library —
-// proves the component/hook test path works, not just pure functions. Before a
-// scroll or measurement, it reports a valid (top, zero-height-viewport) window.
+// Exercises the hook under happy-dom + Testing Library, so the DOM-dependent
+// half (refs, scroll handler, viewport measurement) is covered too.
 describe('useVirtualRows (hook)', () => {
-  it('mounts and returns a coherent initial window and stable handles', () => {
-    const { result } = renderHook(() =>
-      useVirtualRows({ itemCount: 100, rowHeight: 20, overscan: 4 }),
-    )
+  const render = () =>
+    renderHook(() => useVirtualRows({ itemCount: 100, rowHeight: 20, overscan: 4 }))
+
+  it('starts at index 0 with full totalHeight before any scroll or measurement', () => {
+    const { result } = render()
     expect(result.current.startIndex).toBe(0)
-    expect(result.current.totalHeight).toBe(2000)
     expect(result.current.offsetY).toBe(0)
-    expect(typeof result.current.onScroll).toBe('function')
-    expect(result.current.scrollRef).toBeDefined()
+    expect(result.current.totalHeight).toBe(2000)
+  })
+
+  it('keeps onScroll and scrollRef identities stable across re-renders', () => {
+    const { result, rerender } = render()
+    const { onScroll, scrollRef } = result.current
+    rerender()
+    expect(result.current.onScroll).toBe(onScroll)
+    expect(result.current.scrollRef).toBe(scrollRef)
   })
 })

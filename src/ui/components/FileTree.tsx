@@ -258,10 +258,10 @@ function FileTreeImpl({
   onToggleCollapse,
 }: FileTreeProps) {
   const [filter, setFilter] = useState('')
-  // Directory expand/collapse used to be local state on each TreeDir
-  // instance; lifted here (keyed by path) so the row list can be flattened
-  // and virtualized instead of walked as a live component tree. Absent from
-  // the set == expanded, matching the old `defaultExpanded={true}` default.
+  // Directory expand/collapse lives here, keyed by path, rather than inside
+  // each directory row: the row list is flattened and virtualized, so a
+  // collapsed row's component may not be mounted to hold its own state.
+  // Absent from the set == expanded.
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(() => new Set())
 
   const filteredFiles = useMemo(() => {

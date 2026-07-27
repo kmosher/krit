@@ -33,9 +33,11 @@ exist.
   note stays because the failure is silent and the diagnosis is not obvious.)
 - **Never `confirm()` / `alert()` for a decision.** A native dialog blocks the
   page for anything driving the browser programmatically, which is what krit
-  is for — an agent that hits one deadlocks. Both prompts are inline strips
-  now (the file header's save-anyway question, `FileEditorModal`'s discard);
-  keep it that way.
+  is for — an agent that hits one deadlocks. This covers plain `alert()` on a
+  failure path too: a frozen page is a frozen page, and a failure is exactly
+  when nobody is watching. Everything routes through inline strips — the file
+  header's save-anyway question, `FileEditorModal`'s discard, the save-conflict
+  bars and the error strips in `.strip-stack`; keep it that way.
 
 ## Non-obvious behavior (deliberate, don't "fix")
 
