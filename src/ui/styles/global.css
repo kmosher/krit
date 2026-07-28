@@ -596,9 +596,24 @@ body {
     border-bottom: 1px solid var(--border);
 }
 
-.editor-modal-confirm .btn {
+.editor-modal-confirm .btn,
+.comment-form-confirm .btn {
     padding: 4px 12px;
     font-size: 12px;
+}
+
+/* Same inline-strip treatment as the modal's discard prompt — see the
+   no-native-dialogs rule. */
+.comment-form-confirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
 }
 
 .editor-modal-error {
@@ -1337,9 +1352,14 @@ body {
 }
 
 /* File tree */
+/* Takes whatever the tracker does not, and scrolls. Previously this was
+   `flex: 0 1 auto` on both panes, which makes them shrink in proportion to
+   their content: a long file tree kept most of an overflowing sidebar and
+   squeezed the comment list to a sliver, however few files or many comments
+   there were. */
 .ft {
     font-size: 13px;
-    flex: 0 1 auto;
+    flex: 1 1 0;
     overflow-y: auto;
     min-height: 0;
 }
@@ -1529,14 +1549,49 @@ body {
 }
 
 /* Comment tracker */
+/* A *cap*, not a fixed height: a two-comment list still shrinks to its content
+   and leaves the rest to the file tree. The cap only bites once there are
+   enough comments to want more, which is when the split matters. The tracker
+   is the bottom pane, so the splitter drags this value. */
 .ct {
     flex: 0 1 auto;
+    max-height: var(--tracker-fraction, 50%);
     overflow-y: auto;
     min-height: 0;
-    margin-top: auto;
     border-top: 1px solid var(--border);
     padding-bottom: 10px;
     font-size: 13px;
+}
+
+.sidebar-splitter {
+    flex: 0 0 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: row-resize;
+    /* The visible line is .ct's border-top; this is the grab target around it,
+       deliberately taller than it looks so it isn't a pixel hunt. */
+    margin-bottom: -1px;
+    background: transparent;
+}
+
+.sidebar-splitter:hover .sidebar-splitter-grip,
+.sidebar-splitter:focus-visible .sidebar-splitter-grip {
+    opacity: 1;
+}
+
+.sidebar-splitter:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+}
+
+.sidebar-splitter-grip {
+    width: 28px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--text-secondary);
+    opacity: 0;
+    transition: opacity 0.12s ease;
 }
 
 .ct-header {

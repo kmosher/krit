@@ -12,6 +12,11 @@ import { DiffViewer } from './components/DiffViewer'
 import type { CodeViewWrapperHandle } from './components/CodeViewWrapper'
 import { FileTree } from './components/FileTree'
 import { CommentTracker } from './components/CommentTracker'
+import {
+  SidebarSplitter,
+  parseStoredFraction,
+  DEFAULT_TRACKER_FRACTION,
+} from './components/SidebarSplitter'
 import { FileEditorModal } from './components/FileEditorModal'
 import { UndoToast } from './components/UndoToast'
 import type { SelectionAnchor } from './utils/selectionMapping'
@@ -250,6 +255,14 @@ export function App() {
       return false
     }
   })
+  const [trackerFraction, setTrackerFraction] = useState(() => {
+    try {
+      return parseStoredFraction(localStorage.getItem('krit-tracker-fraction'))
+    } catch {
+      return DEFAULT_TRACKER_FRACTION
+    }
+  })
+  const sidebarRef = useRef<HTMLElement | null>(null)
   const { viewedFiles, setViewed } = useViewed()
   const diffViewerRef = useRef<CodeViewWrapperHandle>(null)
 
@@ -591,6 +604,12 @@ export function App() {
     } catch {}
   }, [sidebarCollapsed])
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('krit-tracker-fraction', String(trackerFraction))
+    } catch {}
+  }, [trackerFraction])
+
   const untrackedSet = useMemo(() => new Set(untrackedFiles), [untrackedFiles])
 
   // Per-file cache keyed by path, persisted across renders. A file's cached
@@ -753,7 +772,11 @@ export function App() {
         onPostDrafts={postDrafts}
       />
       <div className="app-body">
-        <aside className={`sidebar ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+        <aside
+          ref={sidebarRef}
+          className={`sidebar ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+          style={{ '--tracker-fraction': `${trackerFraction * 100}%` } as React.CSSProperties}
+        >
           <FileTree
             files={files}
             activeFile={activeFile}
@@ -767,6 +790,13 @@ export function App() {
             collapsed={sidebarCollapsed}
             onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
           />
+          {!sidebarCollapsed && comments.length > 0 && (
+            <SidebarSplitter
+              fraction={trackerFraction}
+              onChange={setTrackerFraction}
+              containerRef={sidebarRef}
+            />
+          )}
           {!sidebarCollapsed && (
             <CommentTracker
               comments={comments}

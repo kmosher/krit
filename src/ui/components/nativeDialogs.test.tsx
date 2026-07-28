@@ -219,14 +219,11 @@ describe('no native dialog on any decision path', () => {
     expect(onSubmitReview).toHaveBeenCalled()
   })
 
-  // BUG (not fixed here — reported instead): CommentForm's CodeMirror keymap
-  // calls window.confirm('Discard your suggested rewrite?') when Escape is
-  // pressed inside a suggest-mode rewrite that has been edited
-  // (CommentForm.tsx, the Escape binding in `cmExtensions`). That is the exact
-  // pattern CLAUDE.md forbids, on the path an agent is most likely to take:
-  // press Escape to back out of a suggestion, and the page freezes.
-  // Un-skip once the prompt is an inline strip like FileEditorModal's.
-  it.skip('CommentForm: Escape in an edited suggest-mode rewrite', () => {
+  // Escape-to-back-out of a suggestion is the path an agent is most likely to
+  // take, so a native confirm() here froze the page for exactly the caller
+  // krit exists to serve. The prompt is an inline strip now: Escape asks,
+  // "Discard" cancels the form, "Keep editing" returns to the rewrite.
+  it('CommentForm: Escape in an edited suggest-mode rewrite asks inline', () => {
     const onCancel = vi.fn()
     const { container } = render(
       <CommentForm
@@ -238,7 +235,46 @@ describe('no native dialog on any decision path', () => {
         onCancel={onCancel}
       />,
     )
-    // Throws "confirm() blocks the page" today.
+    fireEvent.keyDown(container.querySelector('.cm-content') as HTMLElement, { key: 'Escape' })
+    // The first Escape must not discard on its own — that is the edit the
+    // prompt exists to protect.
+    expect(onCancel).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+    expect(onCancel).toHaveBeenCalled()
+  })
+
+  it('CommentForm: "Keep editing" returns to the rewrite instead of discarding', () => {
+    const onCancel = vi.fn()
+    const { container } = render(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 1"
+        initialSuggestMode
+        initialSuggestionText="const a = 2"
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    fireEvent.keyDown(container.querySelector('.cm-content') as HTMLElement, { key: 'Escape' })
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('CommentForm: Escape with an untouched rewrite cancels without asking', () => {
+    // Nothing to lose means nothing to ask about — a prompt on every Escape
+    // would be its own kind of obstacle.
+    const onCancel = vi.fn()
+    const { container } = render(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 1"
+        initialSuggestMode
+        initialSuggestionText="const a = 1"
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
     fireEvent.keyDown(container.querySelector('.cm-content') as HTMLElement, { key: 'Escape' })
     expect(onCancel).toHaveBeenCalled()
   })
@@ -258,18 +294,13 @@ describe('no native dialog anywhere in the comment/editing sources', () => {
   ]
   const CALL = /(?:\bwindow\s*\.\s*)?\b(confirm|alert|prompt)\s*\(/g
 
-  // The one violation that exists today, pinned so the scan can stay enabled
-  // and catch any *new* one. See the skipped test above; delete this entry
-  // together with the call.
-  const KNOWN_VIOLATIONS: Record<string, number> = { 'CommentForm.tsx': 1 }
-
   for (const file of SOURCES) {
     it(`${file} calls no native dialog`, () => {
       const src = readFileSync(new URL(file, import.meta.url), 'utf8')
       // Strip comments so prose about confirm() doesn't read as a call.
       const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
       const hits = [...code.matchAll(CALL)].map((m) => m[0])
-      expect(hits).toHaveLength(KNOWN_VIOLATIONS[file] ?? 0)
+      expect(hits).toHaveLength(0)
     })
   }
 })

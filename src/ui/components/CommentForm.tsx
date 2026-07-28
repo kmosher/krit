@@ -138,6 +138,7 @@ export function CommentForm({
   // edit to lose" check.
   const suggestionDirtyRef = useRef(false)
   suggestionDirtyRef.current = suggestionText !== originalLines && suggestionText.trim() !== ''
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false)
 
   // Shared by both "Comment"/"Suggest rewrite" (dispatch=onSubmit) and "Save
   // as draft" (dispatch=onSaveDraft) — same validation and suggestion-payload
@@ -186,8 +187,11 @@ export function CommentForm({
   //   behavior), we return false and let CM's own keymap handle it first,
   //   rather than discarding the whole form on the very first Escape press.
   //   Only once CM has nothing left to do with Escape do we treat it as
-  //   "cancel" — and if the rewrite has actually been edited, confirm before
-  //   discarding it.
+  //   "cancel" — and if the rewrite has actually been edited, ask before
+  //   discarding it, as an inline strip rather than a native confirm(): a
+  //   modal dialog freezes the whole page for anything driving the browser
+  //   programmatically, and Escape-to-back-out is exactly the path an agent
+  //   takes. Same strip as FileEditorModal's discard.
   // - syntaxHighlighting(defaultHighlightStyle) is included explicitly because
   //   basicSetup's copy uses fallback:true, which can no-op when a language
   //   extension reconfigures in after mount.
@@ -200,8 +204,9 @@ export function CommentForm({
             key: 'Escape',
             run: (view) => {
               if (view.state.selection.ranges.length > 1) return false
-              if (suggestionDirtyRef.current && !window.confirm('Discard your suggested rewrite?')) {
-                return true // handled — swallow the key, but don't cancel
+              if (suggestionDirtyRef.current) {
+                setConfirmingDiscard(true)
+                return true // handled — swallow the key, but don't cancel yet
               }
               cancelRef.current()
               return true
@@ -270,6 +275,28 @@ export function CommentForm({
         </>
       ) : (
         bodyField
+      )}
+      {confirmingDiscard && (
+        <div className="comment-form-confirm" role="alert">
+          <span>Discard your suggested rewrite?</span>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={() => {
+              setConfirmingDiscard(false)
+              cancelRef.current()
+            }}
+          >
+            Discard
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setConfirmingDiscard(false)}
+          >
+            Keep editing
+          </button>
+        </div>
       )}
       <div className="comment-form-actions">
         <button
