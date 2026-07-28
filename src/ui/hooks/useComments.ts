@@ -86,7 +86,19 @@ export function useComments(onError?: (message: string) => void) {
     data: comments = [],
     isError: loadFailed,
     error: loadError,
-  } = useQuery({ queryKey: COMMENTS_KEY, queryFn: fetchComments, refetchInterval: 3000 })
+  } = useQuery({
+    queryKey: COMMENTS_KEY,
+    queryFn: fetchComments,
+    refetchInterval: 3000,
+    // react-query stops an interval while `document.visibilityState` is
+    // 'hidden' — sensible for a page a person is not looking at, wrong for
+    // this one. krit exists to be driven programmatically, and an automated
+    // browser reports itself hidden, so the default leaves an agent staring
+    // at whatever the comment list held when it last had focus, forever and
+    // without a symptom. The polling cost is one small GET every 3s against
+    // a server on loopback.
+    refetchIntervalInBackground: true,
+  })
 
   // The poll retries every 3s, so reporting each failure would stack a strip
   // every three seconds for as long as the server is down. Keyed on the

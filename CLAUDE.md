@@ -53,6 +53,16 @@ skill together when you do.
   agents pay tokens per frame and shouldn't hear themselves work (`server.rs`,
   `agent_visible`). The UI's SSE stream (`/api/events`) carries everything.
   If a WS test "sees no events", check this before debugging the watcher.
+- **The comment poll sets `refetchIntervalInBackground: true`** (`useComments`),
+  overriding react-query's default of pausing an interval while the page is
+  unfocused. An automated browser reports itself hidden the whole time it is
+  driving krit, so the default freezes the comment list at whatever it held on
+  load — no error, no stale badge, just a list that stops being true. The tell
+  is again an asymmetry: `krit refresh` and every other SSE-driven update keep
+  working, because only the poll consults focus. A hidden tab also freezes
+  `requestAnimationFrame`, which is why `attachEditors` forces a synchronous
+  render rather than waiting for a frame — when something updates for a human
+  and not for an agent, suspect the tab's visibility before the feature.
 - The launch message says "Asked the krit app to open" because `open::that`
   Ok only means the OS accepted the URL; a 10s post-launch check reports if
   no UI actually connected.

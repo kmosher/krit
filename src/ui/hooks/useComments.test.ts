@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { useComments } from './useComments'
 import type { ReviewComment } from '../../types'
@@ -132,6 +132,28 @@ describe('loading', () => {
     // a reviewer's saved drafts vanish from their own screen mid-review.
     await mount([])
     expect(calls[0]).toMatchObject({ url: '/api/comments?includeDrafts=true', method: 'GET' })
+  })
+
+  it('keeps polling while the page is in the background', async () => {
+    // react-query pauses an interval when the page is unfocused, which is the
+    // right default for a page a person is reading and the wrong one here: an
+    // automated browser reports itself hidden the whole time it is driving
+    // krit, so without refetchIntervalInBackground an agent's comment list
+    // freezes at whatever it held on load and never says so.
+    //
+    // focusManager is what react-query actually consults, so the test drives
+    // that rather than document.visibilityState — happy-dom's visibility does
+    // not reach the same decision.
+    const { result } = await mount([])
+    const before = calls.length
+    focusManager.setFocused(false)
+    try {
+      server = [makeComment({ id: 'a' })]
+      await waitFor(() => expect(result.current.comments).toHaveLength(1), { timeout: 5000 })
+      expect(calls.length).toBeGreaterThan(before)
+    } finally {
+      focusManager.setFocused(undefined)
+    }
   })
 })
 
