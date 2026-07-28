@@ -83,7 +83,7 @@ function stubFile(name: string, type: FileDiffMetadata['type']): FileDiffMetadat
 // built from (path plus fragment text plus both sides' contents) keeps that
 // contract without a mutable counter, so it stays pure and reuses a highlight
 // when a file reverts to a value it held before.
-function fileCacheKey(name: string, ...parts: string[]): string {
+export function fileCacheKey(name: string, ...parts: string[]): string {
   let hash = 0x811c9dc5
   for (const part of parts) {
     for (let i = 0; i < part.length; i++) {

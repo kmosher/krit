@@ -21,7 +21,7 @@ export type SideContents =
 
 export type FileContentsMap = Record<string, { old: SideContents; new: SideContents }>
 
-interface DiffData {
+export interface DiffData {
   patch: string
   repoName: string
   branch: string
