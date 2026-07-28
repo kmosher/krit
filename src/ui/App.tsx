@@ -69,7 +69,31 @@ function stubFile(name: string, type: FileDiffMetadata['type']): FileDiffMetadat
     isPartial: true,
     deletionLines: [],
     additionLines: [],
+    cacheKey: fileCacheKey(name, type),
   }
+}
+
+// Pierre keys its highlight worker-pool cache by `cacheKey`, and its contract
+// is that the key must change whenever the diff's contents do — an item handed
+// to updateItem with new contents under an unchanged key re-lays out but
+// re-renders the *cached* highlight, so the file silently keeps showing its
+// previous version. Leaving the field unset is not neutral: every item then
+// shares the single `undefined` slot, so files collide with each other as well
+// as with their own history. Deriving it from exactly the inputs the render is
+// built from (path plus fragment text plus both sides' contents) keeps that
+// contract without a mutable counter, so it stays pure and reuses a highlight
+// when a file reverts to a value it held before.
+function fileCacheKey(name: string, ...parts: string[]): string {
+  let hash = 0x811c9dc5
+  for (const part of parts) {
+    for (let i = 0; i < part.length; i++) {
+      hash ^= part.charCodeAt(i)
+      hash = Math.imul(hash, 0x01000193)
+    }
+    // Fold the separator in too, so ('ab','c') and ('a','bc') differ.
+    hash = Math.imul(hash ^ 0x1f, 0x01000193)
+  }
+  return `${name}#${(hash >>> 0).toString(36)}`
 }
 
 // Parse one file's patch fragment, upgrading it from patch-only
@@ -96,6 +120,7 @@ export function parseFileFragment(
   // other map here uses (fileContents, the file cache, comment association),
   // and the FileTree splits the embedded quotes into a bogus folder node.
   parsedFile.name = name
+  parsedFile.cacheKey = fileCacheKey(name, text)
   if (!contentsEntry || !('contents' in contentsEntry.old) || !('contents' in contentsEntry.new)) {
     // Oversize, binary, or missing on one side — patch-only it stays.
     return parsedFile
@@ -110,6 +135,10 @@ export function parseFileFragment(
     // patch-parsed file so something always shows.
     if (!upgraded.hunks || upgraded.hunks.length === 0) return parsedFile
     upgraded.name = name
+    // The upgraded render is built from the bundled contents, not the
+    // fragment, so both sides have to be in the key: the same fragment can
+    // describe different full files as the surrounding context moves.
+    upgraded.cacheKey = fileCacheKey(name, text, oldFile.contents, newFile.contents)
     return upgraded
   } catch {
     return parsedFile
