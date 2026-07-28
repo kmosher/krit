@@ -138,7 +138,16 @@ export function CommentForm({
   // edit to lose" check.
   const suggestionDirtyRef = useRef(false)
   suggestionDirtyRef.current = suggestionText !== originalLines && suggestionText.trim() !== ''
+  // The question only makes sense while there is still a rewrite to lose, so
+  // reverting the text or leaving suggest mode takes it back down rather than
+  // leaving it on screen asking about something that no longer exists.
   const [confirmingDiscard, setConfirmingDiscard] = useState(false)
+  const showConfirmDiscard = confirmingDiscard && suggestionDirtyRef.current
+  // Same staleness problem as suggestionDirtyRef: the keymap is built once.
+  const confirmingDiscardRef = useRef(false)
+  confirmingDiscardRef.current = showConfirmDiscard
+  const onCancelRef = useRef(onCancel)
+  onCancelRef.current = onCancel
 
   // Shared by both "Comment"/"Suggest rewrite" (dispatch=onSubmit) and "Save
   // as draft" (dispatch=onSaveDraft) — same validation and suggestion-payload
@@ -166,7 +175,19 @@ export function CommentForm({
     if (onSaveDraft) dispatch(onSaveDraft)
   }
   submitRef.current = handleSubmit
-  cancelRef.current = onCancel
+
+  // Every way out of the form goes through here, so none of them can drop an
+  // edited rewrite without asking — the same rule FileEditorModal's
+  // requestClose enforces. Escape from the description textarea and the Cancel
+  // button both used to discard silently; only the CodeMirror keymap asked.
+  const requestCancel = () => {
+    if (suggestionDirtyRef.current) {
+      setConfirmingDiscard(true)
+      return
+    }
+    onCancel()
+  }
+  cancelRef.current = requestCancel
 
   const handleTextareaKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -174,7 +195,7 @@ export function CommentForm({
       handleSubmit()
     }
     if (e.key === 'Escape') {
-      onCancel()
+      requestCancel()
     }
   }
 
@@ -204,9 +225,14 @@ export function CommentForm({
             key: 'Escape',
             run: (view) => {
               if (view.state.selection.ranges.length > 1) return false
-              if (suggestionDirtyRef.current) {
-                setConfirmingDiscard(true)
-                return true // handled — swallow the key, but don't cancel yet
+              // A second Escape answers the strip. Without it Escape asks a
+              // question it then refuses to hear the answer to, and the only
+              // way out is the mouse — which for an agent driving by keys is
+              // the same dead end a native dialog would have been.
+              if (confirmingDiscardRef.current) {
+                setConfirmingDiscard(false)
+                onCancelRef.current()
+                return true
               }
               cancelRef.current()
               return true
@@ -276,15 +302,18 @@ export function CommentForm({
       ) : (
         bodyField
       )}
-      {confirmingDiscard && (
+      {showConfirmDiscard && (
         <div className="comment-form-confirm" role="alert">
           <span>Discard your suggested rewrite?</span>
           <button
             type="button"
             className="btn btn-danger"
+            // Straight to onCancel, not through requestCancel — this *is* the
+            // answer to the question requestCancel asks, so routing back
+            // through it would just re-ask forever.
             onClick={() => {
               setConfirmingDiscard(false)
-              cancelRef.current()
+              onCancel()
             }}
           >
             Discard
@@ -319,7 +348,7 @@ export function CommentForm({
             Save as draft
           </button>
         )}
-        <button className="btn btn-secondary" onClick={onCancel}>
+        <button className="btn btn-secondary" onClick={requestCancel}>
           Cancel
         </button>
         <button className="btn btn-primary" onClick={handleSubmit} disabled={submitDisabled}>

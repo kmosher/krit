@@ -37,8 +37,13 @@ skill together when you do.
   is for — an agent that hits one deadlocks. This covers plain `alert()` on a
   failure path too: a frozen page is a frozen page, and a failure is exactly
   when nobody is watching. Everything routes through inline strips — the file
-  header's save-anyway question, `FileEditorModal`'s discard, the save-conflict
-  bars and the error strips in `.strip-stack`; keep it that way.
+  header's save-anyway question, `FileEditorModal`'s discard, `CommentForm`'s
+  discard-the-rewrite question, the save-conflict bars and the error strips in
+  `.strip-stack`; keep it that way. No `confirm`/`alert`/`prompt` call remains
+  anywhere under `src/ui`, and `nativeDialogs.test.tsx` globs the whole tree to
+  keep it that way — a new one fails the build without anyone maintaining a
+  list. Every exit from a form with unsaved work goes through one function
+  (`requestClose`, `requestCancel`) so a new exit path can't skip the question.
 
 ## Non-obvious behavior (deliberate, don't "fix")
 

@@ -604,11 +604,16 @@ export function App() {
     } catch {}
   }, [sidebarCollapsed])
 
-  useEffect(() => {
+  // Written when a gesture ends, not on every fraction change: an effect keyed
+  // on the value would also fire once per pointer sample mid-drag, and would
+  // rewrite the clamped value back over storage on every mount — turning a
+  // safe read-time clamp into a lossy one for any value a future build's
+  // range would have accepted.
+  const persistTrackerFraction = useCallback((fraction: number) => {
     try {
-      localStorage.setItem('krit-tracker-fraction', String(trackerFraction))
+      localStorage.setItem('krit-tracker-fraction', String(fraction))
     } catch {}
-  }, [trackerFraction])
+  }, [])
 
   const untrackedSet = useMemo(() => new Set(untrackedFiles), [untrackedFiles])
 
@@ -794,6 +799,7 @@ export function App() {
             <SidebarSplitter
               fraction={trackerFraction}
               onChange={setTrackerFraction}
+              onCommit={persistTrackerFraction}
               containerRef={sidebarRef}
             />
           )}

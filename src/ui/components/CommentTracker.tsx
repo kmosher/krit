@@ -58,7 +58,7 @@ function StatusBadge({ status }: { status: CommentStatus }) {
 // both of its text lines are `white-space: nowrap` (never wrap), so the
 // rendered height is stable: ~22px link padding + ~16px header row + 4px
 // margin + ~17px body line, rounded up with a little slack.
-const ROW_HEIGHT = 64
+export const ROW_HEIGHT = 64
 const OVERSCAN = 10
 
 const CommentRow = memo(function CommentRow({

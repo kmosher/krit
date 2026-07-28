@@ -152,8 +152,12 @@ enum Dispatch {
 }
 
 /// Subcommand dispatch happens BEFORE flag parsing so git-diff flags don't get
-/// rejected. argv[1] is only a subcommand when no `--` comes first — `--` is
-/// the hard signal that the rest is git-diff args.
+/// rejected. The first non-flag argument — wherever it appears, not just
+/// argv[1] — is treated as the subcommand, unless a `--` precedes it, which is
+/// the hard signal that the rest is git-diff args. Running before flag parsing
+/// means a flag's own value can be mistaken for a subcommand if it happens to
+/// be one of the names (`krit --host state`); see the dispatch tests, which
+/// pin that as current behavior rather than desired behavior.
 fn dispatch(raw_args: &[String]) -> Dispatch {
     let dash_dash_idx = raw_args.iter().position(|a| a == "--");
     let Some(idx) = raw_args.iter().position(|a| !a.starts_with('-')) else {
@@ -174,8 +178,10 @@ fn dispatch(raw_args: &[String]) -> Dispatch {
     Dispatch::Server
 }
 
-/// A subcommand invocation with its arguments already validated — borrowed,
-/// so parsing stays free of the I/O each verb then performs.
+/// A subcommand invocation with its arguments already validated. `parse_verb`
+/// performs no I/O and never exits, so every way an invocation can be rejected
+/// is reachable from a test. Borrowed from argv where it can be; `Reply` owns
+/// its body because that one is joined from several arguments.
 #[derive(Debug, PartialEq)]
 enum Verb<'a> {
     State,
@@ -481,8 +487,9 @@ fn review_window_title() -> Option<String> {
     window_title_from(&git::repo_name(), &git::branch_name())
 }
 
-/// The git lookups live in the wrapper above; what's worth pinning is which
-/// empties drop the title and which only drop half of it.
+/// Builds the review window's title, or `None` when there is no repo name to
+/// build it from. An empty branch drops only the branch half. The git lookups
+/// stay in the wrapper above so these rules are testable without a repo.
 fn window_title_from(repo: &str, branch: &str) -> Option<String> {
     if repo.is_empty() {
         return None;
@@ -584,17 +591,19 @@ mod tests {
     }
 
     #[test]
-    fn a_port_value_that_looks_like_a_subcommand_still_reaches_the_server() {
-        // Known false positive worth pinning: dispatch runs before flag
-        // parsing, so it cannot know `-p` consumed the next word. No real
-        // port parses as one of these names, so the exposure is nil — but a
-        // future flag with a word-shaped value would inherit this hazard.
+    fn a_numeric_port_value_never_parses_as_a_subcommand() {
         assert_eq!(dispatch(&argv(&["-p", "9999"])), Dispatch::Server);
-        assert_eq!(
-            dispatch(&argv(&["--host", "state"])),
-            Dispatch::Subcommand(1),
-            "documents current behavior, not a desirable outcome"
-        );
+    }
+
+    #[test]
+    fn a_word_shaped_flag_value_is_currently_mistaken_for_a_subcommand() {
+        // Known false positive, pinned rather than fixed: dispatch runs before
+        // flag parsing, so it cannot know `--host` consumed the next word. No
+        // real host or port is spelled like a verb, so the exposure today is
+        // nil — but a future flag taking a word-shaped value inherits this,
+        // and the failure mode is `krit` silently running a subcommand instead
+        // of opening a review. Change this test when that becomes real.
+        assert_eq!(dispatch(&argv(&["--host", "state"])), Dispatch::Subcommand(1));
     }
 
     // --- verb parsing --------------------------------------------------

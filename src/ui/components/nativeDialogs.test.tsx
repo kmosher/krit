@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act, cleanup } from '@testing-library/react'
 import { EditorView } from '@codemirror/view'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 import { CommentTracker } from './CommentTracker'
@@ -30,7 +31,10 @@ function banNativeDialogs() {
 }
 
 beforeEach(banNativeDialogs)
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 const NO_LANG = 'notes.zzz'
 
@@ -261,6 +265,83 @@ describe('no native dialog on any decision path', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('CommentForm: a second Escape answers the strip', () => {
+    // Escape that asks a question it then refuses to hear the answer to is the
+    // same dead end as a native dialog for anyone driving by key events.
+    const onCancel = vi.fn()
+    const { container } = render(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 1"
+        initialSuggestMode
+        initialSuggestionText="const a = 2"
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    const cm = container.querySelector('.cm-content') as HTMLElement
+    fireEvent.keyDown(cm, { key: 'Escape' })
+    expect(onCancel).not.toHaveBeenCalled()
+    fireEvent.keyDown(cm, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalled()
+  })
+
+  it('CommentForm: Escape from the description textarea asks too', () => {
+    // The description sits directly below the rewrite in suggest mode, so it
+    // is one Tab away — and its Escape used to discard the rewrite silently.
+    const onCancel = vi.fn()
+    render(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 1"
+        initialSuggestMode
+        initialSuggestionText="const a = 2"
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    fireEvent.keyDown(screen.getByPlaceholderText(/optional/i), { key: 'Escape' })
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent(/Discard your suggested rewrite/)
+  })
+
+  it('CommentForm: the Cancel button asks before dropping a rewrite', () => {
+    const onCancel = vi.fn()
+    render(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 1"
+        initialSuggestMode
+        initialSuggestionText="const a = 2"
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+  })
+
+  it('CommentForm: the strip goes away when the rewrite is reverted', () => {
+    // A prompt that outlives its condition asks about something that no longer
+    // exists — and answering "Discard" would still throw away the body text.
+    const onCancel = vi.fn()
+    const { container } = render(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 1"
+        initialSuggestMode
+        initialSuggestionText="const a = 2"
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    fireEvent.keyDown(container.querySelector('.cm-content') as HTMLElement, { key: 'Escape' })
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    typeInCodeMirror(container, 'const a = 1')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('CommentForm: Escape with an untouched rewrite cancels without asking', () => {
     // Nothing to lose means nothing to ask about — a prompt on every Escape
     // would be its own kind of obstacle.
@@ -283,20 +364,38 @@ describe('no native dialog on any decision path', () => {
 // The interaction tests above only cover paths a test actually walks. This
 // reads the sources directly, so a dialog added on a branch nobody exercises
 // still fails the build.
-describe('no native dialog anywhere in the comment/editing sources', () => {
-  const SOURCES = [
-    'CommentForm.tsx',
-    'CommentBubble.tsx',
-    'CommentTracker.tsx',
-    'FileEditorModal.tsx',
-    'SelectionPill.tsx',
-    'Toolbar.tsx',
-  ]
+//
+// It globs rather than listing files: a hand-maintained list silently stops
+// covering the rule for every file written after it, which is exactly when a
+// new confirm() would appear.
+describe('no native dialog anywhere in the UI sources', () => {
   const CALL = /(?:\bwindow\s*\.\s*)?\b(confirm|alert|prompt)\s*\(/g
+  // Vitest runs with the repo root as cwd (vite.config.ts's root).
+  const uiRoot = join(process.cwd(), 'src', 'ui')
 
-  for (const file of SOURCES) {
-    it(`${file} calls no native dialog`, () => {
-      const src = readFileSync(new URL(file, import.meta.url), 'utf8')
+  function sourceFiles(dir: string): string[] {
+    const out: string[] = []
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name !== 'node_modules') out.push(...sourceFiles(full))
+      } else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+        out.push(full)
+      }
+    }
+    return out
+  }
+
+  const files = sourceFiles(uiRoot)
+
+  it('finds the sources to scan at all', () => {
+    // A glob that silently matched nothing would make every case below pass.
+    expect(files.length).toBeGreaterThan(15)
+  })
+
+  for (const file of files) {
+    it(`${relative(uiRoot, file)} calls no native dialog`, () => {
+      const src = readFileSync(file, 'utf8')
       // Strip comments so prose about confirm() doesn't read as a call.
       const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
       const hits = [...code.matchAll(CALL)].map((m) => m[0])
@@ -305,4 +404,3 @@ describe('no native dialog anywhere in the comment/editing sources', () => {
   }
 })
 
-afterEach(cleanup)

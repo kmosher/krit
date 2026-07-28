@@ -1352,24 +1352,32 @@ body {
 }
 
 /* File tree */
-/* Takes whatever the tracker does not, and scrolls. Previously this was
-   `flex: 0 1 auto` on both panes, which makes them shrink in proportion to
-   their content: a long file tree kept most of an overflowing sidebar and
-   squeezed the comment list to a sliver, however few files or many comments
-   there were. */
+/* The file tree absorbs whatever the search box, the splitter and the capped
+   comment tracker leave, and scrolls inside it. A content-sized basis here
+   instead would make the sidebar's two scrollable panes shrink in proportion
+   to their content, so a long tree would keep most of the space and squeeze
+   the comment list to a sliver however many comments there were.
+
+   The floor matters because a zero basis has nothing to give back: with the
+   tracker dragged to its maximum, a short enough window would otherwise
+   resolve the tree to exactly 0 and it would vanish rather than scroll. */
 .ft {
     font-size: 13px;
     flex: 1 1 0;
+    min-height: 5rem;
     overflow-y: auto;
-    min-height: 0;
 }
 
+/* A sibling of .ft, not a child of it — the sidebar's flex children are this,
+   the tree, the splitter and the tracker. It never shrinks: the filter box and
+   the collapse toggle are how you get out of a cramped sidebar. */
 .ft-search {
     display: flex;
     align-items: center;
     gap: 6px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
 }
 
 .sidebar-collapsed .ft-search {
@@ -1549,10 +1557,15 @@ body {
 }
 
 /* Comment tracker */
-/* A *cap*, not a fixed height: a two-comment list still shrinks to its content
-   and leaves the rest to the file tree. The cap only bites once there are
-   enough comments to want more, which is when the split matters. The tracker
-   is the bottom pane, so the splitter drags this value. */
+/* A *cap*, not a fixed height: a two-comment list shrinks to its content and
+   leaves the rest to the file tree rather than holding empty space open.
+
+   The splitter drags this value, so note what that means — dragging *down*
+   always shrinks the tracker, but dragging *up* does nothing visible until
+   there are more comments than fit, because there is no content to reveal.
+   The alternative (a definite height) would make the handle move something in
+   both directions at the cost of a mostly-empty pane during the small-list
+   case that is most of a review. */
 .ct {
     flex: 0 1 auto;
     max-height: var(--tracker-fraction, 50%);
@@ -1563,16 +1576,22 @@ body {
     font-size: 13px;
 }
 
+/* There is no visible divider of its own — .ct's border-top is the line the
+   user sees. This is the grab target around it, deliberately taller than the
+   line so resizing isn't a pixel hunt, and `touch-action`/`user-select` keep
+   the browser from turning a drag into a scroll or a text selection. */
 .sidebar-splitter {
     flex: 0 0 9px;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: row-resize;
-    /* The visible line is .ct's border-top; this is the grab target around it,
-       deliberately taller than it looks so it isn't a pixel hunt. */
+    /* Overlap .ct's border so the grab target is centered on the visible line
+       rather than sitting one pixel above it. */
     margin-bottom: -1px;
     background: transparent;
+    touch-action: none;
+    user-select: none;
 }
 
 .sidebar-splitter:hover .sidebar-splitter-grip,

@@ -4,9 +4,10 @@
 //!
 //! Each verb is split in two: a pure part that decides what to request and
 //! what to say about the answer, and a thin wrapper that does the I/O and
-//! calls `std::process::exit`. Only the wrappers touch process-global state
-//! (the state-file path, stderr, the exit code), so everything that can be
-//! wrong about a verb is reachable from a test.
+//! calls `std::process::exit`. That puts the request shapes, the error
+//! diagnoses and the SSE frame scanning under test. The wrappers are not
+//! covered: the socket loop, `default_state_path`'s env-var resolution, and
+//! every `process::exit` path still need a running server to exercise.
 
 use crate::state::{KritState, default_state_path};
 use serde_json::{Value, json};
@@ -74,9 +75,11 @@ fn read_state_at(path: &Path) -> Result<KritState, StateError> {
         .map_err(|err| StateError::Invalid(path.to_path_buf(), err.to_string()))
 }
 
-/// The state-file lookup lives only here: `read_state_at` holds the part
-/// worth pinning, and `default_state_path` reads process-global env vars that
-/// a test can't change without racing every other test.
+/// Resolves the running server's state file, or prints the diagnosis and
+/// **exits the process with status 1** — every verb needs a server, so there
+/// is nothing useful to return. The env-var lookup lives here rather than in
+/// `read_state_at` because a test can't change it without racing every other
+/// test.
 fn require_state() -> KritState {
     match read_state_at(&default_state_path()) {
         Ok(state) => state,
@@ -97,8 +100,9 @@ fn base_url(state: &KritState) -> String {
 
 /// One request a verb makes. Naming the request as data is what lets a test
 /// pin the wire contract of `reply`/`resolve`/`reopen`/`refresh` without a
-/// server: a verb that reports success while addressing the wrong route is
-/// exactly the failure `refresh` shipped once.
+/// server. That matters because these verbs print their success line
+/// unconditionally — nothing but the shape of this struct stands between a
+/// wrong route and a confident "refreshed".
 #[derive(Debug, PartialEq)]
 pub struct ApiCall {
     pub method: &'static str,
@@ -508,8 +512,13 @@ mod tests {
         assert_eq!(call.method, "POST");
         assert_eq!(call.path, "/api/refresh");
         assert_eq!(call.body, None);
+    }
+
+    #[test]
+    fn comments_gets_the_comments_route() {
         assert_eq!(comments_call().method, "GET");
         assert_eq!(comments_call().path, "/api/comments");
+        assert_eq!(comments_call().body, None);
     }
 
     // --- comment filtering --------------------------------------------

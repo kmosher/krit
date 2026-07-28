@@ -77,11 +77,16 @@ describe('parseStoredFraction', () => {
   })
 })
 
-function renderSplitter(onChange = vi.fn()) {
+function renderSplitter(onChange = vi.fn(), onCommit = vi.fn()) {
   const ref = createRef<HTMLElement>()
   const utils = render(
     <div ref={ref as React.RefObject<HTMLDivElement>}>
-      <SidebarSplitter fraction={0.5} onChange={onChange} containerRef={ref} />
+      <SidebarSplitter
+        fraction={0.5}
+        onChange={onChange}
+        onCommit={onCommit}
+        containerRef={ref}
+      />
     </div>,
   )
   const handle = screen.getByRole('separator')
@@ -100,7 +105,7 @@ function renderSplitter(onChange = vi.fn()) {
   handle.setPointerCapture = vi.fn()
   handle.hasPointerCapture = vi.fn(() => false)
   handle.releasePointerCapture = vi.fn()
-  return { ...utils, handle, onChange }
+  return { ...utils, handle, onChange, onCommit }
 }
 
 describe('SidebarSplitter', () => {
@@ -153,5 +158,42 @@ describe('SidebarSplitter', () => {
     const { handle } = renderSplitter()
     expect(handle.getAttribute('aria-valuenow')).toBe('50')
     expect(handle.getAttribute('aria-orientation')).toBe('horizontal')
+  })
+
+  it('commits once when the gesture ends, not on every sample', () => {
+    // Persistence hangs off onCommit. localStorage.setItem is synchronous, so
+    // a write per pointer sample would put a disk write between each frame of
+    // the resize it is animating.
+    const { handle, onCommit } = renderSplitter()
+    fireEvent.pointerDown(handle, { pointerId: 1 })
+    fireEvent.pointerMove(handle, { pointerId: 1, clientY: 300 })
+    fireEvent.pointerMove(handle, { pointerId: 1, clientY: 250 })
+    fireEvent.pointerMove(handle, { pointerId: 1, clientY: 200 })
+    expect(onCommit).not.toHaveBeenCalled()
+    fireEvent.pointerUp(handle, { pointerId: 1 })
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onCommit).toHaveBeenCalledWith(0.75)
+  })
+
+  it('commits a keyboard adjustment immediately', () => {
+    // A key press is a whole gesture on its own — there is no "up" to wait for,
+    // so deferring the write would drop it entirely.
+    const { handle, onCommit } = renderSplitter()
+    fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    expect(onCommit).toHaveBeenCalledWith(0.55)
+  })
+
+  it('ignores a second pointer while one is already dragging', () => {
+    // Otherwise a second contact takes over the drag and whichever pointer
+    // lifts first ends it for both, stranding the one still held down.
+    const { handle, onChange, onCommit } = renderSplitter()
+    fireEvent.pointerDown(handle, { pointerId: 1 })
+    fireEvent.pointerDown(handle, { pointerId: 2 })
+    fireEvent.pointerMove(handle, { pointerId: 2, clientY: 200 })
+    expect(onChange).not.toHaveBeenCalled()
+    fireEvent.pointerUp(handle, { pointerId: 2 })
+    expect(onCommit).not.toHaveBeenCalled()
+    fireEvent.pointerMove(handle, { pointerId: 1, clientY: 200 })
+    expect(onChange).toHaveBeenCalledWith(0.75)
   })
 })

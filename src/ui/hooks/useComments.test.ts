@@ -561,7 +561,11 @@ describe('formatAllComments', () => {
     // <comment> is noise the agent has to interpret.
     const { result } = await mount([comment({ id: 'a', body: '', suggestion: { newLines: ['x'] } })])
     const out = result.current.formatAllComments()
-    expect(out).not.toContain('<code>+ let x = 1;</code>\n\n')
+    // Assert the shape that IS emitted, not the absence of one concatenation:
+    // a negative match also passes if the code line stops rendering entirely.
+    expect(out).toContain(
+      '<code>+ let x = 1;</code>\n<suggestion>\n```suggestion\nx\n```\n</suggestion>',
+    )
   })
 
   it('declares the schema version it is emitting', async () => {

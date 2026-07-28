@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
-import { CommentTracker } from './CommentTracker'
+import { CommentTracker, ROW_HEIGHT } from './CommentTracker'
 import type { ReviewComment } from '../../types'
 
 function comment(over: Partial<ReviewComment> = {}): ReviewComment {
@@ -183,7 +183,7 @@ describe('CommentTracker', () => {
     )
     const { container } = render(<CommentTracker comments={many} />)
     const list = container.querySelector('.ct-list') as HTMLElement
-    expect(list.style.height).toBe(`${50 * 64}px`)
+    expect(list.style.height).toBe(`${50 * ROW_HEIGHT}px`)
     // Only the window (plus overscan) is actually in the DOM.
     expect(rows(container).length).toBeLessThan(50)
   })

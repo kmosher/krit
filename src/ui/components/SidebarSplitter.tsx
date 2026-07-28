@@ -23,9 +23,9 @@ export function fractionFromPointer(clientY: number, rect: { top: number; height
   return clampFraction((rect.top + rect.height - clientY) / rect.height)
 }
 
-/// Round-trips through localStorage. A corrupt or out-of-range stored value
-/// reads as the default rather than reproducing a broken layout the user
-/// cannot see the cause of.
+/// Parses the value App.tsx read out of localStorage (it owns the key and the
+/// storage access). A corrupt or out-of-range value reads as the default
+/// rather than reproducing a broken layout the user cannot see the cause of.
 export function parseStoredFraction(raw: string | null): number {
   if (raw == null) return DEFAULT_TRACKER_FRACTION
   const parsed = Number.parseFloat(raw)
@@ -36,48 +36,81 @@ const KEYBOARD_STEP = 0.05
 
 interface SidebarSplitterProps {
   fraction: number
+  /** Fires continuously during a drag, so the layout tracks the pointer. */
   onChange: (fraction: number) => void
+  /**
+   * Fires once the gesture is over. Persistence hangs off this rather than
+   * off onChange: a drag emits a fraction per pointer sample, and
+   * localStorage.setItem is synchronous, so writing on every one of them puts
+   * a disk write between each frame of the resize it is trying to animate.
+   */
+  onCommit: (fraction: number) => void
   /** Measured on drag start — the flex container both panes live in. */
   containerRef: React.RefObject<HTMLElement | null>
 }
 
-export function SidebarSplitter({ fraction, onChange, containerRef }: SidebarSplitterProps) {
-  const draggingRef = useRef(false)
+export function SidebarSplitter({
+  fraction,
+  onChange,
+  onCommit,
+  containerRef,
+}: SidebarSplitterProps) {
+  // The active pointer's id, not a boolean: a second contact (a stylus while a
+  // mouse button is down, or a second finger) would otherwise take over the
+  // drag, and whichever pointer lifted first would end it for both.
+  const draggingRef = useRef<number | null>(null)
+  const latestRef = useRef(fraction)
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!draggingRef.current) return
+      if (draggingRef.current !== e.pointerId) return
       const rect = containerRef.current?.getBoundingClientRect()
       if (!rect) return
-      onChange(fractionFromPointer(e.clientY, rect))
+      latestRef.current = fractionFromPointer(e.clientY, rect)
+      onChange(latestRef.current)
     },
     [containerRef, onChange],
   )
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    draggingRef.current = true
-    // Capture so a fast drag that outruns the 6px handle keeps sending moves
-    // here instead of to whatever the pointer happens to be over.
+    if (draggingRef.current !== null) return
+    draggingRef.current = e.pointerId
+    // Without this the browser claims the gesture for scrolling on touch, and
+    // on mouse the drag paints a text selection across the tree and the
+    // comment list — which krit's own selection-to-comment plumbing then sees.
+    e.preventDefault()
+    // Capture so a fast drag that outruns the handle keeps sending moves here
+    // instead of to whatever the pointer happens to be over.
     e.currentTarget.setPointerCapture(e.pointerId)
   }, [])
 
-  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    draggingRef.current = false
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId)
-    }
-  }, [])
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (draggingRef.current !== e.pointerId) return
+      draggingRef.current = null
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }
+      onCommit(latestRef.current)
+    },
+    [onCommit],
+  )
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (e.key === 'ArrowUp') onChange(clampFraction(fraction + KEYBOARD_STEP))
-      else if (e.key === 'ArrowDown') onChange(clampFraction(fraction - KEYBOARD_STEP))
-      else if (e.key === 'Home') onChange(MAX_TRACKER_FRACTION)
-      else if (e.key === 'End') onChange(MIN_TRACKER_FRACTION)
+      let next: number
+      if (e.key === 'ArrowUp') next = clampFraction(fraction + KEYBOARD_STEP)
+      else if (e.key === 'ArrowDown') next = clampFraction(fraction - KEYBOARD_STEP)
+      else if (e.key === 'Home') next = MAX_TRACKER_FRACTION
+      else if (e.key === 'End') next = MIN_TRACKER_FRACTION
       else return
       e.preventDefault()
+      latestRef.current = next
+      onChange(next)
+      // A key press is its own complete gesture — there is no "up" to wait for.
+      onCommit(next)
     },
-    [fraction, onChange],
+    [fraction, onChange, onCommit],
   )
 
   return (
@@ -95,7 +128,11 @@ export function SidebarSplitter({ fraction, onChange, containerRef }: SidebarSpl
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       onKeyDown={handleKeyDown}
-      onDoubleClick={() => onChange(DEFAULT_TRACKER_FRACTION)}
+      onDoubleClick={() => {
+        latestRef.current = DEFAULT_TRACKER_FRACTION
+        onChange(DEFAULT_TRACKER_FRACTION)
+        onCommit(DEFAULT_TRACKER_FRACTION)
+      }}
       title="Drag to resize — double-click to reset"
     >
       <div className="sidebar-splitter-grip" />
