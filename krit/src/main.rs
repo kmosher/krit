@@ -68,21 +68,12 @@ Session model:
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Subcommand dispatch happens BEFORE flag parsing so git-diff flags
-    // don't get rejected. argv[1] is only a subcommand when no `--` comes
-    // first — `--` is the hard signal that the rest is git-diff args.
-    let dash_dash_idx = raw_args.iter().position(|a| a == "--");
-    let first_positional_idx = raw_args.iter().position(|a| !a.starts_with('-'));
-    if let Some(idx) = first_positional_idx {
-        let is_before_dash_dash = dash_dash_idx.map(|d| idx < d).unwrap_or(true);
-        if is_before_dash_dash && subcommands::SUBCOMMANDS.contains(&raw_args[idx].as_str()) {
+    match dispatch(&raw_args) {
+        Dispatch::Subcommand(idx) => {
             run_subcommand(&raw_args[idx..]);
             return;
         }
-        // Retirement stub, mirroring v1's `diffx watch` stub: without it,
-        // `krit watch` would fall through to the server path with `watch` as
-        // a git-diff ref and launch an empty review.
-        if is_before_dash_dash && raw_args[idx] == "watch" {
+        Dispatch::RetiredWatch => {
             eprintln!("`krit watch` is not a subcommand. Subscribe to the event stream directly:");
             eprintln!("  ws://localhost:<port>/api/events-ws   (port from `krit state`)");
             // 64 (EX_USAGE), not 2: scripts gate the batch review flow on
@@ -90,6 +81,7 @@ fn main() {
             // before submit".
             std::process::exit(64);
         }
+        Dispatch::Server => {}
     }
 
     let mut port_arg: Option<u16> = None;
@@ -150,42 +142,106 @@ fn main() {
     runtime.block_on(serve(port_arg, host, no_open, custom_diff_args));
 }
 
-fn run_subcommand(args: &[String]) {
+/// What argv means before any of it is acted on.
+#[derive(Debug, PartialEq)]
+enum Dispatch {
+    /// argv[idx..] is a subcommand and its arguments.
+    Subcommand(usize),
+    RetiredWatch,
+    Server,
+}
+
+/// Subcommand dispatch happens BEFORE flag parsing so git-diff flags don't get
+/// rejected. argv[1] is only a subcommand when no `--` comes first — `--` is
+/// the hard signal that the rest is git-diff args.
+fn dispatch(raw_args: &[String]) -> Dispatch {
+    let dash_dash_idx = raw_args.iter().position(|a| a == "--");
+    let Some(idx) = raw_args.iter().position(|a| !a.starts_with('-')) else {
+        return Dispatch::Server;
+    };
+    if !dash_dash_idx.map(|d| idx < d).unwrap_or(true) {
+        return Dispatch::Server;
+    }
+    if subcommands::SUBCOMMANDS.contains(&raw_args[idx].as_str()) {
+        return Dispatch::Subcommand(idx);
+    }
+    // Retirement stub, mirroring v1's `diffx watch` stub: without it,
+    // `krit watch` would fall through to the server path with `watch` as a
+    // git-diff ref and launch an empty review.
+    if raw_args[idx] == "watch" {
+        return Dispatch::RetiredWatch;
+    }
+    Dispatch::Server
+}
+
+/// A subcommand invocation with its arguments already validated — borrowed,
+/// so parsing stays free of the I/O each verb then performs.
+#[derive(Debug, PartialEq)]
+enum Verb<'a> {
+    State,
+    Comments(&'a str),
+    Reply { id: &'a str, body: String },
+    Resolve(&'a str),
+    Reopen(&'a str),
+    WaitForSubmit,
+    Refresh,
+}
+
+const COMMENT_FILTERS: [&str; 4] = ["open", "resolved", "replied", "all"];
+
+/// Err carries the exact usage line to print before exiting 1.
+fn parse_verb(args: &[String]) -> Result<Verb<'_>, String> {
     let rest = &args[1..];
     match args[0].as_str() {
-        "state" => subcommands::cmd_state(),
+        "state" => Ok(Verb::State),
         "comments" => {
             let filter = rest.first().map(|s| s.as_str()).unwrap_or("all");
-            if !["open", "resolved", "replied", "all"].contains(&filter) {
-                eprintln!("Unknown filter: {filter}. Use one of: open, resolved, replied, all.");
-                std::process::exit(1);
+            if !COMMENT_FILTERS.contains(&filter) {
+                return Err(format!(
+                    "Unknown filter: {filter}. Use one of: open, resolved, replied, all."
+                ));
             }
-            subcommands::cmd_comments(filter);
+            Ok(Verb::Comments(filter))
         }
+        // Unquoted review prose arrives as many argv entries; joining them
+        // beats making every caller remember the quotes.
         "reply" => match rest {
-            [id, body @ ..] if !body.is_empty() => subcommands::cmd_reply(id, &body.join(" ")),
-            _ => {
-                eprintln!("Usage: krit reply <comment-id> <text>");
-                std::process::exit(1);
-            }
+            [id, body @ ..] if !body.is_empty() => Ok(Verb::Reply {
+                id,
+                body: body.join(" "),
+            }),
+            _ => Err("Usage: krit reply <comment-id> <text>".into()),
         },
         "resolve" => match rest.first() {
-            Some(id) => subcommands::cmd_resolve(id),
-            None => {
-                eprintln!("Usage: krit resolve <comment-id>");
-                std::process::exit(1);
-            }
+            Some(id) => Ok(Verb::Resolve(id)),
+            None => Err("Usage: krit resolve <comment-id>".into()),
         },
         "reopen" => match rest.first() {
-            Some(id) => subcommands::cmd_reopen(id),
-            None => {
-                eprintln!("Usage: krit reopen <comment-id>");
-                std::process::exit(1);
-            }
+            Some(id) => Ok(Verb::Reopen(id)),
+            None => Err("Usage: krit reopen <comment-id>".into()),
         },
-        "wait-for-submit" => subcommands::cmd_wait_for_submit(),
-        "refresh" => subcommands::cmd_refresh(),
-        _ => unreachable!(),
+        "wait-for-submit" => Ok(Verb::WaitForSubmit),
+        "refresh" => Ok(Verb::Refresh),
+        _ => unreachable!("dispatch() only routes names in SUBCOMMANDS"),
+    }
+}
+
+fn run_subcommand(args: &[String]) {
+    let verb = match parse_verb(args) {
+        Ok(verb) => verb,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(1);
+        }
+    };
+    match verb {
+        Verb::State => subcommands::cmd_state(),
+        Verb::Comments(filter) => subcommands::cmd_comments(filter),
+        Verb::Reply { id, body } => subcommands::cmd_reply(id, &body),
+        Verb::Resolve(id) => subcommands::cmd_resolve(id),
+        Verb::Reopen(id) => subcommands::cmd_reopen(id),
+        Verb::WaitForSubmit => subcommands::cmd_wait_for_submit(),
+        Verb::Refresh => subcommands::cmd_refresh(),
     }
 }
 
@@ -391,11 +447,18 @@ async fn serve(
     std::process::exit(0);
 }
 
-fn print_manual_url_hint(url: &str) {
-    println!("If the tab didn't open, visit {url} in your browser.");
-    println!(
+fn manual_url_hint(url: &str) -> [String; 2] {
+    [
+        format!("If the tab didn't open, visit {url} in your browser."),
         "When you're done reviewing, click \"Done reviewing\" in the browser (Ctrl+C to abort)."
-    );
+            .to_string(),
+    ]
+}
+
+fn print_manual_url_hint(url: &str) {
+    for line in manual_url_hint(url) {
+        println!("{line}");
+    }
 }
 
 /// Percent-encode a query-param value (RFC 3986 unreserved set kept bare).
@@ -415,13 +478,17 @@ fn urlencode(s: &str) -> String {
 // Best-effort window title for the desktop app — repo + branch. Cosmetic, so a
 // git hiccup just drops it; the review still opens.
 fn review_window_title() -> Option<String> {
-    let repo = git::repo_name();
+    window_title_from(&git::repo_name(), &git::branch_name())
+}
+
+/// The git lookups live in the wrapper above; what's worth pinning is which
+/// empties drop the title and which only drop half of it.
+fn window_title_from(repo: &str, branch: &str) -> Option<String> {
     if repo.is_empty() {
         return None;
     }
-    let branch = git::branch_name();
     if branch.is_empty() {
-        Some(repo)
+        Some(repo.to_string())
     } else {
         Some(format!("{repo} · {branch}"))
     }
@@ -470,4 +537,201 @@ fn launch_review_ui(url: &str) {
         }
     }
     print_manual_url_hint(url);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- argv dispatch -------------------------------------------------
+
+    #[test]
+    fn a_leading_subcommand_name_routes_to_the_subcommand() {
+        assert_eq!(dispatch(&argv(&["state"])), Dispatch::Subcommand(0));
+        assert_eq!(
+            dispatch(&argv(&["reply", "abc", "done"])),
+            Dispatch::Subcommand(0)
+        );
+        // Flags before the name are the server's, so the name is still found
+        // at its own index and the whole tail goes to the subcommand.
+        assert_eq!(
+            dispatch(&argv(&["--no-open", "comments", "open"])),
+            Dispatch::Subcommand(1)
+        );
+    }
+
+    #[test]
+    fn a_subcommand_name_after_dash_dash_is_a_git_diff_ref() {
+        // `--` is the hard signal that the rest belongs to git diff. A branch
+        // called `state` or a file named `refresh` must not hijack the run.
+        assert_eq!(dispatch(&argv(&["--", "state"])), Dispatch::Server);
+        assert_eq!(dispatch(&argv(&["--", "watch"])), Dispatch::Server);
+        assert_eq!(dispatch(&argv(&["--", "--staged"])), Dispatch::Server);
+    }
+
+    #[test]
+    fn the_retired_watch_stub_is_distinguished_from_a_normal_launch() {
+        // Without the stub `krit watch` reaches git diff as a ref and opens
+        // an empty review, which reads as krit being broken.
+        assert_eq!(dispatch(&argv(&["watch"])), Dispatch::RetiredWatch);
+        assert_eq!(dispatch(&argv(&["HEAD~3"])), Dispatch::Server);
+        assert_eq!(dispatch(&argv(&[])), Dispatch::Server);
+        assert_eq!(dispatch(&argv(&["-p", "8080"])), Dispatch::Server);
+    }
+
+    #[test]
+    fn a_port_value_that_looks_like_a_subcommand_still_reaches_the_server() {
+        // Known false positive worth pinning: dispatch runs before flag
+        // parsing, so it cannot know `-p` consumed the next word. No real
+        // port parses as one of these names, so the exposure is nil — but a
+        // future flag with a word-shaped value would inherit this hazard.
+        assert_eq!(dispatch(&argv(&["-p", "9999"])), Dispatch::Server);
+        assert_eq!(
+            dispatch(&argv(&["--host", "state"])),
+            Dispatch::Subcommand(1),
+            "documents current behavior, not a desirable outcome"
+        );
+    }
+
+    // --- verb parsing --------------------------------------------------
+
+    #[test]
+    fn comments_defaults_to_all_and_rejects_an_unknown_filter() {
+        // A typo'd filter that silently fell through to `all` would show the
+        // agent resolved comments it believes are still open.
+        assert_eq!(
+            parse_verb(&argv(&["comments"])).unwrap(),
+            Verb::Comments("all")
+        );
+        assert_eq!(
+            parse_verb(&argv(&["comments", "replied"])).unwrap(),
+            Verb::Comments("replied")
+        );
+        let err = parse_verb(&argv(&["comments", "opne"])).unwrap_err();
+        assert!(err.starts_with("Unknown filter: opne"));
+        assert!(err.contains("open, resolved, replied, all"));
+    }
+
+    #[test]
+    fn reply_joins_its_unquoted_prose_back_into_one_body() {
+        // Agents invoke this without quoting; taking only argv[2] would
+        // truncate every multi-word reply to its first word.
+        assert_eq!(
+            parse_verb(&argv(&["reply", "c-1", "looks", "good", "to", "me"])).unwrap(),
+            Verb::Reply {
+                id: "c-1",
+                body: "looks good to me".into()
+            }
+        );
+    }
+
+    #[test]
+    fn reply_needs_both_an_id_and_a_body() {
+        // An id with no text would post an empty reply, which the reviewer
+        // sees as a response that says nothing.
+        assert_eq!(
+            parse_verb(&argv(&["reply"])).unwrap_err(),
+            "Usage: krit reply <comment-id> <text>"
+        );
+        assert_eq!(
+            parse_verb(&argv(&["reply", "c-1"])).unwrap_err(),
+            "Usage: krit reply <comment-id> <text>"
+        );
+    }
+
+    #[test]
+    fn resolve_and_reopen_require_an_id_and_ignore_extra_words() {
+        assert_eq!(
+            parse_verb(&argv(&["resolve", "c-2"])).unwrap(),
+            Verb::Resolve("c-2")
+        );
+        assert_eq!(
+            parse_verb(&argv(&["reopen", "c-2", "stray"])).unwrap(),
+            Verb::Reopen("c-2")
+        );
+        assert!(parse_verb(&argv(&["resolve"])).is_err());
+        assert!(parse_verb(&argv(&["reopen"])).is_err());
+    }
+
+    #[test]
+    fn the_argument_free_verbs_take_no_arguments() {
+        assert_eq!(parse_verb(&argv(&["state"])).unwrap(), Verb::State);
+        assert_eq!(parse_verb(&argv(&["refresh"])).unwrap(), Verb::Refresh);
+        assert_eq!(
+            parse_verb(&argv(&["wait-for-submit"])).unwrap(),
+            Verb::WaitForSubmit
+        );
+    }
+
+    #[test]
+    fn every_advertised_subcommand_parses() {
+        // dispatch() routes on SUBCOMMANDS and parse_verb matches on names;
+        // a name added to one list and not the other hits `unreachable!`.
+        for name in subcommands::SUBCOMMANDS {
+            let args = match name {
+                "reply" => argv(&[name, "id", "text"]),
+                "resolve" | "reopen" => argv(&[name, "id"]),
+                _ => argv(&[name]),
+            };
+            assert!(parse_verb(&args).is_ok(), "{name} did not parse");
+        }
+    }
+
+    // --- urlencode -----------------------------------------------------
+
+    #[test]
+    fn urlencode_keeps_the_unreserved_set_bare() {
+        // These must NOT be escaped: the token and the launch URL both ride
+        // through here, and over-escaping breaks the deep link as surely as
+        // under-escaping does.
+        let unreserved = "AZaz09-_.~";
+        assert_eq!(urlencode(unreserved), unreserved);
+    }
+
+    #[test]
+    fn urlencode_escapes_everything_that_would_end_the_query_param() {
+        // The token is embedded as ?krit_token=<v> and the launch URL as
+        // ?url=<v>; an unescaped & or = silently splits one param into two.
+        assert_eq!(urlencode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(urlencode("http://x/y?z"), "http%3A%2F%2Fx%2Fy%3Fz");
+        assert_eq!(urlencode(" "), "%20");
+        assert_eq!(urlencode("+"), "%2B", "a bare + would decode as a space");
+        assert_eq!(urlencode("#frag"), "%23frag");
+    }
+
+    #[test]
+    fn urlencode_escapes_multi_byte_characters_one_byte_at_a_time() {
+        // Percent-encoding is defined over bytes, not chars: encoding the
+        // char's code point would produce something no decoder accepts.
+        assert_eq!(urlencode("é"), "%C3%A9");
+        assert_eq!(urlencode(""), "");
+    }
+
+    // --- window title and hint -----------------------------------------
+
+    #[test]
+    fn the_window_title_degrades_one_step_at_a_time() {
+        // Cosmetic, so a git hiccup drops the affected half rather than the
+        // launch: no repo means no title, no branch means repo alone.
+        assert_eq!(
+            window_title_from("krit", "main"),
+            Some("krit · main".to_string())
+        );
+        assert_eq!(window_title_from("krit", ""), Some("krit".to_string()));
+        assert_eq!(window_title_from("", "main"), None);
+        assert_eq!(window_title_from("", ""), None);
+    }
+
+    #[test]
+    fn the_manual_hint_carries_the_url_and_how_to_finish() {
+        // This is the only instruction a user gets when the browser launch
+        // failed, so it must contain both the address and the exit ritual.
+        let [first, second] = manual_url_hint("http://127.0.0.1:5173?krit_token=abc");
+        assert!(first.contains("http://127.0.0.1:5173?krit_token=abc"));
+        assert!(second.contains("Done reviewing"));
+    }
 }

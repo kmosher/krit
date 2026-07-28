@@ -38,7 +38,7 @@ interface FileTreeProps {
 
 const EMPTY_STALE: Set<string> = new Set()
 
-interface TreeNode {
+export interface TreeNode {
   name: string
   path: string
   isDir: boolean
@@ -46,7 +46,7 @@ interface TreeNode {
   file?: FileDiffMetadata
 }
 
-function buildTree(files: FileDiffMetadata[]): TreeNode[] {
+export function buildTree(files: FileDiffMetadata[]): TreeNode[] {
   const root: TreeNode[] = []
 
   for (const file of files) {
@@ -87,11 +87,11 @@ function buildTree(files: FileDiffMetadata[]): TreeNode[] {
 // were windowed. Virtualization then slices this array instead of the
 // component tree, so directory expand/collapse state has to live here
 // (lifted out of TreeDir) rather than as local state per node.
-type FlatRow =
+export type FlatRow =
   | { type: 'dir'; node: TreeNode; depth: number }
   | { type: 'file'; node: TreeNode; depth: number }
 
-function flattenTree(nodes: TreeNode[], depth: number, collapsedDirs: Set<string>, out: FlatRow[]) {
+export function flattenTree(nodes: TreeNode[], depth: number, collapsedDirs: Set<string>, out: FlatRow[]) {
   for (const node of nodes) {
     if (node.isDir) {
       out.push({ type: 'dir', node, depth })
@@ -104,7 +104,7 @@ function flattenTree(nodes: TreeNode[], depth: number, collapsedDirs: Set<string
   }
 }
 
-function inferChangeType(file: FileDiffMetadata, untrackedFiles: Set<string>): string {
+export function inferChangeType(file: FileDiffMetadata, untrackedFiles: Set<string>): string {
   if (untrackedFiles.has(file.name)) return 'untracked'
   // parsePatchFiles doesn't always set changeType, infer from object IDs
   if (file.prevName) return 'rename-changed'
@@ -115,7 +115,7 @@ function inferChangeType(file: FileDiffMetadata, untrackedFiles: Set<string>): s
   return 'change'
 }
 
-function getFileIcon(file: FileDiffMetadata | undefined, viewed: boolean, untrackedFiles: Set<string>) {
+export function getFileIcon(file: FileDiffMetadata | undefined, viewed: boolean, untrackedFiles: Set<string>) {
   const size = 16
   if (viewed) {
     return <FileCheck size={size} className="ft-icon icon-viewed" />
