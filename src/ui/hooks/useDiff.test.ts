@@ -402,11 +402,25 @@ describe('DiffRequestLedger', () => {
     expect(ledger.currentPaths(scoped, ['src/a.rs'])).toEqual([])
   })
 
-  it('drops a full reload superseded by anything that started after it', () => {
+  it('keeps a full reload alive when only a scoped request started after it', () => {
+    // A scoped request covers one path; a full reload covers every path. If a
+    // later one-file fetch could void the whole full response, `krit refresh`
+    // silently delivers nothing and the view keeps stale content with no
+    // retry — and the scoped requests that would have corrected it were
+    // aborted by this very reload. The later path is still that request's to
+    // write; everything else is the full reload's.
+    const ledger = new DiffRequestLedger()
+    const full = ledger.beginFull()
+    ledger.beginPaths(['src/a.rs'])
+    expect(ledger.isCurrentFull(full)).toBe(true)
+    expect(ledger.supersededPaths(full)).toEqual(['src/a.rs'])
+  })
+
+  it('drops a full reload only once a newer full reload has started', () => {
     const ledger = new DiffRequestLedger()
     const full = ledger.beginFull()
     expect(ledger.isCurrentFull(full)).toBe(true)
-    ledger.beginPaths(['src/a.rs'])
+    ledger.beginFull()
     expect(ledger.isCurrentFull(full)).toBe(false)
   })
 

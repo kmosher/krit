@@ -97,8 +97,23 @@ export class DiffRequestLedger {
     return id
   }
 
+  // Only a newer *full* reload can void a full response. A scoped request that
+  // started later owns its own paths (see supersededPaths) and nothing else —
+  // voiding the whole response for it strands every other path on stale
+  // content, and `beginFull` has already aborted the in-flight scoped fetches
+  // that would otherwise have corrected them.
   isCurrentFull(id: number): boolean {
-    return id === this.seq
+    return id >= this.newestFull
+  }
+
+  // Paths a scoped request claimed after full reload `id` started, and which
+  // that reload therefore must not overwrite.
+  supersededPaths(id: number): string[] {
+    const out: string[] = []
+    for (const [path, claim] of this.newestForPath) {
+      if (claim > id) out.push(path)
+    }
+    return out
   }
 
   // The subset of `paths` this response is still the authority on. Partial is
@@ -107,6 +122,34 @@ export class DiffRequestLedger {
   currentPaths(id: number, paths: readonly string[]): string[] {
     if (this.newestFull > id) return []
     return paths.filter((p) => this.newestForPath.get(p) === id)
+  }
+}
+
+// Install a full reload's data while leaving `paths` as they are in `prev` —
+// those paths belong to a scoped fetch that started later, so its read of them
+// is the newer one. Exported for tests.
+export function keepPaths(next: DiffData, prev: DiffData, paths: readonly string[]): DiffData {
+  if (paths.length === 0) return next
+  const keep = new Set(paths)
+  const prevFragments = splitFilePatches(prev.patch)
+  const fragments = new Map<string, string>()
+  for (const p of keep) fragments.set(p, prevFragments.get(p) ?? '')
+  const fileContents = { ...next.fileContents }
+  for (const p of keep) {
+    if (p in prev.fileContents) fileContents[p] = prev.fileContents[p]
+    else delete fileContents[p]
+  }
+  const untracked = new Set(next.untrackedFiles.filter((f) => !keep.has(f)))
+  for (const f of prev.untrackedFiles) if (keep.has(f)) untracked.add(f)
+  return {
+    ...next,
+    patch: spliceFilePatches(next.patch, fragments),
+    binaryFiles: [
+      ...next.binaryFiles.filter((b) => !keep.has(b.path)),
+      ...prev.binaryFiles.filter((b) => keep.has(b.path)),
+    ],
+    untrackedFiles: [...untracked],
+    fileContents,
   }
 }
 
@@ -235,8 +278,13 @@ export function useDiff(options: UseDiffOptions) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json()
       })
-      .then((json) => {
-        if (ledgerRef.current.isCurrentFull(id)) setData(json)
+      .then((json: DiffData) => {
+        if (!ledgerRef.current.isCurrentFull(id)) return
+        // A scoped fetch that started after this one is the newer read of its
+        // own paths — this response is still the authority on every other
+        // path, so install it and let those paths keep what they have.
+        const superseded = ledgerRef.current.supersededPaths(id)
+        setData((prev) => (prev ? keepPaths(json, prev, superseded) : json))
       })
       .catch((err) => {
         if (!isAbort(err)) setError(err.message)
