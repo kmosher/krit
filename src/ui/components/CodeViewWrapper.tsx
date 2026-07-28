@@ -341,6 +341,36 @@ function syncItems(
   }
 }
 
+// Make sure every file we believe is being edited actually has an editor.
+//
+// Setting `item.edit` only *queues* a render, and Pierre attaches the editor
+// from inside that pass — one attach attempt, no retry. Any exception raised
+// earlier in the same pass aborts it before the attach line, and the render
+// queue swallows that exception, so the item is left in edit mode with no
+// editor behind it: the header says "Done", the addition side is
+// contenteditable, and keystrokes go nowhere. Nothing later re-tries, because
+// from Pierre's side the flag is already set.
+//
+// An immediate render costs one synchronous pass and starts from a clean
+// slate, so it both closes that hole and removes the dependency on a frame
+// ever arriving.
+export function attachEditors(
+  viewer: CodeViewHandle<Metadata> | null,
+  editingFiles: ReadonlySet<string>,
+): void {
+  if (!viewer || editingFiles.size === 0) return
+  const missing = () => [...editingFiles].some((name) => viewer.getEditor(name) == null)
+  if (!missing()) return
+  viewer.getInstance()?.render(true)
+  if (!missing()) return
+  // Two clean passes could not attach. Say so rather than leaving a header
+  // that claims an edit session the user does not have.
+  console.error(
+    'krit: inline edit could not attach an editor for',
+    [...editingFiles].filter((name) => viewer.getEditor(name) == null),
+  )
+}
+
 // File change-type → short label. CodeView's FileDiffMetadata.type uses the
 // patch-parser's vocabulary; we squash rename-pure/rename-changed since the
 // distinction isn't useful at a glance.
@@ -644,6 +674,7 @@ export const CodeViewWrapper = memo(
         },
       )
       lastEditingRef.current = new Set(editingFiles)
+      attachEditors(viewerRef.current, editingFiles)
     }, [files, editingFiles])
 
     // Pay off a remount deferred by an open edit session (see above).
