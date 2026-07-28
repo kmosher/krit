@@ -1,23 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
-import { EditorView } from '@codemirror/view'
 import { FileEditorModal } from './FileEditorModal'
+import { NO_LANG, typeInCodeMirror } from '../test-utils'
 
-// `.zzz` matches no language pack, so useLanguageExtension settles
-// synchronously and no test races a lazy CodeMirror language import.
-const PATH = 'src/notes.zzz'
+const PATH = `src/${NO_LANG}`
 
-// CodeMirror renders a contenteditable that fireEvent/userEvent can't drive;
-// a real keystroke ends up as a view dispatch, so dispatch directly.
-function type(container: HTMLElement, text: string) {
-  const content = container.querySelector('.cm-content')
-  if (!content) throw new Error('no CodeMirror rendered')
-  const view = EditorView.findFromDOM(content as HTMLElement)
-  if (!view) throw new Error('CodeMirror DOM present but no view attached')
-  act(() => {
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } })
-  })
-}
 
 function renderModal(over: Partial<React.ComponentProps<typeof FileEditorModal>> = {}) {
   const onClose = vi.fn()
@@ -78,13 +65,13 @@ describe('FileEditorModal — clean', () => {
 describe('FileEditorModal — unsaved edits', () => {
   it('marks the file dirty as soon as it diverges', () => {
     const { container } = renderModal()
-    type(container, 'changed')
+    typeInCodeMirror(container, 'changed')
     expect(screen.getByText('• unsaved')).toBeInTheDocument()
   })
 
   it('asks before discarding on Cancel instead of closing', () => {
     const { container, onClose } = renderModal()
-    type(container, 'changed')
+    typeInCodeMirror(container, 'changed')
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onClose).not.toHaveBeenCalled()
     expect(discardStrip()).toBeInTheDocument()
@@ -94,7 +81,7 @@ describe('FileEditorModal — unsaved edits', () => {
     // The backdrop used to close outright — the one silent path that could
     // drop a reviewer's edits with no prompt at all.
     const { container, onClose } = renderModal()
-    type(container, 'changed')
+    typeInCodeMirror(container, 'changed')
     fireEvent.click(backdrop(container))
     expect(onClose).not.toHaveBeenCalled()
     expect(discardStrip()).toBeInTheDocument()
@@ -102,7 +89,7 @@ describe('FileEditorModal — unsaved edits', () => {
 
   it('asks before discarding on Escape', () => {
     const { container, onClose } = renderModal()
-    type(container, 'changed')
+    typeInCodeMirror(container, 'changed')
     fireEvent.keyDown(modal(container), { key: 'Escape' })
     expect(onClose).not.toHaveBeenCalled()
     expect(discardStrip()).toBeInTheDocument()
@@ -110,7 +97,7 @@ describe('FileEditorModal — unsaved edits', () => {
 
   it('closes on an explicit Discard', () => {
     const { container, onClose } = renderModal()
-    type(container, 'changed')
+    typeInCodeMirror(container, 'changed')
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
     expect(onClose).toHaveBeenCalled()
@@ -118,7 +105,7 @@ describe('FileEditorModal — unsaved edits', () => {
 
   it('returns to editing on "Keep editing", losing nothing', () => {
     const { container, onClose } = renderModal()
-    type(container, 'changed')
+    typeInCodeMirror(container, 'changed')
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
     expect(onClose).not.toHaveBeenCalled()
@@ -137,7 +124,7 @@ describe('FileEditorModal — unsaved edits', () => {
 describe('FileEditorModal — saving', () => {
   it('writes the edited contents and closes', async () => {
     const { container, onSave, onClose } = renderModal()
-    type(container, 'edited text')
+    typeInCodeMirror(container, 'edited text')
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     })
@@ -147,7 +134,7 @@ describe('FileEditorModal — saving', () => {
 
   it('saves on Cmd/Ctrl-S', async () => {
     const { container, onSave } = renderModal()
-    type(container, 'edited text')
+    typeInCodeMirror(container, 'edited text')
     await act(async () => {
       fireEvent.keyDown(modal(container), { key: 's', metaKey: true })
     })
@@ -161,7 +148,7 @@ describe('FileEditorModal — saving', () => {
       throw new Error('permission denied')
     })
     const { container, onClose } = renderModal({ onSave })
-    type(container, 'edited text')
+    typeInCodeMirror(container, 'edited text')
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     })

@@ -1,11 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { CommentForm } from './CommentForm'
+import { NO_LANG, modEnter } from '../test-utils'
 
-// `filePath` is deliberately an extension no language pack matches, so
-// useLanguageExtension resolves synchronously to [] and no test races a
-// lazy-loaded CodeMirror language import.
-const NO_LANG = 'notes.zzz'
 
 function renderForm(props: Partial<React.ComponentProps<typeof CommentForm>> = {}) {
   const onSubmit = vi.fn()
@@ -19,13 +16,6 @@ function renderForm(props: Partial<React.ComponentProps<typeof CommentForm>> = {
 const body = () => screen.getByPlaceholderText('Leave a review comment...')
 const submitBtn = () => screen.getByRole('button', { name: 'Comment' })
 
-// CodeMirror binds "Mod-Enter", which normalizes to Cmd on macOS and Ctrl
-// elsewhere; fire both so the test doesn't depend on the host platform.
-function modEnter(container: HTMLElement) {
-  const content = container.querySelector('.cm-content') as HTMLElement
-  fireEvent.keyDown(content, { key: 'Enter', metaKey: true })
-  fireEvent.keyDown(content, { key: 'Enter', ctrlKey: true })
-}
 
 describe('CommentForm — plain comment', () => {
   it('posts the typed body', () => {

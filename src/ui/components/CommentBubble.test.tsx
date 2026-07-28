@@ -2,34 +2,20 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { CommentBubble } from './CommentBubble'
 import type { ReviewComment } from '../../types'
-
-function comment(over: Partial<ReviewComment> = {}): ReviewComment {
-  return {
-    id: 'c1',
-    filePath: 'src/notes.zzz',
-    side: 'additions',
-    lineNumber: 10,
-    lineContent: 'const a = 1',
-    body: 'this needs a test',
-    status: 'open',
-    createdAt: Date.now(),
-    replies: [],
-    ...over,
-  }
-}
+import { makeComment } from '../test-utils'
 
 function renderBubble(over: Partial<ReviewComment> = {}) {
   const onDelete = vi.fn()
   const onReply = vi.fn()
   const utils = render(
-    <CommentBubble comment={comment(over)} onDelete={onDelete} onReply={onReply} />,
+    <CommentBubble comment={makeComment(over)} onDelete={onDelete} onReply={onReply} />,
   )
   return { onDelete, onReply, ...utils }
 }
 
 describe('CommentBubble', () => {
   it('shows the comment body', () => {
-    renderBubble()
+    renderBubble({ body: 'this needs a test' })
     expect(screen.getByText('this needs a test')).toBeInTheDocument()
   })
 

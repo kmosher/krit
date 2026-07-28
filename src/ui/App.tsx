@@ -222,6 +222,22 @@ export function App() {
     return next
   }, [activeDraftFiles, editingFile, inlineEditFiles])
 
+  // Failures with nowhere better to go. An inline strip rather than alert():
+  // a native dialog freezes the page for anything driving the browser
+  // programmatically, and these all fire on paths where an agent-driven
+  // session is already in trouble and least able to click OK.
+  //
+  // Declared ahead of the data hooks because useComments takes `reportError`
+  // as an argument, and a const below it would be in the temporal dead zone.
+  const [errors, setErrors] = useState<{ id: number; message: string }[]>([])
+  const errorSeqRef = useRef(0)
+  const reportError = useCallback((message: string) => {
+    setErrors((prev) => [...prev, { id: ++errorSeqRef.current, message }])
+  }, [])
+  const dismissError = useCallback((id: number) => {
+    setErrors((prev) => prev.filter((e) => e.id !== id))
+  }, [])
+
   const {
     patch,
     repoName,
@@ -245,7 +261,7 @@ export function App() {
     editingFiles: inlineEditFiles,
   })
   const { comments, addComment, removeComment, replyToComment, copyAllComments, postDrafts, draftCount } =
-    useComments()
+    useComments(reportError)
   const reviewState = useReviewState()
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -290,19 +306,6 @@ export function App() {
   }, [])
   const dropConflict = useCallback((filePath: string) => {
     setSaveConflicts((prev) => withoutEntry(prev, filePath))
-  }, [])
-
-  // Failures with nowhere better to go. An inline strip rather than alert():
-  // a native dialog freezes the page for anything driving the browser
-  // programmatically, and these all fire on paths where an agent-driven
-  // session is already in trouble and least able to click OK.
-  const [errors, setErrors] = useState<{ id: number; message: string }[]>([])
-  const errorSeqRef = useRef(0)
-  const reportError = useCallback((message: string) => {
-    setErrors((prev) => [...prev, { id: ++errorSeqRef.current, message }])
-  }, [])
-  const dismissError = useCallback((id: number) => {
-    setErrors((prev) => prev.filter((e) => e.id !== id))
   }, [])
 
   // A refresh that fails once there is a diff on screen is not fatal: the

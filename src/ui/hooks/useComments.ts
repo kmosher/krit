@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { DiffLineAnnotation } from '@pierre/diffs'
 import type { ReviewComment } from '../../types'
@@ -39,17 +39,67 @@ const renderCodeBlock = (c: ReviewComment): string[] => {
   return block
 }
 
+// `fetch` only rejects when the request never completed; a 404 or a 500 is a
+// resolved promise, and `res.json()` on one yields whatever the error body
+// happened to be. Every call below funnels through here so a refused write
+// reaches react-query as a rejection — without it a mutation's onSuccess runs
+// on failure and writes an optimistic comment into the cache that the server
+// does not have, which then survives until the next poll silently deletes it.
+async function readJson<T>(res: Response, what: string): Promise<T> {
+  if (!res.ok) {
+    // The server answers errors as plain text (see server.rs), and it is short:
+    // worth reading, because "comment not found" and "read-only review" are the
+    // two the reviewer can act on. A body we can't read is not worth a second
+    // failure, so it degrades to the status line alone.
+    const detail = await res.text().catch(() => '')
+    throw new Error(`${what} failed (${res.status})${detail ? `: ${detail.slice(0, 200)}` : ''}`)
+  }
+  return res.json() as Promise<T>
+}
+
 async function fetchComments(): Promise<ReviewComment[]> {
   // includeDrafts=true: the browser is the only caller allowed to see
   // draft comments (rendered with a Draft badge). Every other caller of
   // this endpoint — notably `krit comments` — gets the agent-visible view.
   const res = await fetch('/api/comments?includeDrafts=true')
-  return res.json()
+  return readJson<ReviewComment[]>(res, 'Loading comments')
 }
 
-export function useComments() {
+/**
+ * `onError` is how a failed write reaches the reader. Optional so the hook
+ * still mounts in a test or a harness that doesn't care, but App always passes
+ * one: a comment that silently fails to save looks exactly like a comment that
+ * saved, right up until the next poll erases it.
+ */
+export function useComments(onError?: (message: string) => void) {
   const queryClient = useQueryClient()
-  const { data: comments = [] } = useQuery({ queryKey: COMMENTS_KEY, queryFn: fetchComments, refetchInterval: 3000 })
+  // Held in a ref so the mutations below don't have to list a caller-supplied
+  // function in their identity — an inline arrow from App would otherwise
+  // rebuild every mutation on each render.
+  const onErrorRef = useRef(onError)
+  onErrorRef.current = onError
+  const report = useCallback((err: unknown) => {
+    onErrorRef.current?.(err instanceof Error ? err.message : String(err))
+  }, [])
+
+  const {
+    data: comments = [],
+    isError: loadFailed,
+    error: loadError,
+  } = useQuery({ queryKey: COMMENTS_KEY, queryFn: fetchComments, refetchInterval: 3000 })
+
+  // The poll retries every 3s, so reporting each failure would stack a strip
+  // every three seconds for as long as the server is down. Keyed on the
+  // transition into failure instead: one strip per outage, and a new one only
+  // after a poll has succeeded in between.
+  // Deliberately not keyed on `loadError`: react-query hands back a fresh Error
+  // object per failed attempt, so listing it would fire the effect on every
+  // retry — the exact stacking this avoids. The ref carries the message in.
+  const loadErrorRef = useRef(loadError)
+  loadErrorRef.current = loadError
+  useEffect(() => {
+    if (loadFailed) report(loadErrorRef.current)
+  }, [loadFailed, report])
 
   const addMutation = useMutation({
     mutationFn: async (params: {
@@ -70,11 +120,12 @@ export function useComments() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
       })
-      return res.json() as Promise<ReviewComment>
+      return readJson<ReviewComment>(res, 'Saving the comment')
     },
     onSuccess: (comment) => {
       queryClient.setQueryData<ReviewComment[]>(COMMENTS_KEY, (prev = []) => [...prev, comment])
     },
+    onError: report,
   })
 
   // Flips every draft to 'open' server-side in one batch (see
@@ -83,8 +134,9 @@ export function useComments() {
   const postDraftsMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch('/api/drafts/post', { method: 'POST' })
-      return res.json() as Promise<{ ok: true; posted: number }>
+      return readJson<{ ok: true; posted: number }>(res, 'Posting drafts')
     },
+    onError: report,
     onSuccess: () => {
       // Server-side status flip isn't reflected in our optimistic cache —
       // let the next 3s poll (or an immediate refetch) pick up the change.
@@ -94,12 +146,17 @@ export function useComments() {
 
   const removeMutation = useMutation({
     mutationFn: async (id: string) => {
-      await fetch(`/api/comments/${id}`, { method: 'DELETE' })
+      const res = await fetch(`/api/comments/${id}`, { method: 'DELETE' })
+      // No body worth reading, but the status still decides whether the
+      // comment is really gone — dropping it from the cache on a refusal makes
+      // a deletion that didn't happen look like one that did.
+      if (!res.ok) throw new Error(`Deleting the comment failed (${res.status})`)
       return id
     },
     onSuccess: (id) => {
       queryClient.setQueryData<ReviewComment[]>(COMMENTS_KEY, (prev = []) => prev.filter((c) => c.id !== id))
     },
+    onError: report,
   })
 
   const replyMutation = useMutation({
@@ -111,13 +168,14 @@ export function useComments() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ body }),
       })
-      return res.json() as Promise<ReviewComment>
+      return readJson<ReviewComment>(res, 'Posting the reply')
     },
     onSuccess: (updated) => {
       queryClient.setQueryData<ReviewComment[]>(COMMENTS_KEY, (prev = []) =>
         prev.map((c) => (c.id === updated.id ? updated : c)),
       )
     },
+    onError: report,
   })
 
   const editMutation = useMutation({
@@ -127,13 +185,16 @@ export function useComments() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ body, status }),
       })
-      return res.json() as Promise<ReviewComment>
+      // Both the body edit and the resolve flip land here, so the message says
+      // "Updating" rather than naming one of them.
+      return readJson<ReviewComment>(res, 'Updating the comment')
     },
     onSuccess: (updated) => {
       queryClient.setQueryData<ReviewComment[]>(COMMENTS_KEY, (prev = []) =>
         prev.map((c) => (c.id === updated.id ? updated : c)),
       )
     },
+    onError: report,
   })
 
   const addComment = useCallback(

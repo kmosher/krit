@@ -2,21 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { CommentTracker, ROW_HEIGHT } from './CommentTracker'
 import type { ReviewComment } from '../../types'
-
-function comment(over: Partial<ReviewComment> = {}): ReviewComment {
-  return {
-    id: 'c1',
-    filePath: 'src/ui/components/Toolbar.tsx',
-    side: 'additions',
-    lineNumber: 12,
-    lineContent: 'x',
-    body: 'a note',
-    status: 'open',
-    createdAt: 1_000,
-    replies: [],
-    ...over,
-  }
-}
+import { makeComment } from '../test-utils'
 
 const rows = (c: HTMLElement) => [...c.querySelectorAll('.ct-item')] as HTMLElement[]
 
@@ -33,8 +19,8 @@ describe('CommentTracker', () => {
     const { container } = render(
       <CommentTracker
         comments={[
-          comment({ id: 'old', body: 'older note', createdAt: 100 }),
-          comment({ id: 'new', body: 'newer note', createdAt: 900 }),
+          makeComment({ id: 'old', body: 'older note', createdAt: 100 }),
+          makeComment({ id: 'new', body: 'newer note', createdAt: 900 }),
         ]}
       />,
     )
@@ -45,24 +31,24 @@ describe('CommentTracker', () => {
   })
 
   it('labels each row with the file basename and line', () => {
-    render(<CommentTracker comments={[comment({ lineNumber: 42 })]} />)
+    render(<CommentTracker comments={[makeComment({ filePath: 'src/ui/components/Toolbar.tsx', lineNumber: 42 })]} />)
     expect(screen.getByText('Toolbar.tsx:42')).toBeInTheDocument()
   })
 
   it('shows the line span for a multi-line comment', () => {
-    render(<CommentTracker comments={[comment({ lineNumber: 12, endLine: 20 })]} />)
+    render(<CommentTracker comments={[makeComment({ filePath: 'src/ui/components/Toolbar.tsx', lineNumber: 12, endLine: 20 })]} />)
     expect(screen.getByText('Toolbar.tsx:12–20')).toBeInTheDocument()
   })
 
   it('omits the span when the comment covers a single line', () => {
-    render(<CommentTracker comments={[comment({ lineNumber: 12, endLine: 12 })]} />)
+    render(<CommentTracker comments={[makeComment({ filePath: 'src/ui/components/Toolbar.tsx', lineNumber: 12, endLine: 12 })]} />)
     expect(screen.getByText('Toolbar.tsx:12')).toBeInTheDocument()
   })
 
   it('truncates a long body to one line', () => {
     // Rows are fixed-height for the windowing math; a wrapping body would put
     // every row below it at the wrong scroll offset.
-    render(<CommentTracker comments={[comment({ body: 'first line\nsecond line' })]} />)
+    render(<CommentTracker comments={[makeComment({ body: 'first line\nsecond line' })]} />)
     expect(screen.getByText('first line')).toBeInTheDocument()
     expect(screen.queryByText(/second line/)).toBeNull()
   })
@@ -74,8 +60,8 @@ describe('CommentTracker', () => {
       render(
         <CommentTracker
           comments={[
-            comment({ id: 'a', status: 'open' }),
-            comment({
+            makeComment({ id: 'a', status: 'open' }),
+            makeComment({
               id: 'b',
               status: 'open',
               replies: [{ id: 'r', body: 'ack', createdAt: 1, author: 'agent' }],
@@ -91,7 +77,7 @@ describe('CommentTracker', () => {
       render(
         <CommentTracker
           comments={[
-            comment({
+            makeComment({
               status: 'resolved',
               replies: [{ id: 'r', body: 'fixed', createdAt: 1, author: 'agent' }],
             }),
@@ -106,7 +92,7 @@ describe('CommentTracker', () => {
       render(
         <CommentTracker
           comments={[
-            comment({
+            makeComment({
               status: 'draft',
               replies: [{ id: 'r', body: 'hm', createdAt: 1, author: 'agent' }],
             }),
@@ -118,14 +104,14 @@ describe('CommentTracker', () => {
     })
 
     it('omits a zero count rather than printing "0 resolved"', () => {
-      render(<CommentTracker comments={[comment()]} />)
+      render(<CommentTracker comments={[makeComment()]} />)
       expect(screen.getByText('1 open')).toBeInTheDocument()
       expect(screen.queryByText(/resolved/)).toBeNull()
       expect(screen.queryByText(/draft/)).toBeNull()
     })
 
     it('marks a resolved row so it reads as done', () => {
-      const { container } = render(<CommentTracker comments={[comment({ status: 'resolved' })]} />)
+      const { container } = render(<CommentTracker comments={[makeComment({ status: 'resolved' })]} />)
       expect(rows(container)[0]).toHaveClass('ct-item-resolved')
     })
   })
@@ -135,9 +121,9 @@ describe('CommentTracker', () => {
       // The diff pane is virtualized, so a raw #hash navigation lands nowhere;
       // onJump is what actually scrolls the comment into view.
       const onJump = vi.fn()
-      const target = comment({ id: 'c-target', body: 'jump here' })
+      const target = makeComment({ id: 'c-target', body: 'jump here' })
       const { container } = render(
-        <CommentTracker comments={[target, comment({ id: 'other', createdAt: 5 })]} onJump={onJump} />,
+        <CommentTracker comments={[target, makeComment({ id: 'other', createdAt: 5 })]} onJump={onJump} />,
       )
       const link = within(rows(container)[0]).getByRole('link')
       const ev = fireEvent.click(link)
@@ -147,7 +133,7 @@ describe('CommentTracker', () => {
     })
 
     it('falls back to the plain anchor when no jump handler is wired', () => {
-      const { container } = render(<CommentTracker comments={[comment({ id: 'c7' })]} />)
+      const { container } = render(<CommentTracker comments={[makeComment({ id: 'c7' })]} />)
       const link = within(rows(container)[0]).getByRole('link')
       expect(link).toHaveAttribute('href', '#comment-c7')
       // Nothing intercepts it, so the browser's own hash navigation runs.
@@ -162,7 +148,7 @@ describe('CommentTracker', () => {
       const onDelete = vi.fn()
       const onJump = vi.fn()
       render(
-        <CommentTracker comments={[comment({ id: 'c-del' })]} onDelete={onDelete} onJump={onJump} />,
+        <CommentTracker comments={[makeComment({ id: 'c-del' })]} onDelete={onDelete} onJump={onJump} />,
       )
       fireEvent.click(screen.getByRole('button', { name: 'Delete comment' }))
       expect(onDelete).toHaveBeenCalledWith('c-del')
@@ -170,7 +156,7 @@ describe('CommentTracker', () => {
     })
 
     it('hides the delete affordance when deletion is not offered', () => {
-      render(<CommentTracker comments={[comment()]} />)
+      render(<CommentTracker comments={[makeComment()]} />)
       expect(screen.queryByRole('button', { name: 'Delete comment' })).toBeNull()
     })
   })
@@ -179,7 +165,7 @@ describe('CommentTracker', () => {
     // The scroll height comes from the total, not the rendered slice —
     // otherwise the scrollbar stops short and later rows are unreachable.
     const many = Array.from({ length: 50 }, (_, i) =>
-      comment({ id: `c${i}`, createdAt: 1000 - i }),
+      makeComment({ id: `c${i}`, createdAt: 1000 - i }),
     )
     const { container } = render(<CommentTracker comments={many} />)
     const list = container.querySelector('.ct-list') as HTMLElement

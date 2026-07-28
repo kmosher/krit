@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act, cleanup } from '@testing-library/react'
-import { EditorView } from '@codemirror/view'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { CommentForm } from './CommentForm'
@@ -9,7 +8,7 @@ import { CommentTracker } from './CommentTracker'
 import { FileEditorModal } from './FileEditorModal'
 import { SelectionPill } from './SelectionPill'
 import { Toolbar } from './Toolbar'
-import type { ReviewComment } from '../../types'
+import { NO_LANG, makeComment, typeInCodeMirror } from '../test-utils'
 
 // krit exists to be driven programmatically: a Claude session opens the page,
 // clicks through a review, and reads the result. window.confirm/alert block the
@@ -35,31 +34,6 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
 })
-
-const NO_LANG = 'notes.zzz'
-
-function comment(over: Partial<ReviewComment> = {}): ReviewComment {
-  return {
-    id: 'c1',
-    filePath: NO_LANG,
-    side: 'additions',
-    lineNumber: 1,
-    lineContent: 'const a = 1',
-    body: 'a note',
-    status: 'open',
-    createdAt: Date.now(),
-    replies: [],
-    ...over,
-  }
-}
-
-function typeInCodeMirror(container: HTMLElement, text: string) {
-  const content = container.querySelector('.cm-content')!
-  const view = EditorView.findFromDOM(content as HTMLElement)!
-  act(() => {
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } })
-  })
-}
 
 describe('no native dialog on any decision path', () => {
   it('FileEditorModal: discarding unsaved edits', () => {
@@ -130,14 +104,14 @@ describe('no native dialog on any decision path', () => {
     // Deletion is irreversible, which is exactly the shape of thing a
     // developer reaches for confirm() to guard.
     const onDelete = vi.fn()
-    render(<CommentBubble comment={comment()} onDelete={onDelete} onReply={vi.fn()} />)
+    render(<CommentBubble comment={makeComment()} onDelete={onDelete} onReply={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: 'Delete comment' }))
     expect(onDelete).toHaveBeenCalledWith('c1')
   })
 
   it('CommentTracker: deleting a comment', () => {
     const onDelete = vi.fn()
-    render(<CommentTracker comments={[comment()]} onDelete={onDelete} />)
+    render(<CommentTracker comments={[makeComment()]} onDelete={onDelete} />)
     fireEvent.click(screen.getByRole('button', { name: 'Delete comment' }))
     expect(onDelete).toHaveBeenCalledWith('c1')
   })
