@@ -56,7 +56,7 @@ struct UndoEntry {
     /// The file's tag as the delete left it. The undo re-inserts at a raw
     /// line/column, so it must refuse a file that anything else has touched
     /// since — those coordinates would otherwise land in unrelated text.
-    expected_tag: String,
+    expected_tag: crate::edits::DeleteTag,
 }
 
 pub struct Inner {
@@ -631,14 +631,18 @@ async fn api_edits_delete(
         end_line: end_line as u32,
         end_column: end_column as u32,
     };
-    // One writer at a time, and the post-delete tag is read under the same
-    // lock that produced it — an undo checks against exactly these bytes.
+    // One writer at a time. The tag authorizing the undo comes back from the
+    // splice itself (see `Deletion::content_tag`), so it describes this
+    // delete's bytes no matter what lands next.
     let spliced = {
         let _guard = lock(&state.file_write);
-        let text = splice_delete_range(&state.repo_root, &range);
-        text.zip(git::working_tree_content_tag(&state.repo_root, file_path))
+        splice_delete_range(&state.repo_root, &range)
     };
-    let Some((deleted_text, expected_tag)) = spliced else {
+    let Some(crate::edits::Deletion {
+        deleted_text,
+        content_tag: expected_tag,
+    }) = spliced
+    else {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "delete failed (unsafe path, unreadable file, or range no longer matches the file on disk)"}))).into_response();
     };
 

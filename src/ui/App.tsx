@@ -15,6 +15,7 @@ import { CommentTracker } from './components/CommentTracker'
 import { FileEditorModal } from './components/FileEditorModal'
 import { UndoToast } from './components/UndoToast'
 import type { SelectionAnchor } from './utils/selectionMapping'
+import { diffHeaderPath } from './utils/diffHeader'
 
 // Split a merged multi-file patch into one fragment per file, in patch
 // order. Matches the section-boundary rule useDiff's spliceFilePatches /
@@ -22,22 +23,6 @@ import type { SelectionAnchor } from './utils/selectionMapping'
 // line starts a new section that runs until the next one. Cheap string scan
 // (no diff parsing), so per-file re-parse below is the only place actual
 // parsing work happens.
-// The b/-side path of a `diff --git a/X b/Y` line. A path may itself contain
-// " b/", so scanning for that separator is ambiguous; git writes both sides
-// identically unless the file was renamed, so split the remainder in half and
-// only fall back to the last-separator reading when the halves disagree (a
-// rename, where the sides genuinely differ and no better signal exists here).
-function headerTargetPath(line: string): string | null {
-  const rest = line.slice('diff --git a/'.length)
-  const half = (rest.length - 3) / 2
-  if (Number.isInteger(half) && half > 0 && rest.slice(half, half + 3) === ' b/') {
-    const a = rest.slice(0, half)
-    const b = rest.slice(half + 3)
-    if (a === b) return b
-  }
-  return line.match(/^diff --git a\/.+ b\/(.+)$/)?.[1] ?? null
-}
-
 export function splitPatchFragments(patch: string): { name: string; text: string }[] {
   const lines = patch.split('\n')
   const targetPrefix = 'diff --git a/'
@@ -50,7 +35,7 @@ export function splitPatchFragments(patch: string): { name: string; text: string
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].startsWith(targetPrefix)) continue
     flush(i)
-    name = headerTargetPath(lines[i])
+    name = diffHeaderPath(lines[i])
     start = i
   }
   flush(lines.length)
@@ -277,6 +262,14 @@ export function App() {
   const dismissError = useCallback((id: number) => {
     setErrors((prev) => prev.filter((e) => e.id !== id))
   }, [])
+
+  // A refresh that fails once there is a diff on screen is not fatal: the
+  // reviewer keeps the content they had and the file returns to the stale
+  // queue, so the failure belongs in a strip beside a still-usable review, not
+  // in the whole-page error state that a failed first load deserves.
+  useEffect(() => {
+    if (error !== null && patch !== null) reportError(error)
+  }, [error, patch, reportError])
 
   // PUT a whole file, carrying If-Match when we know what we based the edit on.
   // Returns the outcome rather than throwing on the interesting case, because
@@ -692,7 +685,7 @@ export function App() {
     )
   }
 
-  if (error) {
+  if (error && patch === null) {
     return (
       <div className="error">
         <p>Error: {error}</p>

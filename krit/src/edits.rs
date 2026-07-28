@@ -77,12 +77,35 @@ fn read_strict(path: &Path) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// Removes the range and writes the file back. Returns the deleted text (for
-/// the undo buffer / user-edit event), or None if the path is unsafe, the
-/// file is unreadable or not valid UTF-8, or the range no longer fits the
+/// A content tag `splice_insert_text` will accept. Only `splice_delete_range`
+/// mints one, and only from the bytes it just wrote — so the tag authorizing
+/// an undo can never be one sampled from disk afterwards, which would describe
+/// a racing writer's file and send the undo into text it does not match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteTag(String);
+
+#[cfg(test)]
+impl DeleteTag {
+    /// Undo has to refuse tags the delete path never minted — stale ones,
+    /// bogus ones — and only a test can hand it those.
+    fn for_test(tag: String) -> Self {
+        Self(tag)
+    }
+}
+
+/// What a delete leaves behind: the removed text, and the tag of the file the
+/// delete produced.
+pub struct Deletion {
+    /// For the undo buffer and the user-edit event.
+    pub deleted_text: String,
+    pub content_tag: DeleteTag,
+}
+
+/// Removes the range and writes the file back, or None if the path is unsafe,
+/// the file is unreadable or not valid UTF-8, or the range no longer fits the
 /// file on disk — the range was computed against whatever the browser last
 /// rendered, which may have drifted by the time the request lands.
-pub fn splice_delete_range(repo_root: &Path, range: &DeleteRange) -> Option<String> {
+pub fn splice_delete_range(repo_root: &Path, range: &DeleteRange) -> Option<Deletion> {
     let content = read_strict(&resolve_safe_path(repo_root, &range.file_path)?)?;
     let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
 
@@ -115,10 +138,35 @@ pub fn splice_delete_range(repo_root: &Path, range: &DeleteRange) -> Option<Stri
     };
 
     lines.splice(start_idx..=end_idx, [merged]);
-    if !write_working_tree_file(repo_root, &range.file_path, &lines.join("\n")) {
+    let written = lines.join("\n");
+    if !write_working_tree_file(repo_root, &range.file_path, &written) {
         return None;
     }
-    Some(deleted)
+    #[cfg(test)]
+    run_after_write_hook();
+    Some(Deletion {
+        deleted_text: deleted,
+        content_tag: DeleteTag(content_tag(written.as_bytes())),
+    })
+}
+
+// The hook fires at the one instant a competing writer could slip between a
+// delete and the tag that authorizes its undo. Real code has nothing there;
+// tests install a writer to make the tag's provenance observable — a tag
+// derived from the bytes this delete wrote is unaffected by it, a tag re-read
+// from disk is not.
+#[cfg(test)]
+thread_local! {
+    static AFTER_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_after_write_hook() {
+    let hook = AFTER_WRITE_HOOK.with(|h| h.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 /// Inverse of splice_delete_range: re-inserts `text` at its removal point.
@@ -133,11 +181,11 @@ pub fn splice_insert_text(
     start_line: u32,
     start_column: u32,
     text: &str,
-    expected_tag: &str,
+    expected_tag: &DeleteTag,
 ) -> Result<(), SpliceError> {
     let path = resolve_safe_path(repo_root, file_path).ok_or(SpliceError::UnsafePath)?;
     let bytes = std::fs::read(path).map_err(|_| SpliceError::Unreadable)?;
-    if content_tag(&bytes) != expected_tag {
+    if content_tag(&bytes) != expected_tag.0 {
         return Err(SpliceError::ContentChanged);
     }
     let content = String::from_utf8(bytes).map_err(|_| SpliceError::NotUtf8)?;
@@ -204,8 +252,8 @@ mod tests {
         (dir, name.to_string())
     }
 
-    fn tag_of(root: &Path, file: &str) -> String {
-        content_tag(&std::fs::read(root.join(file)).unwrap())
+    fn tag_of(root: &Path, file: &str) -> DeleteTag {
+        DeleteTag::for_test(content_tag(&std::fs::read(root.join(file)).unwrap()))
     }
 
     #[test]
@@ -224,7 +272,7 @@ mod tests {
                 end_column: 18,
             },
         );
-        assert_eq!(deleted.as_deref(), Some("menu"));
+        assert_eq!(deleted.map(|d| d.deleted_text).as_deref(), Some("menu"));
         let after = std::fs::read_to_string(root.join(&file)).unwrap();
         assert_eq!(after, "let s = \"café-\";\nnext");
         // Undo restores byte-exactly.
@@ -248,7 +296,10 @@ mod tests {
                 end_column: 1, // before "Yeee"
             },
         );
-        assert_eq!(deleted.as_deref(), Some("Xbb\ncccc\nd"));
+        assert_eq!(
+            deleted.map(|d| d.deleted_text).as_deref(),
+            Some("Xbb\ncccc\nd")
+        );
         let after = std::fs::read_to_string(root.join(&file)).unwrap();
         assert_eq!(after, "aaYeee\nkeep");
     }
@@ -277,13 +328,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(deleted, "\ntwo\n");
+        assert_eq!(deleted.deleted_text, "\ntwo\n");
         assert_eq!(
             std::fs::read_to_string(root.join(&file)).unwrap(),
             "onethree"
         );
         let tag = tag_of(&root, &file);
-        assert!(splice_insert_text(&root, &file, 1, 3, &deleted, &tag).is_ok());
+        assert!(splice_insert_text(&root, &file, 1, 3, &deleted.deleted_text, &tag).is_ok());
         assert_eq!(
             std::fs::read_to_string(root.join(&file)).unwrap(),
             "one\ntwo\nthree"
@@ -362,7 +413,14 @@ mod tests {
             .is_none()
         );
         assert_eq!(
-            splice_insert_text(&root, "link.txt", 1, 0, "x", "\"whatever\""),
+            splice_insert_text(
+                &root,
+                "link.txt",
+                1,
+                0,
+                "x",
+                &DeleteTag::for_test("\"whatever\"".into())
+            ),
             Err(SpliceError::UnsafePath)
         );
         assert_eq!(
@@ -371,6 +429,93 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The delete's tag names the bytes the delete itself wrote, not whatever
+    /// is on disk once the caller gets around to looking. A tag sampled from
+    /// disk after a competing write would authorize an undo into that other
+    /// writer's file — the corruption the tag exists to prevent.
+    #[test]
+    fn the_delete_tag_describes_the_delete_own_output_not_a_racing_write() {
+        let (root, file) = temp_repo("tag-provenance.txt", "one\ntwo\nthree");
+        let expected_after_delete = "one\n\nthree";
+        // A competing writer lands in the only window that matters: after the
+        // delete's write, before its tag is settled.
+        let racer_root = root.clone();
+        let racer_file = file.clone();
+        AFTER_WRITE_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(racer_root.join(&racer_file), "one\nsomeone else\nthree").unwrap();
+            }));
+        });
+        let deleted = splice_delete_range(
+            &root,
+            &DeleteRange {
+                file_path: file.clone(),
+                start_line: 2,
+                start_column: 0,
+                end_line: 2,
+                end_column: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            deleted.content_tag,
+            DeleteTag::for_test(content_tag(expected_after_delete.as_bytes()))
+        );
+
+        // So the undo it authorizes refuses against the racer's file rather
+        // than splicing "two" back into a position that no longer means what
+        // it did.
+        assert_eq!(
+            splice_insert_text(
+                &root,
+                &file,
+                2,
+                0,
+                &deleted.deleted_text,
+                &deleted.content_tag
+            ),
+            Err(SpliceError::ContentChanged)
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(&file)).unwrap(),
+            "one\nsomeone else\nthree"
+        );
+    }
+
+    /// Absent a racing write, the tag is exactly the file the delete left, so
+    /// the undo it authorizes goes through.
+    #[test]
+    fn the_delete_tag_authorizes_the_undo_of_that_delete() {
+        let (root, file) = temp_repo("tag-roundtrip.txt", "one\ntwo\nthree");
+        let deleted = splice_delete_range(
+            &root,
+            &DeleteRange {
+                file_path: file.clone(),
+                start_line: 2,
+                start_column: 0,
+                end_line: 2,
+                end_column: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(deleted.content_tag, tag_of(&root, &file));
+        assert!(
+            splice_insert_text(
+                &root,
+                &file,
+                2,
+                0,
+                &deleted.deleted_text,
+                &deleted.content_tag
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(&file)).unwrap(),
+            "one\ntwo\nthree"
+        );
     }
 
     #[test]
@@ -393,7 +538,7 @@ mod tests {
         // something different.
         std::fs::write(root.join(&file), "completely\ndifferent\ncontent").unwrap();
         assert_eq!(
-            splice_insert_text(&root, &file, 2, 0, &deleted, &tag),
+            splice_insert_text(&root, &file, 2, 0, &deleted.deleted_text, &tag),
             Err(SpliceError::ContentChanged)
         );
         assert_eq!(

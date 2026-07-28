@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import {
   DiffRequestLedger,
-  diffHeaderPath,
   spliceFilePatches,
   splitFilePatches,
   useDiff,
@@ -477,23 +476,6 @@ describe('useDiff — out-of-order responses', () => {
   })
 })
 
-describe('diffHeaderPath', () => {
-  it('takes the b/-side of a path that itself contains " b/"', () => {
-    // git writes both sides verbatim, so `foo b/bar.rs` produces a header with
-    // three " b/" occurrences and only the length-symmetric split is right.
-    const line = 'diff --git a/foo b/bar.rs b/foo b/bar.rs'
-    expect(diffHeaderPath(line)).toBe('foo b/bar.rs')
-  })
-
-  it('falls back to the first " b/" for a rename, whose sides differ', () => {
-    expect(diffHeaderPath('diff --git a/old/name.rs b/new/name.rs')).toBe('new/name.rs')
-  })
-
-  it('returns null for a line that is not a diff header', () => {
-    expect(diffHeaderPath('+++ b/src/a.rs')).toBeNull()
-  })
-})
-
 describe('patch splitting with awkward paths', () => {
   const awkward = 'foo b/bar.rs'
 
@@ -591,6 +573,100 @@ describe('useDiff — failed requests', () => {
 
     await waitFor(() => expect(result.current.error).toBe('HTTP 500'))
     expect(result.current.patch).toBe(before)
+  })
+
+  it('re-queues a file whose apply failed, so the badge comes back', async () => {
+    // The apply dismisses before it fetches. Without the failure path putting
+    // the file back, a 500 leaves stale content on screen with nothing saying
+    // so and no affordance to try again.
+    const { result } = renderUseDiff({ refreshMode: 'manual' })
+    await waitFor(() => expect(result.current.initialLoading).toBe(false))
+    act(() => FakeEventSource.last!.emit({ type: 'file-changed', path: 'src/a.rs' }))
+    await waitFor(() => expect(result.current.staleFiles.has('src/a.rs')).toBe(true))
+    statusFor = () => 500
+
+    act(() => result.current.applyStaleFile('src/a.rs'))
+
+    await waitFor(() => expect(result.current.error).toBe('HTTP 500'))
+    expect([...result.current.staleFiles]).toEqual(['src/a.rs'])
+  })
+
+  it('re-queues every file of a failed applyAllStale', async () => {
+    const { result } = renderUseDiff({ refreshMode: 'manual' })
+    await waitFor(() => expect(result.current.initialLoading).toBe(false))
+    act(() => FakeEventSource.last!.emit({ type: 'files-changed', paths: ['src/a.rs', 'src/b.rs'] }))
+    await waitFor(() => expect(result.current.staleFiles.size).toBe(2))
+    statusFor = () => 500
+
+    act(() => result.current.applyAllStale())
+
+    await waitFor(() => expect(result.current.error).toBe('HTTP 500'))
+    expect([...result.current.staleFiles].sort()).toEqual(['src/a.rs', 'src/b.rs'])
+  })
+
+  it('clears the file when the apply succeeds', async () => {
+    const { result } = renderUseDiff({ refreshMode: 'manual' })
+    await waitFor(() => expect(result.current.initialLoading).toBe(false))
+    act(() => FakeEventSource.last!.emit({ type: 'file-changed', path: 'src/a.rs' }))
+    await waitFor(() => expect(result.current.staleFiles.has('src/a.rs')).toBe(true))
+    world.set('src/a.rs', { patch: fragment('src/a.rs', '+newest') })
+
+    act(() => result.current.applyStaleFile('src/a.rs'))
+
+    await waitFor(() => expect(result.current.patch).toContain('+newest'))
+    expect(result.current.staleFiles.size).toBe(0)
+    expect(result.current.error).toBeNull()
+  })
+
+  it('does not re-queue a file a newer request already refreshed successfully', async () => {
+    // The re-queue must not contradict content already on screen: the failure
+    // belongs to a read the ledger has since superseded.
+    const { result } = renderUseDiff({ refreshMode: 'ultra' })
+    await waitFor(() => expect(result.current.initialLoading).toBe(false))
+    deferIf = (url) => fetchedPathsFor(url).length > 0
+
+    act(() => FakeEventSource.last!.emit({ type: 'file-written', path: 'src/a.rs' }))
+    await waitFor(() => expect(pending.length).toBe(1))
+    act(() => FakeEventSource.last!.emit({ type: 'file-written', path: 'src/a.rs' }))
+    await waitFor(() => expect(pending.length).toBe(2))
+
+    // Statuses follow release order: the newer read succeeds, the older 500s.
+    let released = 0
+    statusFor = () => (++released === 1 ? 200 : 500)
+    await act(async () => {
+      pending[1].release(fragment('src/a.rs', '+newest'))
+      await Promise.resolve()
+      pending[0].release()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(result.current.patch).toContain('+newest'))
+    expect(result.current.staleFiles.size).toBe(0)
+  })
+
+  it('keeps staleness that arrived while a failing apply was in flight', async () => {
+    // The re-queue has to add to whatever the queue holds when the failure
+    // lands, not restore the queue as it looked when the request went out:
+    // anything that went stale in between is a signal nothing else will repeat.
+    const { result } = renderUseDiff({ refreshMode: 'manual' })
+    await waitFor(() => expect(result.current.initialLoading).toBe(false))
+    act(() => FakeEventSource.last!.emit({ type: 'file-changed', path: 'src/a.rs' }))
+    await waitFor(() => expect(result.current.staleFiles.has('src/a.rs')).toBe(true))
+    deferIf = (url) => fetchedPathsFor(url).length > 0
+    statusFor = () => 500
+
+    act(() => result.current.applyStaleFile('src/a.rs'))
+    await waitFor(() => expect(pending.length).toBe(1))
+    act(() => FakeEventSource.last!.emit({ type: 'file-changed', path: 'src/b.rs' }))
+    await waitFor(() => expect(result.current.staleFiles.has('src/b.rs')).toBe(true))
+
+    await act(async () => {
+      pending[0].release()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(result.current.error).toBe('HTTP 500'))
+    expect([...result.current.staleFiles].sort()).toEqual(['src/a.rs', 'src/b.rs'])
   })
 })
 
