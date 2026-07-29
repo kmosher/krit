@@ -32,6 +32,13 @@ Options:
                      which case krit mints an access token and off-machine
                      clients must open the tokenized URL it prints.
   --no-open          Don't open the browser automatically
+  --idle-timeout <ms>
+                     How long to keep serving after the last browser tab
+                     disconnects (default: 5000; also KRIT_IDLE_TIMEOUT_MS).
+                     The window exists to survive a page refresh; raise it if
+                     something slower is in the loop. Clicking Done reviewing
+                     bypasses it — the last tab closing then stops the server
+                     at once.
   -v, --version      Show version number
   -h, --help         Show this help message
 
@@ -87,6 +94,11 @@ fn main() {
     let mut port_arg: Option<u16> = None;
     let mut host = "127.0.0.1".to_string();
     let mut no_open = false;
+    // Flag beats env beats default; an unparseable env value is ignored rather
+    // than fatal, since it can come from a shell profile the caller forgot.
+    let mut idle_timeout_ms: Option<u64> = std::env::var("KRIT_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let mut positionals: Vec<String> = Vec::new();
     let mut past_dash_dash = false;
     let mut iter = raw_args.iter();
@@ -110,6 +122,13 @@ fn main() {
                     std::process::exit(1);
                 };
                 host = v.clone();
+            }
+            "--idle-timeout" => {
+                let Some(v) = iter.next().and_then(|v| v.parse().ok()) else {
+                    eprintln!("Error: --idle-timeout requires a number of milliseconds");
+                    std::process::exit(1);
+                };
+                idle_timeout_ms = Some(v);
             }
             "--no-open" => no_open = true,
             "-h" | "--help" => {
@@ -139,7 +158,7 @@ fn main() {
     }
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    runtime.block_on(serve(port_arg, host, no_open, custom_diff_args));
+    runtime.block_on(serve(port_arg, host, no_open, custom_diff_args, idle_timeout_ms));
 }
 
 /// What argv means before any of it is acted on.
@@ -256,6 +275,7 @@ async fn serve(
     host: String,
     no_open: bool,
     custom_diff_args: Option<Vec<String>>,
+    idle_timeout_ms: Option<u64>,
 ) {
     let repo_root = PathBuf::from(git::repo_root().expect("repo root (checked above)"));
 
@@ -272,6 +292,9 @@ async fn serve(
     };
 
     let hub = hub::Hub::new();
+    if let Some(ms) = idle_timeout_ms {
+        hub.set_idle_shutdown_ms(ms);
+    }
     let app_state = server::new_state(
         hub.clone(),
         comment_store,
@@ -304,6 +327,12 @@ async fn serve(
     let local_url = format!("http://{host}:{actual_port}");
 
     println!("krit server running at {local_url}");
+    // Only when overridden. A grace period set in a shell profile and long
+    // forgotten is otherwise invisible until someone wonders why the port is
+    // still held.
+    if idle_timeout_ms.is_some() {
+        println!("idle timeout: {}ms after the last tab closes", hub.idle_shutdown_ms());
+    }
     if api_token.is_some() {
         // The state file stays token-free on purpose: subcommands connect
         // over loopback and never need it, so the secret has no reason to

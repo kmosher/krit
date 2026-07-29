@@ -15,11 +15,16 @@ use tokio::sync::{Notify, broadcast};
 /// doesn't overrun a momentarily slow subscriber.
 const BUS_CAPACITY: usize = 2048;
 
-/// Grace period after the last browser tab disconnects before the server
-/// shuts itself down — long enough to survive a page refresh. Keyed on
-/// browser (role ui) presence only: a CLI or agent subscriber must never
-/// hold the server alive on its own.
-const IDLE_SHUTDOWN_MS: u64 = 60_000;
+/// Default grace period after the last browser tab disconnects before the
+/// server shuts itself down. Keyed on browser (role ui) presence only: a CLI
+/// or agent subscriber must never hold the server alive on its own.
+///
+/// Short on purpose. The grace period only has to cover a page refresh —
+/// EventSource reconnects in well under a second — and every millisecond
+/// beyond that is a dead server holding a port. Override with `--idle-timeout`
+/// or `KRIT_IDLE_TIMEOUT_MS` when something slower is in the loop (a browser
+/// launching cold, a tunnel reconnecting).
+pub const DEFAULT_IDLE_SHUTDOWN_MS: u64 = 5_000;
 
 /// If no browser EVER connects within this window of start, nobody's
 /// reviewing — shut down instead of running forever.
@@ -50,6 +55,11 @@ pub struct Hub {
     // reconnect loop with no browser attached accumulated one live task per
     // event for a full minute.
     idle_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    idle_shutdown_ms: AtomicU64,
+    // Set once Done reviewing has been clicked. After that the grace period
+    // has nothing left to protect — there is no next thing the reviewer does
+    // here — so the last browser leaving ends the server immediately.
+    submitted: AtomicBool,
     shutting_down: AtomicBool,
     /// Signalled once the review-ended broadcast is out; axum's graceful
     /// shutdown waits on this.
@@ -88,10 +98,32 @@ impl Hub {
             ever_had_browser: AtomicBool::new(false),
             idle_gen: AtomicU64::new(0),
             idle_timer: Mutex::new(None),
+            idle_shutdown_ms: AtomicU64::new(DEFAULT_IDLE_SHUTDOWN_MS),
+            submitted: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             shutdown: Notify::new(),
             exit_cleanup: Mutex::new(None),
         })
+    }
+
+    /// Set the post-disconnect grace period. Called once at startup from the
+    /// flag/env; a value of 0 means "shut down as soon as the last browser
+    /// goes", which is what `--idle-timeout 0` is for.
+    pub fn set_idle_shutdown_ms(&self, ms: u64) {
+        self.idle_shutdown_ms.store(ms, Ordering::SeqCst);
+    }
+
+    pub fn idle_shutdown_ms(&self) -> u64 {
+        self.idle_shutdown_ms.load(Ordering::SeqCst)
+    }
+
+    /// Record that the review was submitted, and end the server now if no
+    /// browser is left to see it. Clicking Done reviewing in the last open tab
+    /// is a statement that the review is over: the tab closes itself, its SSE
+    /// stream drops, and there is nothing to wait out.
+    pub fn mark_submitted(self: &Arc<Self>) {
+        self.submitted.store(true, Ordering::SeqCst);
+        self.check_idle();
     }
 
     pub fn set_exit_cleanup(&self, f: impl FnOnce() + Send + 'static) {
@@ -168,11 +200,20 @@ impl Hub {
         if !self.ever_had_browser.load(Ordering::SeqCst) {
             return; // the no-browser timer owns this phase
         }
+        // Submitted and the last tab gone: no grace period, no timer to race.
+        if self.submitted.load(Ordering::SeqCst) {
+            self.idle_gen.fetch_add(1, Ordering::SeqCst);
+            self.disarm_idle_timer();
+            println!("Review submitted and the last browser closed — shutting down.");
+            self.initiate_shutdown("submitted");
+            return;
+        }
         let generation = self.idle_gen.fetch_add(1, Ordering::SeqCst) + 1;
         self.disarm_idle_timer();
         let hub = Arc::clone(self);
+        let idle_ms = self.idle_shutdown_ms.load(Ordering::SeqCst);
         let handle = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(IDLE_SHUTDOWN_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(idle_ms)).await;
             if hub.idle_gen.load(Ordering::SeqCst) == generation
                 && hub.ui.load(Ordering::SeqCst) == 0
             {
@@ -238,8 +279,9 @@ impl Hub {
 }
 
 /// `tokio`'s `test-util` feature is off, so `start_paused` / `advance` are
-/// unavailable and no test here may wait for a timer to *fire* — a real
-/// 60s sleep is not a test anyone keeps. Everything below asserts the
+/// unavailable and no test here may wait for a timer to *fire* — sleeping
+/// out a real grace period is not a test anyone keeps. Everything below
+/// asserts the
 /// observable state the timers hang off instead: whether a timer is armed,
 /// which generation it captured, and how many tasks are alive.
 ///
@@ -384,6 +426,66 @@ mod tests {
             alive_tasks().await <= 1,
             "superseded idle timers must be aborted, not merely made no-ops"
         );
+    }
+
+    #[tokio::test]
+    async fn the_idle_grace_period_is_configurable_and_defaults_short() {
+        let hub = Hub::new();
+        assert_eq!(hub.idle_shutdown_ms(), DEFAULT_IDLE_SHUTDOWN_MS);
+        assert!(
+            DEFAULT_IDLE_SHUTDOWN_MS <= 10_000,
+            "the default grace period only has to cover a page refresh"
+        );
+        hub.set_idle_shutdown_ms(90_000);
+        assert_eq!(hub.idle_shutdown_ms(), 90_000);
+    }
+
+    #[tokio::test]
+    async fn submitting_with_a_browser_still_attached_changes_nothing_yet() {
+        // Another tab is still open: Done reviewing in one of them must not
+        // pull the server out from under the others.
+        let hub = Hub::new();
+        let (_rx, _ui) = hub.subscribe(Role::Ui);
+        hub.mark_submitted();
+        assert!(!hub.shutting_down.load(Ordering::SeqCst));
+        assert!(!armed(&hub));
+    }
+
+    #[tokio::test]
+    async fn the_last_browser_leaving_after_submit_shuts_down_without_waiting() {
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        hub.mark_submitted();
+        drop(ui);
+        assert!(
+            hub.shutting_down.load(Ordering::SeqCst),
+            "a submitted review has nothing left to grant a grace period to"
+        );
+        assert!(!armed(&hub), "shutdown is immediate, not a timer");
+    }
+
+    #[tokio::test]
+    async fn submitting_after_the_last_browser_has_already_gone_shuts_down_too() {
+        // The tab can drop its stream before the POST response lands. That
+        // ordering must not leave the server waiting out the grace period.
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        drop(ui);
+        assert!(armed(&hub));
+        hub.mark_submitted();
+        assert!(hub.shutting_down.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_cli_watcher_cannot_hold_a_submitted_review_open() {
+        // Same rule as the ordinary idle path: only role=ui counts as a
+        // browser, so `krit wait-for-submit` must not keep the port alive.
+        let hub = Hub::new();
+        let (_rx, ui) = hub.subscribe(Role::Ui);
+        let (_rx, _cli) = hub.subscribe(Role::Cli);
+        hub.mark_submitted();
+        drop(ui);
+        assert!(hub.shutting_down.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

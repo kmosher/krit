@@ -1041,6 +1041,10 @@ async fn api_submit_post(State(state): State<AppState>) -> Response {
     post_drafts_and_broadcast(&state);
     let ts = now_millis();
     state.hub.broadcast(Event::Submitted { timestamp: ts });
+    // After the broadcast, so a tab still open sees `submitted` and can close
+    // itself. If this was the only tab, its disconnect ends the server; if
+    // others are still watching, nothing happens until the last one leaves.
+    state.hub.mark_submitted();
     axum::Json(json!({"ok": true, "timestamp": ts})).into_response()
 }
 

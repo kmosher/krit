@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { KritEvent } from '../../types'
+import { closeReviewWindow, endReviewSession, onReviewSessionEnd } from './reviewSession'
 
 export interface ReviewState {
   /** Number of CLI watchers currently subscribed (i.e. processes ready to react to Submit). */
@@ -71,12 +72,24 @@ export function useReviewState(): ReviewState {
       // The browser auto-reconnects EventSources; nothing to do here besides
       // ignoring the transient error.
     }
-    return () => es.close()
+    const unsubscribe = onReviewSessionEnd(() => es.close())
+    return () => {
+      unsubscribe()
+      es.close()
+    }
   }, [])
 
   return state
 }
 
+/**
+ * Done reviewing. The POST is awaited before anything is torn down, so the
+ * server has already posted the drafts and broadcast `submitted` when this
+ * tab's streams go; the disconnect that follows is what lets it shut down at
+ * once if this was the last browser.
+ */
 export async function submitReview(): Promise<void> {
   await fetch('/api/submit', { method: 'POST' })
+  endReviewSession()
+  closeReviewWindow()
 }
