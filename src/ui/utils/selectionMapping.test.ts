@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mapRangeToAnchor, rangeFromDragPoints, shadowRootOf } from './selectionMapping'
+import { mapRangeToAnchor, rangeFromClick, rangeFromDragPoints, shadowRootOf } from './selectionMapping'
 
 // Mirrors the shape @pierre/diffs renders: one [data-line] block per line,
 // each holding several <span>s because syntax highlighting splits the text.
@@ -383,12 +383,20 @@ describe('rangeFromDragPoints', () => {
     expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 40, y: 5 }, span(1, 0))).toBeNull()
   })
 
-  it('returns null when an endpoint hits nothing', () => {
-    // Releasing the mouse outside the window resolves to no caret at all.
-    const { span } = renderLines([['abcdef']], { shadow: true })
+  it('clamps rather than discards when an endpoint hits nothing', () => {
+    // Releasing outside the text resolves to no caret at all. The reviewer can
+    // still see what they highlighted, so the selection is clamped to the line
+    // instead of thrown away — see the "endpoints off the text" block below,
+    // which covers which end it clamps to. Here the point is only that a miss
+    // no longer voids the whole drag.
+    const { container, span } = renderLines([['abcdef']], { shadow: true })
+    container.querySelectorAll('[data-line]').forEach((el) => {
+      ;(el as HTMLElement).getBoundingClientRect = () =>
+        ({ top: 0, bottom: 10, left: 100, right: 200, x: 100, y: 0, width: 100, height: 10 }) as DOMRect
+    })
     stubCaret([[10, 5, { node: span(1, 0), offset: 1 }]])
-    expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 999, y: 999 }, span(1, 0))).toBeNull()
-    expect(rangeFromDragPoints({ x: 999, y: 999 }, { x: 10, y: 5 }, span(1, 0))).toBeNull()
+    expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 999, y: 999 }, span(1, 0))?.toString()).toBe('bcdef')
+    expect(rangeFromDragPoints({ x: 999, y: 999 }, { x: 10, y: 5 }, span(1, 0))?.toString()).toBe('bcdef')
   })
 
   it('returns null when the drag did not start inside a shadow root', () => {
@@ -412,5 +420,208 @@ describe('rangeFromDragPoints', () => {
       writable: true,
     })
     expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 40, y: 5 }, span(1, 0))).toBeNull()
+  })
+})
+
+// Points that miss the text entirely — the gutter, the padding past
+// end-of-line, the gap below the last line. Hit-testing declines to answer for
+// these, and discarding the whole drag because of one of them throws away a
+// selection the reviewer can see highlighted.
+describe('rangeFromDragPoints — endpoints off the text', () => {
+  function layOut(container: HTMLElement | ShadowRoot, rects: Array<[number, number]>) {
+    // happy-dom reports every rect as zero, so the geometry clamping reads has
+    // to be supplied. Each line is given a band of y, spanning x 100..200.
+    container.querySelectorAll('[data-line]').forEach((el, i) => {
+      const [top, bottom] = rects[i]
+      ;(el as HTMLElement).getBoundingClientRect = () =>
+        ({ top, bottom, left: 100, right: 200, x: 100, y: top, width: 100, height: bottom - top }) as DOMRect
+    })
+  }
+
+  function stubMiss(container: ShadowRoot, hits: Array<[number, number, { node: Node; offset: number }]>) {
+    Object.defineProperty(document, 'caretPositionFromPoint', {
+      value: (x: number, y: number, options?: { shadowRoots?: ShadowRoot[] }) => {
+        const hit = hits.find(([px, py]) => px === x && py === y)
+        if (!hit) return null // off the text: the engine has nothing to report
+        if (!options?.shadowRoots?.length) return { offsetNode: container.host, offset: 0 }
+        return { offsetNode: hit[2].node, offset: hit[2].offset }
+      },
+      configurable: true,
+      writable: true,
+    })
+  }
+
+  afterEach(() => {
+    delete (document as { caretPositionFromPoint?: unknown }).caretPositionFromPoint
+  })
+
+  it('clamps an endpoint past end-of-line to the end of that line', () => {
+    const { container, span } = renderLines([['abcdef']], { shadow: true })
+    layOut(container, [[0, 10]])
+    stubMiss(container as ShadowRoot, [[110, 5, { node: span(1, 0), offset: 1 }]])
+    // Released at x=500, far right of the line's 100..200 box.
+    const range = rangeFromDragPoints({ x: 110, y: 5 }, { x: 500, y: 5 }, span(1, 0))
+    expect(range?.toString()).toBe('bcdef')
+  })
+
+  it('clamps an endpoint left of the text to the start of that line', () => {
+    const { container, span } = renderLines([['abcdef']], { shadow: true })
+    layOut(container, [[0, 10]])
+    stubMiss(container as ShadowRoot, [[150, 5, { node: span(1, 0), offset: 3 }]])
+    // Started in the gutter at x=20 and dragged right into the text.
+    const range = rangeFromDragPoints({ x: 20, y: 5 }, { x: 150, y: 5 }, span(1, 0))
+    expect(range?.toString()).toBe('abc')
+  })
+
+  it('clamps a point below every line to the end of the last one', () => {
+    const { container, span } = renderLines([['abc'], ['def']], { shadow: true })
+    layOut(container, [
+      [0, 10],
+      [10, 20],
+    ])
+    stubMiss(container as ShadowRoot, [[110, 5, { node: span(1, 0), offset: 0 }]])
+    // Released at y=900, below everything — a drag off the bottom of the file.
+    const range = rangeFromDragPoints({ x: 110, y: 5 }, { x: 150, y: 900 }, span(1, 0))
+    expect(range?.toString()).toBe('abcdef')
+  })
+
+  it('still gives up when there is no line to clamp to', () => {
+    const { container } = renderLines([], { shadow: true })
+    const host = document.createElement('div')
+    const root = host.attachShadow({ mode: 'open' })
+    stubMiss(container as ShadowRoot, [])
+    expect(rangeFromDragPoints({ x: 5, y: 5 }, { x: 9, y: 9 }, root)).toBeNull()
+  })
+})
+
+// krit renders one diffs-container — and so one shadow root — per file.
+describe('rangeFromDragPoints — across two files', () => {
+  afterEach(() => {
+    delete (document as { caretPositionFromPoint?: unknown }).caretPositionFromPoint
+  })
+
+  it('refuses a drag that starts in one file and ends in another', () => {
+    const fileA = renderLines([['aaaaaa']], { shadow: true })
+    const fileB = renderLines([['bbbbbb']], { shadow: true })
+    Object.defineProperty(document, 'caretPositionFromPoint', {
+      value: (x: number, _y: number, options?: { shadowRoots?: ShadowRoot[] }) => {
+        const caret = x === 10 ? fileA.span(1, 0) : fileB.span(1, 0)
+        const root = caret.getRootNode() as ShadowRoot
+        if (!options?.shadowRoots?.includes(root)) return { offsetNode: root.host, offset: 0 }
+        return { offsetNode: caret, offset: 2 }
+      },
+      configurable: true,
+      writable: true,
+    })
+    // mousedown landed in file A, mouseup in file B. An anchor spanning two
+    // files has nowhere to be stored — a comment belongs to one file.
+    const range = rangeFromDragPoints(
+      { x: 10, y: 5, target: fileA.span(1, 0) },
+      { x: 90, y: 5 },
+      fileB.span(1, 0),
+    )
+    expect(range).toBeNull()
+  })
+
+  it('allows a drag whose two ends are in the same file', () => {
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    Object.defineProperty(document, 'caretPositionFromPoint', {
+      value: (x: number) => ({ offsetNode: span(1, 0), offset: x === 10 ? 1 : 4 }),
+      configurable: true,
+      writable: true,
+    })
+    const range = rangeFromDragPoints(
+      { x: 10, y: 5, target: span(1, 0) },
+      { x: 40, y: 5 },
+      span(1, 0),
+    )
+    expect(range?.toString()).toBe('bcd')
+  })
+})
+
+// A double-click selects without moving the pointer, so the drag path sees a
+// collapsed range and declines — but the reviewer is looking at a highlighted
+// word and expects to comment on it.
+describe('rangeFromClick', () => {
+  function stubAt(caret: { node: Node; offset: number }) {
+    Object.defineProperty(document, 'caretPositionFromPoint', {
+      value: (_x: number, _y: number, options?: { shadowRoots?: ShadowRoot[] }) => {
+        const root = caret.node.getRootNode()
+        if (root instanceof ShadowRoot && !options?.shadowRoots?.includes(root)) {
+          return { offsetNode: root.host, offset: 0 }
+        }
+        return { offsetNode: caret.node, offset: caret.offset }
+      },
+      configurable: true,
+      writable: true,
+    })
+  }
+
+  afterEach(() => {
+    delete (document as { caretPositionFromPoint?: unknown }).caretPositionFromPoint
+  })
+
+  it('selects the whole word under a double-click', () => {
+    const { span } = renderLines([['const ', 'parseAnchor', ' = 1']], { shadow: true })
+    stubAt({ node: span(1, 1), offset: 4 }) // inside "parseAnchor"
+    const range = rangeFromClick({ x: 10, y: 5 }, span(1, 1), 2)
+    expect(range?.toString()).toBe('parseAnchor')
+  })
+
+  it('expands across the spans syntax highlighting split the word into', () => {
+    // The whole reason this can't just read one text node: a highlighter is
+    // free to break an identifier across spans, and the word is still a word.
+    const { span } = renderLines([['parse', 'Anchor', '(']], { shadow: true })
+    stubAt({ node: span(1, 0), offset: 2 })
+    const range = rangeFromClick({ x: 10, y: 5 }, span(1, 0), 2)
+    expect(range?.toString()).toBe('parseAnchor')
+  })
+
+  it('treats _ and $ as part of the word', () => {
+    const { span } = renderLines([['let ', '$_private1', ';']], { shadow: true })
+    stubAt({ node: span(1, 1), offset: 3 })
+    expect(rangeFromClick({ x: 10, y: 5 }, span(1, 1), 2)?.toString()).toBe('$_private1')
+  })
+
+  it('stops at a non-word character', () => {
+    const { span } = renderLines([['a.', 'bcd', '.e']], { shadow: true })
+    stubAt({ node: span(1, 1), offset: 1 })
+    expect(rangeFromClick({ x: 10, y: 5 }, span(1, 1), 2)?.toString()).toBe('bcd')
+  })
+
+  it('selects the whole line on a triple-click', () => {
+    const { span } = renderLines([['const ', 'x', ' = 1']], { shadow: true })
+    stubAt({ node: span(1, 1), offset: 0 })
+    expect(rangeFromClick({ x: 10, y: 5 }, span(1, 1), 3)?.toString()).toBe('const x = 1')
+  })
+
+  it('does nothing for a single click', () => {
+    // A plain click must leave the surface alone: it is how the reviewer
+    // dismisses the pill and how gutter interactions start.
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    stubAt({ node: span(1, 0), offset: 2 })
+    expect(rangeFromClick({ x: 10, y: 5 }, span(1, 0), 1)).toBeNull()
+  })
+
+  it('returns null on an empty line', () => {
+    const { container } = renderLines([[]], { shadow: true })
+    const line = (container as ShadowRoot).querySelector('[data-line]') as HTMLElement
+    stubAt({ node: line, offset: 0 })
+    expect(rangeFromClick({ x: 10, y: 5 }, line, 2)).toBeNull()
+  })
+
+  it('passes the shadow root so hit-testing pierces the boundary', () => {
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    let asked: ShadowRoot[] | undefined
+    Object.defineProperty(document, 'caretPositionFromPoint', {
+      value: (_x: number, _y: number, options?: { shadowRoots?: ShadowRoot[] }) => {
+        asked = options?.shadowRoots
+        return { offsetNode: span(1, 0), offset: 2 }
+      },
+      configurable: true,
+      writable: true,
+    })
+    rangeFromClick({ x: 10, y: 5 }, span(1, 0), 2)
+    expect(asked).toEqual([span(1, 0).getRootNode()])
   })
 })

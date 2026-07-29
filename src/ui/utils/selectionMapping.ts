@@ -52,9 +52,15 @@ export interface SelectionAnchor {
 }
 
 // Viewport coordinates of one end of the drag (a mousedown or mouseup).
+//
+// `target` is that event's deep (untargeted) target, carried so the two ends
+// can be checked against each other: krit renders one `diffs-container` — and
+// therefore one shadow root — per file, so a drag that starts in one file and
+// ends in another has endpoints in two different roots.
 export interface DragPoint {
   x: number
   y: number
+  target?: EventTarget | null
 }
 
 interface CaretPoint {
@@ -93,10 +99,25 @@ function caretPointFromCoords(point: DragPoint, root: ShadowRoot): CaretPoint | 
 
 // True if `b` precedes `a` in document order — i.e. the user dragged
 // backwards, upward or right-to-left.
+//
+// Compared as range boundary points rather than with compareDocumentPosition,
+// because the two carets are not always siblings: a clamped endpoint is
+// expressed against the line element itself, which *contains* the text node
+// the other endpoint sits in. compareDocumentPosition reports a containing
+// node as PRECEDING regardless of offset, which silently inverted exactly
+// those drags. Boundary points account for the offsets and so order a
+// container against its own descendant correctly.
 function isBackwards(a: CaretPoint, b: CaretPoint): boolean {
   if (a.node === b.node) return b.offset < a.offset
-  const rel = a.node.compareDocumentPosition(b.node)
-  return (rel & Node.DOCUMENT_POSITION_PRECEDING) !== 0
+  try {
+    const ra = document.createRange()
+    ra.setStart(a.node, a.offset)
+    const rb = document.createRange()
+    rb.setStart(b.node, b.offset)
+    return ra.compareBoundaryPoints(Range.START_TO_START, rb) > 0
+  } catch {
+    return false
+  }
 }
 
 // The shadow root the drag happened inside, taken from the deep (untargeted)
@@ -109,11 +130,51 @@ export function shadowRootOf(eventTarget: EventTarget | null): ShadowRoot | null
   return root instanceof ShadowRoot ? root : null
 }
 
+// The rendered line under a point, for the cases hit-testing declines to
+// answer: the gutter, the padding past end-of-line, the gap between rows.
+// `elementFromPoint` on the shadow root reports the deep node directly, and
+// when even that misses (a point below the last line, say) the nearest line
+// by vertical distance is the one the reviewer was aiming at.
+function lineUnderPoint(point: DragPoint, root: ShadowRoot): HTMLElement | null {
+  // elementFromPoint is on DocumentOrShadowRoot in every browser; feature-
+  // detected because it is one of the pieces a DOM shim is most likely to be
+  // missing, and the vertical scan below is a complete answer without it.
+  const hit =
+    typeof root.elementFromPoint === 'function' ? root.elementFromPoint(point.x, point.y) : null
+  const direct = hit?.closest?.('[data-line]')
+  if (direct) return direct as HTMLElement
+  let best: HTMLElement | null = null
+  let bestDistance = Infinity
+  for (const candidate of root.querySelectorAll('[data-line]')) {
+    const rect = candidate.getBoundingClientRect()
+    const distance =
+      point.y < rect.top ? rect.top - point.y : point.y > rect.bottom ? point.y - rect.bottom : 0
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = candidate as HTMLElement
+    }
+    if (distance === 0) break
+  }
+  return best
+}
+
+// A caret for a point that isn't over any character: clamp to the start or the
+// end of the line it's nearest, whichever side the point falls on. Discarding
+// the whole selection instead — which is what returning null here would do —
+// throws away a drag the reviewer can see highlighted, just because they
+// released in the right-hand margin.
+function clampedCaret(point: DragPoint, root: ShadowRoot): CaretPoint | null {
+  const line = lineUnderPoint(point, root)
+  if (!line) return null
+  const rect = line.getBoundingClientRect()
+  const before = point.y < rect.top || (point.y <= rect.bottom && point.x < rect.left)
+  return before ? { node: line, offset: 0 } : { node: line, offset: line.childNodes.length }
+}
+
 // Builds a forward Range spanning the drag, from the coordinates of its
-// mousedown and mouseup. Returns null if either endpoint can't be resolved
-// inside the shadow root, or if the drag was really a click (both endpoints
-// resolve to the same caret) — a collapsed selection must produce no anchor
-// and no pill.
+// mousedown and mouseup. Returns null if the drag was really a click (both
+// endpoints resolve to the same caret) — a collapsed selection must produce no
+// anchor and no pill — or if the two ends are in different files.
 export function rangeFromDragPoints(
   start: DragPoint,
   end: DragPoint,
@@ -121,14 +182,104 @@ export function rangeFromDragPoints(
 ): Range | null {
   const root = shadowRootOf(eventTarget)
   if (!root) return null
-  const a = caretPointFromCoords(start, root)
-  const b = caretPointFromCoords(end, root)
+  // One shadow root per file. A drag from one file into another has no
+  // meaningful anchor — a comment belongs to a file — so it is refused here
+  // deliberately rather than falling out of whichever root happened to win.
+  const startRoot = shadowRootOf(start.target ?? null)
+  if (startRoot && startRoot !== root) return null
+  const a = caretPointFromCoords(start, root) ?? clampedCaret(start, root)
+  const b = caretPointFromCoords(end, root) ?? clampedCaret(end, root)
   if (!a || !b) return null
   const [from, to] = isBackwards(a, b) ? [b, a] : [a, b]
   try {
     const range = document.createRange()
     range.setStart(from.node, from.offset)
     range.setEnd(to.node, to.offset)
+    return range.collapsed ? null : range
+  } catch {
+    return null
+  }
+}
+
+// A line's text is split across nested syntax-highlighting spans, so mapping a
+// column back to a DOM position means walking the text nodes and counting.
+// The inverse of columnWithinLine below.
+function positionAtColumn(lineEl: HTMLElement, column: number): CaretPoint | null {
+  const walker = document.createTreeWalker(lineEl, NodeFilter.SHOW_TEXT)
+  let seen = 0
+  let node = walker.nextNode() as Text | null
+  while (node) {
+    if (seen + node.data.length >= column) return { node, offset: column - seen }
+    seen += node.data.length
+    node = walker.nextNode() as Text | null
+  }
+  // Past the last character: the end of the line, expressed against the line
+  // element itself so it stays valid for an empty line too.
+  return { node: lineEl, offset: lineEl.childNodes.length }
+}
+
+// Characters a double-click should treat as one word. Unicode-aware, because
+// identifiers are not all ASCII; `$` and `_` are in because they are word
+// constituents in most of what gets reviewed here.
+const WORD_CHARACTER = /[\p{L}\p{N}_$]/u
+
+// Builds a Range for a multi-click: a word for a double-click, the whole line
+// for a triple. Needed because the drag path sees only two coordinates, and a
+// double-click has no movement at all — the reviewer gets a visible native
+// highlight and, without this, no pill to act on it with.
+//
+// The word boundaries are computed from the line's own text rather than read
+// back from the browser's selection, which keeps this on the same
+// hit-testing-only footing as the drag path. The tradeoff is that for runs of
+// punctuation the browser's visible highlight and this anchor can disagree:
+// browsers select a punctuation run, this selects the single character. For
+// identifiers — the overwhelming case in a code review — they agree.
+export function rangeFromClick(
+  point: DragPoint,
+  eventTarget: EventTarget | null,
+  detail: number,
+): Range | null {
+  if (detail < 2) return null
+  const root = shadowRootOf(eventTarget)
+  if (!root) return null
+  const caret = caretPointFromCoords(point, root) ?? clampedCaret(point, root)
+  if (!caret) return null
+  const lineEl = closestLineElement(caret.node)
+  if (!lineEl) return null
+  const text = lineEl.textContent ?? ''
+  if (text.length === 0) return null
+
+  let from: number
+  let to: number
+  if (detail >= 3) {
+    from = 0
+    to = text.length
+  } else {
+    const column = columnWithinLine(lineEl, caret.node, caret.offset)
+    if (column === null) return null
+    // A caret sits *between* characters; the one a double-click means is the
+    // one to its right, falling back to its left at end-of-line.
+    let at = column
+    if (at >= text.length || !WORD_CHARACTER.test(text[at])) at = column - 1
+    if (at < 0 || at >= text.length) return null
+    if (!WORD_CHARACTER.test(text[at])) {
+      from = at
+      to = at + 1
+    } else {
+      from = at
+      to = at + 1
+      while (from > 0 && WORD_CHARACTER.test(text[from - 1])) from--
+      while (to < text.length && WORD_CHARACTER.test(text[to])) to++
+    }
+  }
+
+  const a = positionAtColumn(lineEl, from)
+  const b = positionAtColumn(lineEl, to)
+  if (!a || !b) return null
+  try {
+    const range = document.createRange()
+    range.setStart(a.node, a.offset)
+    range.setEnd(b.node, b.offset)
     return range.collapsed ? null : range
   } catch {
     return null

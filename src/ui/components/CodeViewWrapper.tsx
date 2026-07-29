@@ -14,7 +14,13 @@ import type { ReviewComment } from '../../types'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 import { SelectionPill } from './SelectionPill'
-import { mapRangeToAnchor, rangeFromDragPoints, type DragPoint, type SelectionAnchor } from '../utils/selectionMapping'
+import {
+  mapRangeToAnchor,
+  rangeFromClick,
+  rangeFromDragPoints,
+  type DragPoint,
+  type SelectionAnchor,
+} from '../utils/selectionMapping'
 import { computeSingleEdit } from '../utils/textEdits'
 
 type DraftMetadata = {
@@ -842,16 +848,23 @@ export const CodeViewWrapper = memo(
       const container = scrollRef.current
       if (!container) return
       const handleMouseDown = (e: MouseEvent) => {
-        dragStartRef.current = { x: e.clientX, y: e.clientY }
+        // composedPath() must be read synchronously — after dispatch
+        // completes it returns [], per spec. The deep target is kept so the
+        // drag's two ends can be checked for being in the same file.
+        dragStartRef.current = { x: e.clientX, y: e.clientY, target: e.composedPath()[0] ?? e.target }
       }
       const handleMouseUp = (e: MouseEvent) => {
         const start = dragStartRef.current
         dragStartRef.current = null
         if (!start) return
-        // composedPath() must be read synchronously — after dispatch
-        // completes it returns [], per spec.
         const deepTarget = e.composedPath()[0] ?? e.target
-        const range = rangeFromDragPoints(start, { x: e.clientX, y: e.clientY }, deepTarget)
+        // A double- or triple-click selects without moving the pointer, so the
+        // drag path would see a collapsed range and decline. The reviewer can
+        // see the browser's highlight either way and expects to act on it.
+        const range =
+          e.detail >= 2
+            ? rangeFromClick({ x: e.clientX, y: e.clientY }, deepTarget, e.detail)
+            : rangeFromDragPoints(start, { x: e.clientX, y: e.clientY }, deepTarget)
         if (!range) return
         const anchor = mapRangeToAnchor(range)
         if (!anchor) return
