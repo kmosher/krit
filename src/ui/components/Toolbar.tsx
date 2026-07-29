@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { GitBranch, Send, Settings, RefreshCw, Bot } from 'lucide-react'
-import type { DiffOptions } from '../hooks/useDiff'
+import type { DiffOptions, DiffScope } from '../hooks/useDiff'
 import type { RefreshMode } from '../hooks/useSettings'
 
 interface ToolbarProps {
@@ -188,10 +188,35 @@ export function Toolbar({
             <div className="settings-menu">
               {!customMode && (
                 <>
+                  <label className="settings-item settings-item-spaced">
+                    <span>Scope</span>
+                    <select
+                      className="settings-select"
+                      value={diffOptions.scope}
+                      onChange={(e) =>
+                        onDiffOptionsChange({
+                          ...diffOptions,
+                          scope: e.target.value as DiffScope,
+                        })
+                      }
+                    >
+                      <option value="uncommitted">Uncommitted</option>
+                      <option value="branch">Whole branch</option>
+                    </select>
+                  </label>
                   <label className="settings-item">
                     <input
                       type="checkbox"
-                      checked={diffOptions.staged}
+                      checked={diffOptions.scope === 'branch' ? true : diffOptions.staged}
+                      // A branch-scope diff spans the index whatever this says,
+                      // so the control is disabled and shown checked rather
+                      // than left live and ignored.
+                      disabled={diffOptions.scope === 'branch'}
+                      title={
+                        diffOptions.scope === 'branch'
+                          ? 'The whole-branch scope always includes staged changes'
+                          : undefined
+                      }
                       onChange={(e) =>
                         onDiffOptionsChange({ ...diffOptions, staged: e.target.checked })
                       }
@@ -210,7 +235,7 @@ export function Toolbar({
                   </label>
                 </>
               )}
-              <div className="settings-item settings-item-spaced">
+              <label className="settings-item settings-item-spaced">
                 <span>Live refresh</span>
                 <select
                   className="settings-select"
@@ -222,8 +247,8 @@ export function Toolbar({
                   <option value="ultra">Always live</option>
                   <option value="manual">Manual only</option>
                 </select>
-              </div>
-              <div className="settings-item settings-item-spaced">
+              </label>
+              <label className="settings-item settings-item-spaced">
                 <span>Default tab size</span>
                 <select
                   className="settings-select"
@@ -234,8 +259,8 @@ export function Toolbar({
                   <option value={4}>4</option>
                   <option value={8}>8</option>
                 </select>
-              </div>
-              <div className="settings-item settings-item-spaced">
+              </label>
+              <label className="settings-item settings-item-spaced">
                 <span>Browser</span>
                 <select
                   className="settings-select"
@@ -251,7 +276,7 @@ export function Toolbar({
                   <option value="edge">Edge</option>
                   <option value="brave">Brave</option>
                 </select>
-              </div>
+              </label>
             </div>
           )}
         </div>

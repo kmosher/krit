@@ -217,11 +217,27 @@ const TreeFileRow = memo(function TreeFileRow({
         {getFileIcon(node.file, viewed, untrackedFiles)}
         <span className="ft-file-name">{node.name}</span>
         {stale && (
+          // `role="button"` on an empty span promises an operable control, so
+          // it needs the rest of the contract: a name that doesn't depend on
+          // hovering (the dot has no text, and `title` never reaches a keyboard
+          // or touch user), a tab stop, and key activation. Without them the
+          // only per-file way to apply a deferred change is mouse-only, and the
+          // toolbar's refresh-everything button is the sole alternative.
           <span
             className="ft-stale-dot"
             role="button"
+            tabIndex={0}
+            aria-label={`${node.name} changed on disk — apply the change`}
             title="Changed on disk — click to refresh"
             onClick={(e) => {
+              e.stopPropagation()
+              onApplyStale?.(filePath)
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' && e.key !== ' ') return
+              // Space would scroll the tree, and either would otherwise also
+              // reach the row behind and switch files.
+              e.preventDefault()
               e.stopPropagation()
               onApplyStale?.(filePath)
             }}

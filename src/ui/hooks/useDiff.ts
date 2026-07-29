@@ -10,13 +10,14 @@ export interface BinaryFileInfo {
 
 // Per-side file contents bundled into /api/diff. Used to construct
 // non-partial FileDiffMetadata so CodeView can render expand-context UI.
-// Files that exceed the server's per-file cap come back as `oversize`;
+// Files that exceed either of the server's per-file caps come back as
+// `oversize` — `lines` is present when the line cap was the one that tripped;
 // missing-at-ref (added/deleted file) comes back as `missing`. CodeView
 // falls back to patch-only rendering in either case.
 export type SideContents =
   | { contents: string }
   | { binary: true }
-  | { oversize: true; size: number }
+  | { oversize: true; size: number; lines?: number }
   | { missing: true }
 
 export type FileContentsMap = Record<string, { old: SideContents; new: SideContents }>
@@ -40,6 +41,16 @@ export interface DiffData {
 // the batch case used by loadFiles below.
 type FileDiffData = DiffData
 
+// What range the review covers.
+//
+// 'uncommitted' — the working tree against HEAD, gated by the staged/untracked
+// toggles below. The original behavior and still the default.
+// 'branch' — the working tree against its merge-base with the base branch, so
+// the branch's own commits are in the diff too. The staged toggle has no effect
+// here: a ref-to-working-tree diff spans the index by construction (see the
+// server's `diff_against_ref`), so the control is disabled rather than lying.
+export type DiffScope = 'uncommitted' | 'branch'
+
 // Toolbar's staged/untracked toggle shape — kept narrow (and exported under
 // its original name) because Toolbar's onDiffOptionsChange round-trips this
 // exact shape through updateSettings. useDiff's own options are broader; see
@@ -47,6 +58,7 @@ type FileDiffData = DiffData
 export interface DiffOptions {
   staged: boolean
   untracked: boolean
+  scope: DiffScope
 }
 
 export interface UseDiffOptions extends DiffOptions {
@@ -273,7 +285,7 @@ export function useDiff(options: UseDiffOptions) {
     const id = ledgerRef.current.beginFull()
     for (const c of inFlightRef.current) c.abort()
     inFlightRef.current.clear()
-    return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}`)
+    return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}&scope=${options.scope}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json()
@@ -290,7 +302,7 @@ export function useDiff(options: UseDiffOptions) {
         if (!isAbort(err)) setError(err.message)
       })
       .finally(() => setLoading(false))
-  }, [options.staged, options.untracked])
+  }, [options.staged, options.untracked, options.scope])
 
   // Batch refetch: pull several files' diffs in ONE request / ONE server-side
   // git diff and splice every fragment into the current merged state via a
@@ -307,7 +319,7 @@ export function useDiff(options: UseDiffOptions) {
       const id = ledgerRef.current.beginPaths(paths)
       const controller = new AbortController()
       inFlightRef.current.add(controller)
-      return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}&${fileParams}`, {
+      return fetch(`/api/diff?staged=${options.staged}&untracked=${options.untracked}&scope=${options.scope}&${fileParams}`, {
         signal: controller.signal,
       })
         .then((res) => {
@@ -374,7 +386,7 @@ export function useDiff(options: UseDiffOptions) {
           inFlightRef.current.delete(controller)
         })
     },
-    [options.staged, options.untracked, load, commitStale],
+    [options.staged, options.untracked, options.scope, load, commitStale],
   )
 
   // Single-path refetch (file-written, a single direct-edit file-changed) — the

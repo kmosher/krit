@@ -209,6 +209,7 @@ function renderUseDiff(overrides: Partial<UseDiffOptions> = {}) {
   const options: UseDiffOptions = {
     staged: false,
     untracked: false,
+    scope: 'uncommitted',
     refreshMode: 'live-unless-active',
     activeFiles: new Set(),
     editingFiles: new Set(),

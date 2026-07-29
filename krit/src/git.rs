@@ -181,6 +181,103 @@ fn diff_impl(
     Ok(parts.join("\n"))
 }
 
+/// The default base-branch ladder, used when settings name none.
+pub const DEFAULT_BASE_BRANCHES: [&str; 2] = ["main", "master"];
+
+fn ref_exists(root: &Path, name: &str) -> bool {
+    git_output_at(root, &["rev-parse", "--verify", "--quiet", name]).is_ok()
+}
+
+/// The first candidate in `candidates` that resolves, each tried as
+/// `origin/<name>` before the bare local branch, falling back to whatever
+/// `origin/HEAD` points at.
+///
+/// A ladder rather than one configured name because the answer differs per repo
+/// and nobody wants to reconfigure krit per checkout: `main` here, `master`
+/// there, `develop` at work. Remote-first because the local branch is whatever
+/// the reviewer last fetched — diffing against a stale local `main` silently
+/// attributes other people's merged commits to this branch.
+pub fn resolve_base_ref(root: &Path, candidates: &[String]) -> Option<String> {
+    for name in candidates {
+        let remote = format!("origin/{name}");
+        if ref_exists(root, &remote) {
+            return Some(remote);
+        }
+        if ref_exists(root, name) {
+            return Some(name.clone());
+        }
+    }
+    // Nothing named resolved — ask the remote what its default branch is. Only
+    // present when someone has run `git remote set-head`/a full clone, hence
+    // last and still optional.
+    git_string_at(root, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The commit this branch left `base` at, which is what "everything this branch
+/// changed" is measured from. `None` when the two share no history (unrelated
+/// roots, a grafted shallow clone).
+pub fn merge_base_with_head(root: &Path, base: &str) -> Option<String> {
+    git_string_at(root, &["merge-base", base, "HEAD"])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn git_string_at(root: &Path, args: &[&str]) -> Option<String> {
+    git_output_at(root, args)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// Working tree vs an arbitrary ref, plus synthesized patches for untracked
+/// files — the "everything since the branch started" diff.
+///
+/// There is no `staged` parameter on purpose: diffing a ref against the working
+/// tree already spans the index, so staged and unstaged changes are both in
+/// here by construction. That is a real difference from `git_diff`, where the
+/// two are separate invocations that get concatenated, and it is why the staged
+/// toggle has nothing to control in this scope.
+pub fn diff_against_ref(
+    root: &Path,
+    base_ref: &str,
+    untracked_files: Option<&[String]>,
+    paths: Option<&[String]>,
+) -> Result<String, String> {
+    let mut parts: Vec<String> = Vec::new();
+    let base_args = scoped_args(
+        &[
+            QUOTE_PATH_OFF[0],
+            QUOTE_PATH_OFF[1],
+            "diff",
+            DIFF_FLAGS[0],
+            DIFF_FLAGS[1],
+            base_ref,
+        ],
+        paths,
+    );
+    let tracked =
+        git_output_at(root, &base_args).map(|b| String::from_utf8_lossy(&b).into_owned())?;
+    if !tracked.is_empty() {
+        parts.push(tracked);
+    }
+    if let Some(untracked_files) = untracked_files {
+        let scoped: Vec<String> = match paths {
+            Some(paths) => untracked_files
+                .iter()
+                .filter(|f| paths.contains(f))
+                .cloned()
+                .collect(),
+            None => untracked_files.to_vec(),
+        };
+        let u = untracked_files_diff_for(root, &scoped);
+        if !u.is_empty() {
+            parts.push(u);
+        }
+    }
+    Ok(parts.join("\n"))
+}
+
 pub fn untracked_file_paths(root: &Path) -> Vec<String> {
     // Run from the repo root so paths come back root-relative regardless of
     // the server's launch cwd — from a subdir, cwd-relative output silently
@@ -453,6 +550,146 @@ mod tests {
 
         let full = git_diff(false, None, &root).unwrap();
         assert!(full.contains("a.rs") && full.contains("b.rs"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `origin/<name>` without a second repo to fetch from: a ref under
+    /// `refs/remotes/origin/` is just a ref, and the ladder only ever asks
+    /// `rev-parse` whether it resolves.
+    fn fake_remote_branch(root: &Path, name: &str, at: &str) {
+        git(
+            root,
+            &["update-ref", &format!("refs/remotes/origin/{name}"), at],
+        );
+    }
+
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_base_ladder_takes_the_first_candidate_that_resolves() {
+        let root = init_repo("base-ladder");
+        std::fs::write(root.join("a.rs"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        git(&root, &["branch", "-M", "master"]);
+
+        // `develop` doesn't exist, so the ladder walks past it to `master`
+        // rather than stopping at the first name.
+        assert_eq!(
+            resolve_base_ref(&root, &strings(&["develop", "main", "master"])),
+            Some("master".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_remote_candidate_outranks_the_local_branch_of_the_same_name() {
+        // The local branch is only as fresh as the reviewer's last checkout of
+        // it; origin/<name> is what the branch will actually merge into. Taking
+        // the local one silently folds other people's landed commits into "what
+        // this branch changed".
+        let root = init_repo("remote-first");
+        std::fs::write(root.join("a.rs"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        git(&root, &["branch", "-M", "main"]);
+        fake_remote_branch(&root, "main", "HEAD");
+
+        assert_eq!(
+            resolve_base_ref(&root, &strings(&["main"])),
+            Some("origin/main".to_string()),
+            "origin/main exists, so the bare local main must not win"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_candidate_resolving_is_reported_rather_than_guessed() {
+        let root = init_repo("no-base");
+        std::fs::write(root.join("a.rs"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        git(&root, &["branch", "-M", "some-topic"]);
+
+        // No main, no master, no origin/HEAD. Returning None lets the caller say
+        // so; inventing a base would silently diff against the wrong thing.
+        assert_eq!(resolve_base_ref(&root, &strings(&["main", "master"])), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_branch_scope_spans_commits_index_and_working_tree_at_once() {
+        // The point of the scope: everything this branch did, whatever state
+        // each change happens to be in. `git_diff` needs two invocations and a
+        // `staged` flag to approximate this; a ref-to-working-tree diff gets it
+        // in one, which is why diff_against_ref has no staged parameter.
+        let root = init_repo("branch-scope");
+        std::fs::write(root.join("base.rs"), "base\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        git(&root, &["branch", "-M", "main"]);
+        let base = merge_base_with_head(&root, "main").unwrap();
+
+        git(&root, &["checkout", "-q", "-b", "topic"]);
+        std::fs::write(root.join("committed.rs"), "committed\n").unwrap();
+        git(&root, &["add", "committed.rs"]);
+        git(&root, &["commit", "-q", "-m", "on the branch"]);
+        std::fs::write(root.join("staged.rs"), "staged\n").unwrap();
+        git(&root, &["add", "staged.rs"]);
+        std::fs::write(root.join("base.rs"), "base edited\n").unwrap();
+
+        let patch = diff_against_ref(&root, &base, None, None).unwrap();
+        for expected in ["committed.rs", "staged.rs", "base.rs"] {
+            assert!(
+                patch.contains(expected),
+                "branch scope must include {expected}: {patch}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_branch_scope_ignores_what_landed_on_the_base_after_the_fork() {
+        // This is the whole reason the scope uses a merge-base and not the base
+        // tip: a reviewer reading their own branch must not be shown commits
+        // someone else merged into main while they worked.
+        let root = init_repo("merge-base");
+        std::fs::write(root.join("base.rs"), "base\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        git(&root, &["branch", "-M", "main"]);
+
+        git(&root, &["checkout", "-q", "-b", "topic"]);
+        std::fs::write(root.join("mine.rs"), "mine\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "mine"]);
+
+        // Someone else lands on main after the fork point.
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("theirs.rs"), "theirs\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "theirs"]);
+        git(&root, &["checkout", "-q", "topic"]);
+
+        let base = merge_base_with_head(&root, "main").unwrap();
+        let patch = diff_against_ref(&root, &base, None, None).unwrap();
+        assert!(patch.contains("mine.rs"));
+        assert!(
+            !patch.contains("theirs.rs"),
+            "a commit landed on main after the fork is not this branch's change: {patch}"
+        );
+
+        // Diffing the base *tip* is the bug this guards: from there, their
+        // commit reads as this branch deleting their file.
+        let from_tip = diff_against_ref(&root, "main", None, None).unwrap();
+        assert!(from_tip.contains("theirs.rs"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

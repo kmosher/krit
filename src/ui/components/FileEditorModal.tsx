@@ -85,7 +85,15 @@ export function FileEditorModal({ filePath, initialContents, onClose, onSave }: 
       e.preventDefault()
       requestClose()
     }
-    if (e.key === 's' && (e.metaKey || e.ctrlKey)) {
+    // `key` OR `code`, because neither alone reaches every keyboard. `key` is
+    // the character the layout produced, so it is what a Dvorak or Colemak user
+    // means by "S" — but on a layout with no Latin `s` at all (Cyrillic, Greek,
+    // or an active CJK input method) it never arrives, and the only save
+    // shortcut in krit would be unreachable. `code` names the physical key,
+    // which those layouts still report as KeyS. Accepting both costs nothing:
+    // no layout produces `s` from a key that isn't KeyS *and* means something
+    // else by it.
+    if ((e.key === 's' || e.code === 'KeyS') && (e.metaKey || e.ctrlKey)) {
       e.preventDefault()
       void handleSave()
     }

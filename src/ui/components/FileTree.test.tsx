@@ -359,6 +359,25 @@ describe('<FileTree>', () => {
     expect(onFileClick).not.toHaveBeenCalled()
   })
 
+  it('applies a stale file from the keyboard, without also navigating', () => {
+    // The dot is the only per-file way to apply a deferred change. Reachable by
+    // mouse alone, a keyboard user's only option is the toolbar's
+    // refresh-everything button, which applies every other file's changes too.
+    const onApplyStale = vi.fn()
+    const { onFileClick } = renderTree({
+      staleFiles: new Set(['README.md']),
+      onApplyStale,
+    })
+    const dot = screen.getByLabelText('README.md changed on disk — apply the change')
+    expect(dot.getAttribute('tabindex')).toBe('0')
+    fireEvent.keyDown(dot, { key: 'Enter' })
+    expect(onApplyStale).toHaveBeenCalledWith('README.md')
+    expect(onFileClick).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(dot, { key: ' ' })
+    expect(onApplyStale).toHaveBeenCalledTimes(2)
+  })
+
   it('shows only the expand button when collapsed', () => {
     const { container } = renderTree({ collapsed: true, onToggleCollapse: vi.fn() })
     expect(container.querySelectorAll('.ft-file-name')).toHaveLength(0)

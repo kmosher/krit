@@ -8,7 +8,7 @@ use crate::git;
 use crate::hub::{Hub, Role};
 use crate::pathsafe::is_safe_path;
 use crate::reanchor::reanchor_file_comments;
-use crate::settings::{load_settings, save_settings};
+use crate::settings::{Loaded, load_settings, save_settings};
 use crate::store::{CommentStore, UpdateFields};
 use crate::types::{CommentReply, EditRange, Event, ReviewComment, Suggestion, now_millis};
 use axum::Router;
@@ -33,6 +33,12 @@ use std::time::{Duration, Instant};
 struct Assets;
 
 const FILE_TEXT_CAP_BYTES: usize = 5 * 1024 * 1024;
+/// A second cap on the same contents, because bytes are a poor proxy for what
+/// rendering a side actually costs: a 300k-line file of short lines sits well
+/// under `FILE_TEXT_CAP_BYTES` and still asks CodeView to build a row model
+/// two orders of magnitude past anything a reviewer reads. Whichever cap trips
+/// first degrades the file to patch-only.
+const FILE_TEXT_CAP_LINES: usize = 50_000;
 const UNDO_BUFFER_CAP: usize = 20;
 
 /// `branch_name()` forks `git rev-parse`. A full `/api/diff` refetch (no
@@ -64,6 +70,9 @@ pub struct Inner {
     pub store: Mutex<CommentStore>,
     pub repo_root: PathBuf,
     pub custom_diff_args: Option<Vec<String>>,
+    /// `--base <rev>`: an explicit base for the branch scope, outranking the
+    /// `baseBranches` ladder in settings. Any rev, not just a branch.
+    pub base_ref: Option<String>,
     /// `Some` only when the bind reaches past this machine — see
     /// `mint_api_token` and `require_api_token`.
     pub api_token: Option<String>,
@@ -92,6 +101,7 @@ pub fn new_state(
     store: CommentStore,
     repo_root: PathBuf,
     custom_diff_args: Option<Vec<String>>,
+    base_ref: Option<String>,
     api_token: Option<String>,
 ) -> AppState {
     Arc::new(Inner {
@@ -99,6 +109,7 @@ pub fn new_state(
         store: Mutex::new(store),
         repo_root,
         custom_diff_args,
+        base_ref,
         api_token,
         viewed: Mutex::new(HashSet::new()),
         undo: Mutex::new(Vec::new()),
@@ -339,7 +350,63 @@ fn read_side(root: &std::path::Path, path: &str, git_ref: &str) -> Value {
     if buf.len() > FILE_TEXT_CAP_BYTES {
         return json!({ "oversize": true, "size": buf.len() });
     }
+    // Counted only once the byte cap has passed, so the scan is bounded by
+    // FILE_TEXT_CAP_BYTES rather than by the file.
+    let lines = buf.iter().filter(|b| **b == b'\n').count() + 1;
+    if lines > FILE_TEXT_CAP_LINES {
+        return json!({ "oversize": true, "size": buf.len(), "lines": lines });
+    }
     json!({ "contents": String::from_utf8_lossy(&buf) })
+}
+
+/// The `baseBranches` setting, as a ladder for `resolve_base_ref`. Non-strings
+/// are dropped rather than rejected: this key is read here but owned by the UI
+/// (see the settings module header), and one bad entry should cost that entry,
+/// not the whole scope. An empty or absent list means the built-in ladder.
+fn base_branch_candidates() -> Vec<String> {
+    let from_settings: Vec<String> = load_settings()
+        .effective
+        .get("baseBranches")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    if from_settings.is_empty() {
+        return git::DEFAULT_BASE_BRANCHES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    }
+    from_settings
+}
+
+/// What the branch scope diffs against: the merge-base of HEAD and the base
+/// branch, so the range is what *this* branch changed and not what landed on the
+/// trunk meanwhile.
+///
+/// The merge-base failing is not fatal — unrelated histories and shallow clones
+/// both do it — and falling back to the base ref itself matches what
+/// `resolve_diff_refs` already does for a `<a>...<b>` range.
+fn resolve_branch_scope_base(state: &AppState) -> Result<String, String> {
+    let base = match &state.base_ref {
+        Some(explicit) => explicit.clone(),
+        None => {
+            let candidates = base_branch_candidates();
+            git::resolve_base_ref(&state.repo_root, &candidates).ok_or_else(|| {
+                format!(
+                    "no base branch found: tried {} (each as origin/<name> then local), \
+                     and origin/HEAD is not set. Set baseBranches in settings or pass --base.",
+                    candidates.join(", ")
+                )
+            })?
+        }
+    };
+    Ok(git::merge_base_with_head(&state.repo_root, &base).unwrap_or(base))
 }
 
 async fn api_diff(
@@ -388,7 +455,21 @@ async fn api_diff(
     let untracked_arg = untracked.then_some(untracked_files.as_slice());
 
     let patch_result = if let Some(args) = &state.custom_diff_args {
+        // An explicit range on the command line outranks any scope: the invoker
+        // pinned what this review covers. The UI knows (`customMode`) and does
+        // not offer the control.
         git::custom_git_diff(args).map(|p| (p, git::resolve_diff_refs(Some(args))))
+    } else if param("scope") == Some("branch") {
+        match resolve_branch_scope_base(&state) {
+            Ok(base) => {
+                let paths = (!files.is_empty()).then_some(files.as_slice());
+                git::diff_against_ref(&state.repo_root, &base, untracked_arg, paths)
+                    // `staged` has no meaning here — a ref-to-working-tree diff
+                    // spans the index either way (see `diff_against_ref`).
+                    .map(|p| (p, (base, git::WORKING_TREE_REF.to_string())))
+            }
+            Err(msg) => Err(msg),
+        }
     } else {
         // Refs must mirror what git_diff actually covered so the client can
         // reproduce the patch from the bundled contents (see v1's table).
@@ -739,12 +820,24 @@ async fn api_edits_undo(
 
 // ---------- settings + viewed ----------
 
+/// The effective settings, carrying `settingsError` when the file on disk could
+/// not be used. Server-managed metadata rather than a setting, like
+/// `schemaVersion` — it is injected here and never written back to the file,
+/// and the UI renders it as a strip rather than silently running on defaults.
+fn settings_response(loaded: Loaded) -> Response {
+    let mut body = loaded.effective;
+    if let (Some(error), Value::Object(map)) = (loaded.error, &mut body) {
+        map.insert("settingsError".into(), Value::String(error));
+    }
+    axum::Json(body).into_response()
+}
+
 async fn api_settings_get() -> Response {
-    axum::Json(load_settings()).into_response()
+    settings_response(load_settings())
 }
 
 async fn api_settings_put(axum::Json(body): axum::Json<Value>) -> Response {
-    axum::Json(save_settings(&body)).into_response()
+    settings_response(save_settings(&body))
 }
 
 async fn api_viewed_get(State(state): State<AppState>) -> Response {
@@ -1474,6 +1567,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             None,
             None,
+            None,
         )
     }
 
@@ -1729,6 +1823,16 @@ mod tests {
         with_connect_info: bool,
         repo_root: PathBuf,
     ) -> u16 {
+        spawn_server_full(rt, token, with_connect_info, repo_root, None)
+    }
+
+    fn spawn_server_full(
+        rt: &tokio::runtime::Runtime,
+        token: Option<String>,
+        with_connect_info: bool,
+        repo_root: PathBuf,
+        base_ref: Option<String>,
+    ) -> u16 {
         rt.block_on(async move {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -1737,6 +1841,7 @@ mod tests {
                 CommentStore::new(None),
                 repo_root,
                 None,
+                base_ref,
                 token,
             ));
             tokio::spawn(async move {
@@ -1893,6 +1998,73 @@ mod tests {
             ),
             200
         );
+    }
+
+    // ---------- diff scope ----------
+
+    #[test]
+    fn the_scope_param_selects_the_range_and_an_unknown_value_does_not() {
+        // What this pins is the wiring, not the range semantics (git.rs covers
+        // those): a typo in the param name, or a value the server doesn't
+        // recognize, must not quietly serve the uncommitted diff under a label
+        // that says otherwise. Silent fall-through is the failure mode.
+        let root = std::env::temp_dir().join(format!("krit-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t.t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["branch", "-M", "trunk"]);
+
+        git(&["checkout", "-q", "-b", "topic"]);
+        std::fs::write(root.join("committed.txt"), "on the branch\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "branch work"]);
+        std::fs::write(root.join("base.txt"), "base edited\n").unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let port = spawn_server_full(&rt, None, true, root.clone(), Some("trunk".into()));
+        let patch_for = |query: &str| -> String {
+            let res: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/diff?{query}"))
+                .call()
+                .expect("the diff lands")
+                .into_json()
+                .unwrap();
+            res["patch"].as_str().unwrap_or_default().to_string()
+        };
+
+        let branch = patch_for("staged=false&untracked=false&scope=branch");
+        assert!(
+            branch.contains("committed.txt") && branch.contains("base.txt"),
+            "the branch scope covers the branch's commit and the working tree: {branch}"
+        );
+
+        for query in [
+            "staged=false&untracked=false",
+            "staged=false&untracked=false&scope=uncommitted",
+            "staged=false&untracked=false&scope=nonsense",
+        ] {
+            let patch = patch_for(query);
+            assert!(
+                !patch.contains("committed.txt"),
+                "`{query}` must not silently widen to the branch range: {patch}"
+            );
+            assert!(patch.contains("base.txt"), "`{query}` still shows the edit");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ---------- delete/undo content-tag handshake ----------

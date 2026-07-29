@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import type { DiffScope } from './useDiff'
 
 export type RefreshMode = 'manual' | 'live-unless-active' | 'ultra'
 
@@ -9,6 +10,7 @@ export interface Settings {
   defaultTabSize: number
   browser?: string
   refreshMode: RefreshMode
+  scope: DiffScope
 }
 
 const DEFAULTS: Settings = {
@@ -17,6 +19,26 @@ const DEFAULTS: Settings = {
   diffStyle: 'split',
   defaultTabSize: 4,
   refreshMode: 'live-unless-active',
+  scope: 'uncommitted',
+}
+
+/// Server-managed metadata that travels inside the settings object but is not a
+/// setting: present when the file on disk could not be used, so what we are
+/// running on is defaults the user never chose. Split out of `Settings` before
+/// the merge below — it must never be treated as a value to hold, send back, or
+/// persist.
+const SERVER_OWNED_KEY = 'settingsError'
+
+export function splitSettingsError(data: unknown): {
+  settings: Settings
+  error?: string
+} {
+  if (data === null || typeof data !== 'object') return { settings: DEFAULTS }
+  const { [SERVER_OWNED_KEY]: error, ...settings } = data as Record<string, unknown>
+  return {
+    settings: settings as unknown as Settings,
+    error: typeof error === 'string' ? error : undefined,
+  }
 }
 
 /// The load GET is a snapshot of the server from before the page finished
@@ -41,13 +63,16 @@ export function mergeLoadedSettings(
 export function useSettings() {
   const [settings, setSettings] = useState<Settings>(DEFAULTS)
   const [loaded, setLoaded] = useState(false)
+  const [settingsError, setSettingsError] = useState<string | undefined>()
   const dirtyRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     fetch('/api/settings')
       .then((res) => res.json())
-      .then((data: Settings) => {
-        setSettings((prev) => mergeLoadedSettings(data, prev, dirtyRef.current))
+      .then((data: unknown) => {
+        const { settings: incoming, error } = splitSettingsError(data)
+        setSettings((prev) => mergeLoadedSettings(incoming, prev, dirtyRef.current))
+        setSettingsError(error)
         setLoaded(true)
       })
       .catch(() => setLoaded(true))
@@ -65,7 +90,14 @@ export function useSettings() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     })
+      // The PUT response carries the same metadata as the GET, which is how a
+      // refused write reaches the reviewer: the server won't overwrite a file it
+      // couldn't read, so the toggle they just clicked did not persist and the
+      // optimistic state above is now a lie until they fix the file.
+      .then((res) => res.json())
+      .then((data: unknown) => setSettingsError(splitSettingsError(data).error))
+      .catch(() => {})
   }, [])
 
-  return { settings, loaded, updateSettings }
+  return { settings, loaded, settingsError, updateSettings }
 }

@@ -141,6 +141,29 @@ describe('FileEditorModal — saving', () => {
     expect(onSave).toHaveBeenCalledWith('edited text')
   })
 
+  it('saves from a layout that reports no Latin key, via the physical key', async () => {
+    // A Cyrillic layout (or an active CJK input method) delivers `key: 'ы'` for
+    // the physical S. Matching only `key` makes the sole save shortcut in krit
+    // unreachable on those keyboards, with no hint as to why.
+    const { container, onSave } = renderModal()
+    typeInCodeMirror(container, 'edited text')
+    await act(async () => {
+      fireEvent.keyDown(modal(container), { key: 'ы', code: 'KeyS', metaKey: true })
+    })
+    expect(onSave).toHaveBeenCalledWith('edited text')
+  })
+
+  it('does not save on some other key that merely reports a Latin s', async () => {
+    // The pair is OR'd, so neither half may fire on its own for an unrelated
+    // physical key with an unrelated character.
+    const { container, onSave } = renderModal()
+    typeInCodeMirror(container, 'edited text')
+    await act(async () => {
+      fireEvent.keyDown(modal(container), { key: 'k', code: 'KeyK', metaKey: true })
+    })
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
   it('keeps the modal open and shows why when the write fails', async () => {
     // Closing on failure would throw the reviewer's edits away and leave them
     // believing the file was written.

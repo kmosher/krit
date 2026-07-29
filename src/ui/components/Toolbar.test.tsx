@@ -24,7 +24,7 @@ function renderToolbar(over: Partial<Props> = {}) {
     deletions: 2,
     commentCount: 0,
     diffStyle: 'split',
-    diffOptions: { staged: false, untracked: false },
+    diffOptions: { staged: false, untracked: false, scope: 'uncommitted' },
     defaultTabSize: 4,
     customMode: false,
     watcherCount: 0,
@@ -91,20 +91,46 @@ describe('Toolbar — settings menu', () => {
     // The callback replaces the whole options object; forgetting to spread
     // silently resets `untracked` every time staged is toggled.
     const { onDiffOptionsChange } = renderToolbar({
-      diffOptions: { staged: false, untracked: true },
+      diffOptions: { staged: false, untracked: true, scope: 'uncommitted' },
     })
     openSettings()
     fireEvent.click(screen.getByLabelText('Show staged'))
-    expect(onDiffOptionsChange).toHaveBeenCalledWith({ staged: true, untracked: true })
+    expect(onDiffOptionsChange).toHaveBeenCalledWith({ staged: true, untracked: true, scope: 'uncommitted' })
+  })
+
+  it('switches the scope and keeps the other diff options', () => {
+    const { onDiffOptionsChange } = renderToolbar({
+      diffOptions: { staged: false, untracked: true, scope: 'uncommitted' },
+    })
+    openSettings()
+    fireEvent.change(screen.getByLabelText('Scope'), { target: { value: 'branch' } })
+    expect(onDiffOptionsChange).toHaveBeenCalledWith({
+      staged: false,
+      untracked: true,
+      scope: 'branch',
+    })
+  })
+
+  it('disables "Show staged" in the branch scope instead of ignoring it', () => {
+    // A ref-to-working-tree diff spans the index whatever the toggle says. Left
+    // live it would read as a control that does nothing; shown unchecked it
+    // would read as "staged changes are excluded", which is worse.
+    renderToolbar({
+      diffOptions: { staged: false, untracked: true, scope: 'branch' },
+    })
+    openSettings()
+    const staged = screen.getByLabelText('Show staged') as HTMLInputElement
+    expect(staged.disabled).toBe(true)
+    expect(staged.checked).toBe(true)
   })
 
   it('toggles "Show untracked" without dropping the other diff option', () => {
     const { onDiffOptionsChange } = renderToolbar({
-      diffOptions: { staged: true, untracked: true },
+      diffOptions: { staged: true, untracked: true, scope: 'uncommitted' },
     })
     openSettings()
     fireEvent.click(screen.getByLabelText('Show untracked'))
-    expect(onDiffOptionsChange).toHaveBeenCalledWith({ staged: true, untracked: false })
+    expect(onDiffOptionsChange).toHaveBeenCalledWith({ staged: true, untracked: false, scope: 'uncommitted' })
   })
 
   it('hides the git-diff options in custom mode', () => {

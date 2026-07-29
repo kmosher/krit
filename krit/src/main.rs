@@ -31,6 +31,9 @@ Options:
                      0.0.0.0 to expose the server to the local network, in
                      which case krit mints an access token and off-machine
                      clients must open the tokenized URL it prints.
+  --base <rev>       Base for the UI's "branch" scope, overriding the
+                     baseBranches ladder in settings. Any rev. The scope diffs
+                     the working tree against its merge-base with HEAD.
   --no-open          Don't open the browser automatically
   -v, --version      Show version number
   -h, --help         Show this help message
@@ -87,6 +90,7 @@ fn main() {
     let mut port_arg: Option<u16> = None;
     let mut host = "127.0.0.1".to_string();
     let mut no_open = false;
+    let mut base_ref: Option<String> = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut past_dash_dash = false;
     let mut iter = raw_args.iter();
@@ -110,6 +114,13 @@ fn main() {
                     std::process::exit(1);
                 };
                 host = v.clone();
+            }
+            "--base" => {
+                let Some(v) = iter.next() else {
+                    eprintln!("Error: --base requires a revision");
+                    std::process::exit(1);
+                };
+                base_ref = Some(v.clone());
             }
             "--no-open" => no_open = true,
             "-h" | "--help" => {
@@ -139,7 +150,7 @@ fn main() {
     }
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    runtime.block_on(serve(port_arg, host, no_open, custom_diff_args));
+    runtime.block_on(serve(port_arg, host, no_open, custom_diff_args, base_ref));
 }
 
 /// What argv means before any of it is acted on.
@@ -256,6 +267,7 @@ async fn serve(
     host: String,
     no_open: bool,
     custom_diff_args: Option<Vec<String>>,
+    base_ref: Option<String>,
 ) {
     let repo_root = PathBuf::from(git::repo_root().expect("repo root (checked above)"));
 
@@ -277,6 +289,7 @@ async fn serve(
         comment_store,
         repo_root.clone(),
         custom_diff_args,
+        base_ref,
         api_token.clone(),
     );
 
@@ -502,7 +515,14 @@ fn window_title_from(repo: &str, branch: &str) -> Option<String> {
 }
 
 fn launch_review_ui(url: &str) {
-    let settings = settings::load_settings();
+    let loaded = settings::load_settings();
+    // The UI gets this as a strip; the launcher is the only place a `launcher`
+    // or `browser` preference is read, so a reviewer whose file is broken would
+    // otherwise just see krit ignore it and open the wrong thing.
+    if let Some(err) = &loaded.error {
+        eprintln!("Warning: {err}; using default settings.");
+    }
+    let settings = loaded.effective;
 
     if settings["launcher"].as_str() == Some("app") {
         // The desktop app claims the krit:// scheme; this deep link routes to
@@ -603,7 +623,10 @@ mod tests {
         // nil — but a future flag taking a word-shaped value inherits this,
         // and the failure mode is `krit` silently running a subcommand instead
         // of opening a review. Change this test when that becomes real.
-        assert_eq!(dispatch(&argv(&["--host", "state"])), Dispatch::Subcommand(1));
+        assert_eq!(
+            dispatch(&argv(&["--host", "state"])),
+            Dispatch::Subcommand(1)
+        );
     }
 
     // --- verb parsing --------------------------------------------------

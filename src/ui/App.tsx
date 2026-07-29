@@ -201,7 +201,7 @@ export function editToggleAction(state: {
 }
 
 export function App() {
-  const { settings, loaded, updateSettings } = useSettings()
+  const { settings, loaded, settingsError, updateSettings } = useSettings()
   // Active file editor: path + the working-tree contents loaded for editing.
   // Loaded lazily on Edit click (small fetch) rather than carrying every
   // file's contents through React state.
@@ -256,6 +256,7 @@ export function App() {
   } = useDiff({
     staged: settings.staged,
     untracked: settings.untracked,
+    scope: settings.scope,
     refreshMode: settings.refreshMode,
     activeFiles,
     editingFiles: inlineEditFiles,
@@ -759,7 +760,11 @@ export function App() {
         deletions={diffStats.deletions}
         commentCount={comments.length}
         diffStyle={settings.diffStyle}
-        diffOptions={{ staged: settings.staged, untracked: settings.untracked }}
+        diffOptions={{
+          staged: settings.staged,
+          untracked: settings.untracked,
+          scope: settings.scope,
+        }}
         defaultTabSize={settings.defaultTabSize}
         browser={settings.browser}
         customMode={customMode}
@@ -897,6 +902,16 @@ export function App() {
           </button>
         </div>
       ))}
+      {/* Last in DOM order, so column-reverse puts it topmost: least urgent of
+          the strips, and the only one describing a durable condition rather than
+          an event. No Dismiss — it stays true until the file is fixed, and
+          hiding it would put the reviewer back on settings they never chose
+          without knowing it. */}
+      {settingsError && (
+        <div className="settings-notice" role="status">
+          <span>{settingsError}. Running on default settings.</span>
+        </div>
+      )}
       </div>
       {undoQueue.length > 0 && (
         <UndoToast
