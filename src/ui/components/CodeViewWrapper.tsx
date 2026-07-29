@@ -880,7 +880,11 @@ export const CodeViewWrapper = memo(
         // no pill. Hover is kept only for the side, and only when it agrees
         // about the file; the scroll-tracked active file is the last resort,
         // for a root that somehow has no header rendered.
-        const filePath = filePathForRoot(shadowRootOf(deepTarget)) ?? lastActiveFileRef.current
+        const filePath =
+          filePathForRoot(
+            shadowRootOf(deepTarget),
+            viewerRef.current?.getInstance()?.getRenderedItems(),
+          ) ?? lastActiveFileRef.current
         if (!filePath) return
         // 'additions' as the default matches handleGutterClick: when the side
         // can't be determined precisely, that's where reviewers comment.
@@ -1075,14 +1079,8 @@ export const CodeViewWrapper = memo(
         const confirmingSave = editing && confirmSaveFiles.has(item.id)
         const empty =
           item.fileDiff.splitLineCount === 0 && item.fileDiff.unifiedLineCount === 0
-        // data-krit-file: Pierre slots this into the host element's light DOM,
-        // which makes it the one place a rendered file names itself in the DOM.
-        // The diffs-container host carries no id or data attribute of its own
-        // and there is no public element-to-item lookup, so filePathForRoot
-        // reads this back to answer "which file is this shadow root showing" —
-        // see the mouseup handler.
         return (
-          <div className="codeview-header-prefix" data-krit-file={item.id}>
+          <div className="codeview-header-prefix">
             <button
               type="button"
               className="codeview-collapse-btn"
