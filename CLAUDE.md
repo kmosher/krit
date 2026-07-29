@@ -146,8 +146,25 @@ skill together when you do.
   file** is untested. Both render into Pierre's shadow root, historically
   where the WebKit trouble was.
 
-- Comment/suggest **drafts don't survive a page reload** (persistence is the
-  planned "Stage 8" in docs/design/live-review.md). Warn before advising a
-  refresh mid-review.
+- **"Draft" and "queued" are two different things, and the wire still says
+  `draft` for the wrong one.** A `ReviewComment` with `status: "draft"` *is* a
+  comment — stored, listable, withheld from the agent until posted — and the UI
+  calls that **queued** ("Queue comment", "Post queued"). A `PendingDraft` is
+  text the reviewer has not submitted at all, persisted through
+  `/api/pending-drafts` so it survives a reload or a closed TUI pane. Both used
+  to be called "draft". The user-facing strings are split; `status: "draft"`,
+  `draftCount` and `postDrafts` still carry the old name, so read those as
+  "queued" until someone renames the wire (which means moving the skill too).
+- Pending drafts are the one mutation that **deliberately does not broadcast**.
+  Echoing a reviewer's keystrokes back into the form they came from fights the
+  form, and unsent text is not the agent's business — so there is no SSE event
+  and nothing for `agent_visible` to filter. Hydrate on load, write on change.
+  Two clients editing the same slot is therefore last-writer-wins, not merged.
+- `updateDraft` in `CodeViewWrapper` mutates the draft object **in place** and
+  never calls `setPending` — a state update there rebuilds the file's whole
+  annotation DOM on every keystroke. That means there is no state transition an
+  effect can watch, which is why persistence hangs off `updateDraft` itself and
+  why `usePendingDrafts.persist` snapshots the fields instead of holding the
+  reference.
 - Nothing here publishes to npm. `diffx-cli` on npm is wong2's package,
   not ours.

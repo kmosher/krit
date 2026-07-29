@@ -66,6 +66,49 @@ impl ReviewComment {
     }
 }
 
+/// Comment text the reviewer is still typing — not a comment yet.
+///
+/// Distinct from a `ReviewComment` with `status: "draft"`, which *is* a comment:
+/// submitted, stored, listable, and merely withheld from the agent until posted.
+/// A `PendingDraft` has never been submitted at all. The UI calls the former
+/// "queued" and the latter a draft, because both were once called "draft" and it
+/// was impossible to tell which anyone meant.
+///
+/// Identity is the anchor, not an id: one open form per file + side + line
+/// range, which is already how the UI's `pending` map is keyed. A second draft
+/// in the same slot is the same draft.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingDraft {
+    pub file_path: String,
+    /// "deletions" | "additions"
+    pub side: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub body: String,
+    /// Whether the form's suggestion editor is open, and what is in it. Both are
+    /// part of the draft: reopening on the body alone would silently drop a
+    /// rewrite the reviewer had typed.
+    #[serde(default)]
+    pub suggest_mode: bool,
+    #[serde(default)]
+    pub suggestion_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_column: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_text: Option<String>,
+    pub updated_at: u64,
+}
+
+impl PendingDraft {
+    /// The anchor tuple this draft is identified by.
+    pub fn slot(&self) -> (&str, &str, u32, u32) {
+        (&self.file_path, &self.side, self.start_line, self.end_line)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditRange {

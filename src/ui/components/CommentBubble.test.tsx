@@ -162,7 +162,7 @@ describe('CommentBubble', () => {
       // representation, so the button must not appear on a reply form.
       renderBubble()
       fireEvent.click(screen.getByRole('button', { name: /Reply/ }))
-      expect(screen.queryByRole('button', { name: 'Save as draft' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Queue comment' })).toBeNull()
     })
   })
 })

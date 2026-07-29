@@ -94,18 +94,18 @@ describe('CommentForm — plain comment', () => {
     expect(onBodyChange).toHaveBeenLastCalledWith('ab')
   })
 
-  it('offers "Save as draft" only when the caller supports drafts', () => {
+  it('offers "Queue comment" only when the caller supports queueing', () => {
     // Reply forms have no draft concept; showing the button there would post
     // a comment the reviewer expected to stay private.
     renderForm()
-    expect(screen.queryByRole('button', { name: 'Save as draft' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Queue comment' })).toBeNull()
   })
 
-  it('routes "Save as draft" to onSaveDraft, never to onSubmit', () => {
+  it('routes "Queue comment" to onSaveDraft, never to onSubmit', () => {
     const onSaveDraft = vi.fn()
     const { onSubmit } = renderForm({ onSaveDraft })
     fireEvent.change(body(), { target: { value: 'private note' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save as draft' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Queue comment' }))
     expect(onSaveDraft).toHaveBeenCalledWith('private note')
     expect(onSubmit).not.toHaveBeenCalled()
   })
@@ -203,7 +203,7 @@ describe('CommentForm — suggest mode', () => {
     expect(onSubmit).toHaveBeenCalledWith('', { newLines: ['const a = 2'] })
   })
 
-  it('sends the same payload through "Save as draft"', () => {
+  it('sends the same payload through "Queue comment"', () => {
     const onSaveDraft = vi.fn()
     renderForm({
       originalLines: 'a',
@@ -211,7 +211,7 @@ describe('CommentForm — suggest mode', () => {
       initialSuggestionText: 'b',
       onSaveDraft,
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Save as draft' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Queue comment' }))
     expect(onSaveDraft).toHaveBeenCalledWith('', { newLines: ['b'] })
   })
 

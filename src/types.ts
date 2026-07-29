@@ -119,3 +119,30 @@ export interface ReviewComment {
   endColumn?: number
   selectedText?: string
 }
+
+// Comment text the reviewer is still typing -- not a comment yet. Mirrors
+// `PendingDraft` in krit/src/types.rs.
+//
+// Distinct from a ReviewComment with status 'draft', which *is* a comment:
+// stored, listable, and merely withheld from the agent until posted. The UI
+// calls that one "queued" and this one a draft, because both used to be called
+// "draft" and it was impossible to tell which anyone meant.
+//
+// Identity is the anchor, not an id: one open form per file + side + line
+// range, matching how CodeViewWrapper's `pending` map is keyed. A second draft
+// in the same slot is the same draft.
+export interface PendingDraft {
+  filePath: string
+  side: 'deletions' | 'additions'
+  startLine: number
+  endLine: number
+  body: string
+  // Whether the suggestion editor is open and what is in it. Both belong to the
+  // draft: restoring the body alone would silently drop a typed rewrite.
+  suggestMode: boolean
+  suggestionText: string
+  startColumn?: number
+  endColumn?: number
+  selectedText?: string
+  updatedAt: number
+}

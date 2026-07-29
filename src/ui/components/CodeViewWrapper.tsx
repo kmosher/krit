@@ -24,6 +24,7 @@ import {
   type SelectionAnchor,
 } from '../utils/selectionMapping'
 import { computeSingleEdit } from '../utils/textEdits'
+import { usePendingDrafts } from '../hooks/usePendingDrafts'
 
 type DraftMetadata = {
   _pending: true
@@ -427,6 +428,11 @@ export const CodeViewWrapper = memo(
     const viewerRef = useRef<CodeViewHandle<Metadata> | null>(null)
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const [pending, setPending] = useState<Map<string, DraftMetadata>>(() => new Map())
+    const {
+      restored: restoredDrafts,
+      persist: persistDraft,
+      forget: forgetDraft,
+    } = usePendingDrafts()
     // Floating Comment/Delete pill for a native text selection inside the
     // code surface (Stage 6). null whenever there's no active selection to
     // show it for.
@@ -449,9 +455,30 @@ export const CodeViewWrapper = memo(
       onActiveDraftsChange?.(next)
     }, [pending, onActiveDraftsChange])
 
+    // Restore whatever was being typed when the page (or the TUI pane) last
+    // went away. Only ever runs into an empty map: a draft opened before the
+    // read lands is newer than the read, and stomping it would lose the very
+    // keystrokes this feature exists to keep.
+    useEffect(() => {
+      if (!restoredDrafts || restoredDrafts.length === 0) return
+      setPending((prev) => {
+        if (prev.size > 0) return prev
+        const next = new Map<string, DraftMetadata>()
+        for (const d of restoredDrafts) {
+          const draft: DraftMetadata = { ...d, _pending: true, side: d.side as AnnotationSide }
+          next.set(draftKey(draft), draft)
+        }
+        return next
+      })
+    }, [restoredDrafts])
+
     const removeDraft = (key: string) => {
       setPending((prev) => {
-        if (!prev.has(key)) return prev
+        const draft = prev.get(key)
+        if (!draft) return prev
+        // Submitted or discarded — either way it is no longer unsent text, so
+        // it must not come back on the next load.
+        forgetDraft(draft)
         const next = new Map(prev)
         next.delete(key)
         return next
@@ -473,6 +500,11 @@ export const CodeViewWrapper = memo(
       patch: Partial<Pick<DraftMetadata, 'body' | 'suggestMode' | 'suggestionText'>>,
     ) => {
       Object.assign(draft, patch)
+      // The only signal that anything changed: because the mutation above is
+      // deliberately invisible to React, there is no state transition an effect
+      // could watch. Debounced inside the hook, so this is one write per phrase
+      // typed, not per keystroke.
+      persistDraft(draft)
     }
 
     useImperativeHandle(

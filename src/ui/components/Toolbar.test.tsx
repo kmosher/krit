@@ -200,14 +200,14 @@ describe('Toolbar — copying comments', () => {
 })
 
 describe('Toolbar — drafts', () => {
-  it('offers "Post drafts" only when drafts exist', () => {
+  it('offers "Post queued" only when queued comments exist', () => {
     renderToolbar({ commentCount: 1, draftCount: 0 })
-    expect(screen.queryByRole('button', { name: /Post drafts/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Post queued/ })).toBeNull()
   })
 
   it('posts the drafts', () => {
     const { onPostDrafts } = renderToolbar({ commentCount: 3, draftCount: 2 })
-    fireEvent.click(screen.getByRole('button', { name: 'Post drafts (2)' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Post queued (2)' }))
     expect(onPostDrafts).toHaveBeenCalled()
   })
 })
@@ -348,7 +348,7 @@ describe('Toolbar — finishing the review', () => {
     // button publishes them.
     renderToolbar({ commentCount: 3, draftCount: 1, watcherCount: 1 })
     expect(
-      screen.getByTitle('End the review session — also posts your 1 remaining draft.'),
+      screen.getByTitle('End the review session — also posts your 1 remaining queued comment.'),
     ).toBeInTheDocument()
   })
 

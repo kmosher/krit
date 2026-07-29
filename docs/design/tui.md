@@ -238,10 +238,12 @@ only if the honesty problem above can be solved in the UI.
 - **`api_file_content_get` has no size cap.** `read_side` caps both bytes and
   lines, but the file-content route streams whatever it finds. A TUI that opens
   files directly (phase 4, or a whole-worktree browser) will hit this first.
-- **Drafts do not survive a client restart.** Already a known gap for page
-  reloads; a TUI makes it worse, because closing a pane is a much lighter
-  gesture than reloading a browser tab. Draft persistence should probably land
-  before phase 3 puts the TUI in a pane people close reflexively.
+- ~~**Drafts do not survive a client restart.**~~ Closed: unsent comment text
+  now persists server-side through `/api/pending-drafts`, so the TUI gets it for
+  free — hydrate the composer from that route on start and write on change. The
+  route deliberately does not broadcast, so two clients on one slot is
+  last-writer-wins; for phase 1 that is fine (one reviewer), but a TUI and a
+  browser open on the same review will not see each other type.
 - **The SSE stream carries everything, deliberately.** Unlike
   `/api/events-ws`, `/api/events` does not filter `files-changed` or reanchor
   fallout (`server.rs`, `agent_visible`). That is correct for the TUI — it is a

@@ -14,11 +14,13 @@ interface CommentFormProps {
   // CodeMirror editor. Optional so reply forms (which don't suggest) can omit it.
   filePath?: string
   onSubmit: (body: string, suggestion?: { newLines: string[] }) => void
-  // "Save as draft" — posts the comment with status:'draft' instead of
-  // 'open' (server-side; see server.ts POST /api/comments). Distinct from
-  // the "draft" in this form's own lifted `pending`-map state below, which
-  // is in-progress *typing*, not yet submitted at all. Omitted for reply
-  // forms, which have no draft concept.
+  // "Queue comment" — posts the comment with status:'draft' instead of 'open'
+  // (server-side; see POST /api/comments), so it exists but stays invisible to
+  // the listening agent until released. The wire still says 'draft' for this;
+  // the *user-facing* word is "queued", because "draft" now means the
+  // in-progress typing persisted through `pending` below — text not submitted
+  // at all. Those two were both called "draft" and it was a trap. Omitted for
+  // reply forms, which can only post.
   onSaveDraft?: (body: string, suggestion?: { newLines: string[] }) => void
   onCancel: () => void
   // Lifted-state hooks for drafts that must survive a remount (see the
@@ -337,20 +339,20 @@ export function CommentForm({
           {suggestMode ? 'Cancel suggest' : 'Suggest edit'}
         </button>
         <div style={{ flex: 1 }} />
+        <button className="btn btn-secondary" onClick={requestCancel}>
+          Cancel
+        </button>
         {onSaveDraft && (
           <button
             type="button"
             className="btn btn-secondary"
             onClick={handleSaveDraft}
             disabled={submitDisabled}
-            title="Save without posting — stays invisible to the listening Claude session until you post it (or click Done reviewing)."
+            title="Queue without posting — the comment is saved but stays invisible to the listening Claude session until you post it (or click Done reviewing)."
           >
-            Save as draft
+            Queue comment
           </button>
         )}
-        <button className="btn btn-secondary" onClick={requestCancel}>
-          Cancel
-        </button>
         <button className="btn btn-primary" onClick={handleSubmit} disabled={submitDisabled}>
           {submitLabel}
         </button>

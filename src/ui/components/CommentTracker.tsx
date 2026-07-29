@@ -29,7 +29,7 @@ function StatusBadge({ status }: { status: CommentStatus }) {
   switch (status) {
     case 'draft':
       return (
-        <span className="ct-status ct-status-draft" title="Draft — not yet posted">
+        <span className="ct-status ct-status-draft" title="Queued — saved, not yet posted">
           <PenLine size={12} />
         </span>
       )
@@ -182,7 +182,7 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
         <MessageSquare size={14} />
         <span className="ct-title">Comments</span>
         <span className="ct-counts">
-          {draftCount > 0 && <span className="ct-count ct-count-draft">{draftCount} draft</span>}
+          {draftCount > 0 && <span className="ct-count ct-count-draft">{draftCount} queued</span>}
           {openCount > 0 && <span className="ct-count ct-count-open">{openCount} open</span>}
           {repliedCount > 0 && <span className="ct-count ct-count-replied">{repliedCount} replied</span>}
           {resolvedCount > 0 && <span className="ct-count ct-count-resolved">{resolvedCount} resolved</span>}

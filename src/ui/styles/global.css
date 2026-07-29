@@ -427,7 +427,7 @@ body {
     background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
 }
 
-/* "Post drafts" button — shown only while draftCount > 0 */
+/* "Post queued" button — shown only while draftCount > 0 */
 .btn-draft-post {
     border-color: var(--primary);
     color: var(--primary);

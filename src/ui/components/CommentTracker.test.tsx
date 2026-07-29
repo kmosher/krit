@@ -88,7 +88,7 @@ describe('CommentTracker', () => {
       expect(screen.queryByText(/replied/)).toBeNull()
     })
 
-    it('counts a draft as a draft even when it has replies', () => {
+    it('counts a queued comment as queued even when it has replies', () => {
       render(
         <CommentTracker
           comments={[
@@ -99,7 +99,7 @@ describe('CommentTracker', () => {
           ]}
         />,
       )
-      expect(screen.getByText('1 draft')).toBeInTheDocument()
+      expect(screen.getByText('1 queued')).toBeInTheDocument()
       expect(screen.queryByText(/replied/)).toBeNull()
     })
 

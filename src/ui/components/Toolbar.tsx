@@ -111,7 +111,7 @@ export function Toolbar({
     : !hasWatcher
       ? 'No agent or watcher is currently subscribed to events. Have Claude attach one, or use Copy comments to paste manually.'
       : draftCount > 0
-        ? `End the review session — also posts your ${draftCount} remaining draft${draftCount === 1 ? '' : 's'}.`
+        ? `End the review session — also posts your ${draftCount} remaining queued comment${draftCount === 1 ? '' : 's'}.`
         : commentCount === 0
           ? 'End the review session with no comments — add any concluding notes first.'
           : 'End the review session — tells the listening Claude session you are done.'
@@ -343,9 +343,9 @@ export function Toolbar({
           <button
             className="btn btn-sm btn-draft-post"
             onClick={onPostDrafts}
-            title={`Post ${draftCount} draft comment${draftCount === 1 ? '' : 's'} — makes them visible to the listening Claude session.`}
+            title={`Post ${draftCount} queued comment${draftCount === 1 ? '' : 's'} — makes them visible to the listening Claude session.`}
           >
-            Post drafts ({draftCount})
+            Post queued ({draftCount})
           </button>
         )}
         <button

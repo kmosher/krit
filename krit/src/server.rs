@@ -818,6 +818,65 @@ async fn api_edits_undo(
     axum::Json(json!({"ok": true})).into_response()
 }
 
+// ---------- pending drafts (text still being typed) ----------
+//
+// Deliberately not broadcast. Every other mutation here fans out on SSE so the
+// other tab catches up, but a draft is one reviewer mid-sentence: echoing each
+// keystroke back would fight the form it came from, and there is no second
+// author to inform. Nor does any of this reach `/api/events-ws` — unsent text is
+// not the agent's business until the reviewer submits it. Hydrate on load,
+// write on change; that is the whole contract.
+
+async fn api_pending_get(State(state): State<AppState>) -> Response {
+    axum::Json(lock(&state.store).pending_all()).into_response()
+}
+
+async fn api_pending_put(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let draft: crate::types::PendingDraft = match serde_json::from_value(body) {
+        Ok(draft) => draft,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": format!("not a pending draft: {err}")})),
+            )
+                .into_response();
+        }
+    };
+    if !is_plain_repo_path(&draft.file_path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "filePath must be a plain repo-relative path"})),
+        )
+            .into_response();
+    }
+    lock(&state.store).upsert_pending(draft);
+    axum::Json(json!({"ok": true})).into_response()
+}
+
+async fn api_pending_delete(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let (Some(file_path), Some(side), Some(start_line), Some(end_line)) = (
+        body["filePath"].as_str(),
+        body["side"].as_str(),
+        body["startLine"].as_u64(),
+        body["endLine"].as_u64(),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "filePath, side, startLine and endLine are required"})),
+        )
+            .into_response();
+    };
+    let removed =
+        lock(&state.store).remove_pending(file_path, side, start_line as u32, end_line as u32);
+    axum::Json(json!({"ok": true, "removed": removed})).into_response()
+}
+
 // ---------- settings + viewed ----------
 
 /// The effective settings, carrying `settingsError` when the file on disk could
@@ -1559,6 +1618,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/drafts/post", post(api_drafts_post))
         .route(
+            "/api/pending-drafts",
+            get(api_pending_get).put(api_pending_put),
+        )
+        .route("/api/pending-drafts/delete", post(api_pending_delete))
+        .route(
             "/api/comments/{id}",
             put(api_comment_put).delete(api_comment_delete),
         )
@@ -2066,6 +2130,58 @@ mod tests {
             ),
             200
         );
+    }
+
+    // ---------- pending drafts ----------
+
+    #[test]
+    fn pending_drafts_round_trip_and_reject_a_path_outside_the_repo() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let port = spawn_server(&rt, None, true);
+        let url = format!("http://127.0.0.1:{port}/api/pending-drafts");
+        let draft = json!({
+            "filePath": "src/a.rs",
+            "side": "additions",
+            "startLine": 10,
+            "endLine": 12,
+            "body": "half a thought",
+            "suggestMode": false,
+            "suggestionText": "",
+            "updatedAt": 1
+        });
+
+        ureq::put(&url).send_json(draft.clone()).expect("put lands");
+        let listed: Value = ureq::get(&url).call().unwrap().into_json().unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["body"], "half a thought");
+
+        // The same guard `file=` params get: a draft keyed to `../../etc` would
+        // put an attacker-chosen path into a store the UI reads back.
+        let escaped = ureq::put(&url)
+            .send_json(json!({
+                "filePath": "../../etc/passwd",
+                "side": "additions",
+                "startLine": 1, "endLine": 1,
+                "body": "x", "suggestMode": false, "suggestionText": "",
+                "updatedAt": 1
+            }))
+            .unwrap_err();
+        assert!(
+            matches!(escaped, ureq::Error::Status(400, _)),
+            "a path outside the repo must be refused: {escaped:?}"
+        );
+
+        let deleted: Value = ureq::post(&format!("{url}/delete"))
+            .send_json(json!({
+                "filePath": "src/a.rs", "side": "additions",
+                "startLine": 10, "endLine": 12
+            }))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(deleted["removed"], true);
+        let after: Value = ureq::get(&url).call().unwrap().into_json().unwrap();
+        assert!(after.as_array().unwrap().is_empty());
     }
 
     // ---------- diff scope ----------
