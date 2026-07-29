@@ -237,46 +237,60 @@ describe('shadowRootOf', () => {
 })
 
 describe('filePathForRoot', () => {
-  // The stamp lives in the host's light DOM, where Pierre slots krit's
-  // header-prefix content — not inside the shadow root the drag happened in.
-  function stampedRoot(path: string | null): ShadowRoot {
+  // A mounted file: one host element with its own shadow root, as CodeView
+  // renders it, paired with the {id, element} entry getRenderedItems() reports.
+  function mountFile(id: string): { root: ShadowRoot; rendered: { id: string; element: HTMLElement } } {
     const host = document.createElement('div')
     document.body.appendChild(host)
-    const root = host.attachShadow({ mode: 'open' })
-    if (path !== null) {
-      const slot = document.createElement('div')
-      slot.slot = 'header-prefix'
-      const prefix = document.createElement('div')
-      prefix.setAttribute('data-krit-file', path)
-      slot.appendChild(prefix)
-      host.appendChild(slot)
-    }
-    return root
+    return { root: host.attachShadow({ mode: 'open' }), rendered: { id, element: host } }
   }
 
-  it('reads the path off the host of the root the drag happened in', () => {
-    expect(filePathForRoot(stampedRoot('src/anchor.ts'))).toBe('src/anchor.ts')
+  it('resolves the file from the host of the root the drag happened in', () => {
+    const a = mountFile('src/anchor.ts')
+    expect(filePathForRoot(a.root, [a.rendered])).toBe('src/anchor.ts')
   })
 
   it('does not answer with a neighbouring file', () => {
     // Two files are mounted; each root must report its own. Getting this wrong
     // is the whole failure being fixed — the columns are right and the file is
     // someone else's, which no reviewer would think to check.
-    const a = stampedRoot('src/anchor.ts')
-    const b = stampedRoot('main.go')
-    expect(filePathForRoot(a)).toBe('src/anchor.ts')
-    expect(filePathForRoot(b)).toBe('main.go')
+    const a = mountFile('src/anchor.ts')
+    const b = mountFile('main.go')
+    const rendered = [a.rendered, b.rendered]
+    expect(filePathForRoot(a.root, rendered)).toBe('src/anchor.ts')
+    expect(filePathForRoot(b.root, rendered)).toBe('main.go')
   })
 
-  it('returns null when nothing is stamped, and for no root at all', () => {
-    // A header that hasn't rendered yet must read as "unknown" so the caller
-    // falls back, rather than as some other file.
-    expect(filePathForRoot(stampedRoot(null))).toBeNull()
-    expect(filePathForRoot(null)).toBeNull()
+  it('matches on element identity, not on position in the list', () => {
+    // Hosts are pooled and reused, so the rendered list is not in any order the
+    // caller can rely on; an index-based match would drift the moment CodeView
+    // recycled or reordered an element.
+    const a = mountFile('src/anchor.ts')
+    const b = mountFile('main.go')
+    expect(filePathForRoot(a.root, [b.rendered, a.rendered])).toBe('src/anchor.ts')
   })
 
-  it('treats an empty stamp as unknown', () => {
-    expect(filePathForRoot(stampedRoot(''))).toBeNull()
+  it('returns null for a host CodeView is not currently rendering', () => {
+    // A root whose host has been released back to the pool must read as
+    // "unknown" so the caller falls back, rather than as some other file.
+    const orphan = mountFile('src/gone.ts')
+    const live = mountFile('main.go')
+    expect(filePathForRoot(orphan.root, [live.rendered])).toBeNull()
+  })
+
+  it('returns null for no root and for no rendered list', () => {
+    const a = mountFile('src/anchor.ts')
+    expect(filePathForRoot(null, [a.rendered])).toBeNull()
+    expect(filePathForRoot(a.root, null)).toBeNull()
+    expect(filePathForRoot(a.root, [])).toBeNull()
+  })
+
+  it('ignores entries with no element of their own', () => {
+    // A known item that is not currently mounted has no element; treating a
+    // missing element as a match would name a file at random.
+    const a = mountFile('src/anchor.ts')
+    expect(filePathForRoot(a.root, [{ id: 'unmounted.ts' }, a.rendered])).toBe('src/anchor.ts')
+    expect(filePathForRoot(a.root, [{ id: 'unmounted.ts' }])).toBeNull()
   })
 })
 

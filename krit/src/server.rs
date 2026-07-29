@@ -1129,12 +1129,41 @@ async fn api_reply_post(
 
 // ---------- submit ----------
 
-async fn api_submit_post(State(state): State<AppState>) -> Response {
+/// Concluding notes from the Done-reviewing box. The whole body is optional —
+/// older callers (and `curl -X POST /api/submit`) send nothing at all — so this
+/// is read leniently: no body, an empty body, or unparseable JSON all mean "no
+/// summary" rather than a 400. Refusing to end a review over a malformed
+/// courtesy field would be the wrong trade.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct SubmitBody {
+    summary: Option<String>,
+}
+
+/// The concluding notes a request actually carries, or None.
+///
+/// Whitespace-only is the same as untyped: the reviewer opened the box, hit
+/// space, and finished — nothing downstream should relay that as notes.
+fn parse_submit_summary(body: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<SubmitBody>(body).unwrap_or_default();
+    let trimmed = parsed.summary?.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+async fn api_submit_post(State(state): State<AppState>, body: String) -> Response {
     // Done reviewing must not leave forgotten drafts stranded — post first.
     post_drafts_and_broadcast(&state);
+    let summary = parse_submit_summary(&body);
     let ts = now_millis();
-    state.hub.broadcast(Event::Submitted { timestamp: ts });
-    axum::Json(json!({"ok": true, "timestamp": ts})).into_response()
+    state.hub.broadcast(Event::Submitted {
+        timestamp: ts,
+        summary: summary.clone(),
+    });
+    // After the broadcast, so a tab still open sees `submitted` and can close
+    // itself. If this was the only tab, its disconnect ends the server; if
+    // others are still watching, nothing happens until the last one leaves.
+    state.hub.mark_submitted();
+    axum::Json(json!({"ok": true, "timestamp": ts, "summary": summary})).into_response()
 }
 
 /// v1 contract quirk: GET on /api/submit is the subscriber-presence probe the
@@ -1569,6 +1598,45 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn submit_reads_concluding_notes_when_they_are_there() {
+        assert_eq!(
+            parse_submit_summary(r#"{"summary":"ship it"}"#),
+            Some("ship it".to_string())
+        );
+        // Trimmed, so the textarea's trailing newline never reaches an agent.
+        assert_eq!(
+            parse_submit_summary("{\"summary\":\"  ship it\\n\"}"),
+            Some("ship it".to_string())
+        );
+        // Interior newlines are the reviewer's paragraphs and must survive.
+        assert_eq!(
+            parse_submit_summary("{\"summary\":\"one\\n\\ntwo\"}"),
+            Some("one\n\ntwo".to_string())
+        );
+    }
+
+    #[test]
+    fn a_review_can_always_be_ended_whatever_the_body_looks_like() {
+        // Every one of these means "no notes", not "bad request". Refusing to
+        // end a review over a malformed courtesy field would strand the
+        // reviewer in the UI with no way out but killing the server; the
+        // no-body case is also how `curl -X POST /api/submit` and every
+        // pre-existing caller behaves.
+        for body in [
+            "",
+            "{}",
+            r#"{"summary":null}"#,
+            r#"{"summary":""}"#,
+            r#"{"summary":"   \n  "}"#,
+            "not json at all",
+            r#"{"summary":42}"#,
+            r#"{"summary":"x""#,
+        ] {
+            assert_eq!(parse_submit_summary(body), None, "body: {body:?}");
+        }
     }
 
     #[test]

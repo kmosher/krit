@@ -27,6 +27,19 @@ describe('SSE subscribers identify themselves as browsers', () => {
     })
   }
 
+  for (const path of SUBSCRIBERS) {
+    it(`${path} closes its stream when the review ends`, () => {
+      // Done reviewing stops the server by letting the browser count fall to
+      // zero. One subscriber that keeps its stream open is enough to hold the
+      // count above zero and put the wait back — and it would look like a
+      // server bug, not a missed teardown here.
+      // Matched as a call, not a mention: importing the helper and never
+      // registering is exactly the shape this is guarding against.
+      const source = readFileSync(path, 'utf8')
+      expect(source).toMatch(/onReviewSessionEnd\(\s*\(\)\s*=>[^)]*\.close\(\)/)
+    })
+  }
+
   it('has no EventSource outside the files listed above', () => {
     // Guards the list itself. Without this, a third subscriber added anywhere
     // in src/ui would satisfy every assertion above while going uncounted —

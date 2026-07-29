@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import type { RefreshMode } from './useSettings'
 import type { KritEvent } from '../../types'
 import { diffHeaderPath } from '../utils/diffHeader'
+import { onReviewSessionEnd } from './reviewSession'
 
 export interface BinaryFileInfo {
   path: string
@@ -525,7 +526,13 @@ export function useDiff(options: UseDiffOptions) {
         }
       } catch {}
     })
-    return () => es.close()
+    // Both role=ui streams have to go when the review ends, or the browser
+    // count never reaches zero and the server keeps waiting.
+    const unsubscribe = onReviewSessionEnd(() => es.close())
+    return () => {
+      unsubscribe()
+      es.close()
+    }
   }, [load, loadFile, loadFiles, markStale])
 
   // live-unless-active: once a deferred file stops being "active" (draft

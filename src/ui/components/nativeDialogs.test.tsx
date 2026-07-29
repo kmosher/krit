@@ -191,10 +191,20 @@ describe('no native dialog on any decision path', () => {
         onPostDrafts={vi.fn()}
       />,
     )
+    // Two decision points on this path now, and both must stay inline: the
+    // concluding-notes box, and the question guarding an exit from it once
+    // something has been typed. Backing out of the notes is exactly the sort
+    // of thing an agent does before deciding to write different ones.
+    fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+    const box = screen.getByLabelText('Concluding notes')
+    fireEvent.change(box, { target: { value: 'second thoughts' } })
+    fireEvent.keyDown(box, { key: 'Escape' })
+    expect(screen.getByRole('alert')).toHaveTextContent('Discard your notes?')
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+      fireEvent.click(screen.getByRole('button', { name: 'Finish review' }))
     })
-    expect(onSubmitReview).toHaveBeenCalled()
+    expect(onSubmitReview).toHaveBeenCalledWith('second thoughts')
   })
 
   // Escape-to-back-out of a suggestion is the path an agent is most likely to

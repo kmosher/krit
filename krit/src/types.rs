@@ -128,6 +128,11 @@ pub enum Event {
     },
     Submitted {
         timestamp: u64,
+        /// The reviewer's concluding notes, typed into the Done-reviewing box.
+        /// Absent when they finished without writing any — which is a normal
+        /// ending, not a degenerate one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     ReviewEnded {
         reason: String,
@@ -197,8 +202,18 @@ mod tests {
             r#"{"type":"file-written","path":"a.rs"}"#
         );
         assert_eq!(
-            js(&Event::Submitted { timestamp: 7 }),
+            js(&Event::Submitted {
+                timestamp: 7,
+                summary: None
+            }),
             r#"{"type":"submitted","timestamp":7}"#
+        );
+        assert_eq!(
+            js(&Event::Submitted {
+                timestamp: 7,
+                summary: Some("ship it".into())
+            }),
+            r#"{"type":"submitted","timestamp":7,"summary":"ship it"}"#
         );
         assert_eq!(
             js(&Event::ReviewEnded {

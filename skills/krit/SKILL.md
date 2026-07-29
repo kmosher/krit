@@ -66,7 +66,7 @@ The agent stream is **human-only**: the server filters out echoes of your own wo
 {"type":"user-edit","action":"delete","filePath":"...","range":{"startLine":10,"startColumn":0,"endLine":10,"endColumn":4},"deletedText":"..."}
 {"type":"file-written","path":"..."}
 {"type":"clients","browsers":2}
-{"type":"submitted","timestamp":...}
+{"type":"submitted","timestamp":...,"summary":"concluding notes, if the user wrote any"}
 {"type":"review-ended","reason":"idle"}
 ```
 
@@ -110,13 +110,15 @@ Read the new frame(s) from the Monitor. For each:
 
 - **`submitted`** — the user clicked Done reviewing. This is **not** the end of the session — they can still leave more comments or reply to yours. Acknowledge briefly and end the turn. Do not summarize or wrap up yet; that happens in Step 5.
 
+  `summary` is the user's concluding notes, typed into the box the button opens. It is optional and often absent. When it is there, read it as review content, not as a sign-off: it is where verdicts that belong to no single line get said ("the error handling is the part I'm unsure about", "fine to land, but not the migration"). It can also be the *entire* review — finishing with no comments at all is allowed, since sometimes a change is simply fine. A `submitted` with no comments and no summary means the user found nothing to say; take it at face value rather than prompting for more.
+
 End the turn after handling the event(s). The Monitor will wake you again on the next one.
 
 ## Step 5: Wrap up (when the stream ends)
 
-The krit server shuts itself down 60s after the last UI subscriber disconnects (or 3 minutes if none ever connected). On shutdown it broadcasts `review-ended` and closes the WebSocket, which ends the Monitor:
+The krit server shuts itself down 5s after the last UI subscriber disconnects (or 3 minutes if none ever connected). Done reviewing skips even that: closing the last tab after a submit ends the server at once, so `review-ended` can follow `submitted` almost immediately. On shutdown it broadcasts `review-ended` and closes the WebSocket, which ends the Monitor:
 
-- **`review-ended` then close, with a `submitted` seen earlier** — normal completion. Summarize briefly: N applied, M answered, K left open (and why).
+- **`review-ended` then close, with a `submitted` seen earlier** — normal completion. Summarize briefly: N applied, M answered, K left open (and why). If that `submitted` carried a `summary`, answer it here too — it is the one piece of the review with no comment thread to reply on.
 - **`review-ended` with no `submitted`** — the user closed the UI without clicking Done. Tell the user and stop; don't silently re-launch.
 - **Socket close with no `review-ended`** — krit crashed or was killed. Say so. The v1 fallback is available: same workflow via the `diffx` skill.
 
@@ -126,6 +128,7 @@ The krit server shuts itself down 60s after the last UI subscriber disconnects (
 krit comments [open|resolved|replied|all]   # dump comments as JSON (no arg = all)
 krit reopen <id>                        # flip a resolved comment back to open
 krit wait-for-submit                    # batch alternative: block until Done reviewing (exit 0) or disconnect (exit 2)
+                                        # prints {"submitted":true,"timestamp":...,"summary":"..."}; summary is absent if none was written
 ```
 
 ## Manual fallback

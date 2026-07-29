@@ -298,7 +298,15 @@ fn scan_for_submit(buf: &mut Vec<u8>) -> Option<Value> {
             continue;
         };
         if parsed["type"] == "submitted" {
-            return Some(json!({"submitted": true, "timestamp": parsed["timestamp"]}));
+            // `summary` is forwarded verbatim, including its absence: the
+            // concluding notes are the point of waiting, and a caller that
+            // json-parses this output must be able to tell "no notes" from
+            // "empty notes" the same way the event does.
+            let mut payload = json!({"submitted": true, "timestamp": parsed["timestamp"]});
+            if let Some(summary) = parsed.get("summary").filter(|s| !s.is_null()) {
+                payload["summary"] = summary.clone();
+            }
+            return Some(payload);
         }
     }
     None
@@ -312,9 +320,7 @@ fn scan_for_submit(buf: &mut Vec<u8>) -> Option<Value> {
 pub fn cmd_wait_for_submit() -> ! {
     let state = require_state();
     let url = format!("{}/api/events?role=cli", base_url(&state));
-    eprintln!(
-        "wait-for-submit: connected — leave comments and click Done reviewing in the browser."
-    );
+    eprintln!("wait-for-submit: connected — review, then click Done reviewing in the browser.");
 
     let res = match ureq::get(&url).set("Accept", "text/event-stream").call() {
         Ok(res) => res,
@@ -765,6 +771,60 @@ mod tests {
         // them individually yields two JSON fragments and no submit.
         let mut buf = b"data: {\"type\":\ndata: \"submitted\",\"timestamp\":3}\n\n".to_vec();
         assert_eq!(scan_for_submit(&mut buf).unwrap()["timestamp"], json!(3));
+    }
+
+    #[test]
+    fn concluding_notes_are_relayed_to_the_waiting_caller() {
+        // The notes are why anything waits on this at all — dropping them here
+        // would end the review with the reviewer's conclusions going nowhere.
+        let mut buf = br#"data: {"type":"submitted","timestamp":9,"summary":"looks good, ship it"}
+
+"#
+        .to_vec();
+        let payload = scan_for_submit(&mut buf).unwrap();
+        assert_eq!(payload["summary"], json!("looks good, ship it"));
+    }
+
+    #[test]
+    fn a_submit_with_no_notes_omits_the_field_rather_than_emptying_it() {
+        // A caller parsing this output has to be able to distinguish "finished
+        // without notes" from "notes were empty"; an always-present ""
+        // collapses the two.
+        let mut buf = br#"data: {"type":"submitted","timestamp":9}
+
+"#
+        .to_vec();
+        let payload = scan_for_submit(&mut buf).unwrap();
+        assert!(
+            payload.get("summary").is_none(),
+            "absent notes must stay absent, not become empty"
+        );
+    }
+
+    #[test]
+    fn an_explicitly_null_summary_is_treated_as_absent() {
+        // A hand-rolled or older producer may serialize the field as null
+        // rather than omitting it; relaying `"summary": null` would make every
+        // consumer handle a third case for no reason.
+        let mut buf = br#"data: {"type":"submitted","timestamp":9,"summary":null}
+
+"#
+        .to_vec();
+        let payload = scan_for_submit(&mut buf).unwrap();
+        assert!(payload.get("summary").is_none());
+    }
+
+    #[test]
+    fn multi_line_notes_survive_the_frame_rejoin() {
+        // Concluding notes are the one field a reviewer will press Enter in,
+        // and SSE encodes a raw newline as a frame break. The JSON escape keeps
+        // it one frame; this pins that it stays intact.
+        let mut buf = br#"data: {"type":"submitted","timestamp":9,"summary":"one\ntwo"}
+
+"#
+        .to_vec();
+        let payload = scan_for_submit(&mut buf).unwrap();
+        assert_eq!(payload["summary"], json!("one\ntwo"));
     }
 
     #[test]

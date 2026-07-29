@@ -186,6 +186,88 @@ body {
     gap: 12px;
 }
 
+/* Concluding-notes box, anchored under the Done-reviewing button. Same
+   dropdown geometry as the settings menu; wider, because it holds prose. */
+.finish-wrap {
+    position: relative;
+}
+
+.finish-panel {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    width: 340px;
+    padding: 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    z-index: 200;
+    text-align: left;
+}
+
+@media (prefers-color-scheme: dark) {
+    .finish-panel {
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+}
+
+.finish-label {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted, #656d76);
+}
+
+.finish-summary {
+    width: 100%;
+    min-height: 76px;
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    resize: vertical;
+}
+
+.finish-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.finish-hint {
+    flex: 1;
+    font-size: 11px;
+    color: var(--fg-muted, #656d76);
+}
+
+/* Same inline-strip treatment as CommentForm's discard prompt — see the
+   no-native-dialogs rule. */
+.finish-confirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.finish-confirm .btn {
+    padding: 4px 12px;
+    font-size: 12px;
+}
+
 /* Settings dropdown */
 .settings-wrapper {
     position: relative;

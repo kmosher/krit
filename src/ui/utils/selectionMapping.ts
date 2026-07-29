@@ -130,15 +130,28 @@ export function shadowRootOf(eventTarget: EventTarget | null): ShadowRoot | null
   return root instanceof ShadowRoot ? root : null
 }
 
-// Which file a shadow root is showing. One diffs-container (and one shadow
-// root) is rendered per file, but the host carries nothing identifying — no id,
-// no data attribute — and CodeView exposes no element-to-item lookup. What it
-// does expose is the header-prefix slot, whose contents krit renders itself
-// (see renderHeaderPrefix in CodeViewWrapper) into the host's light DOM; the
-// path is stamped there. Reading it from the root the drag actually happened in
-// is what keeps the anchor's file honest when hover state is stale or wrong.
-export function filePathForRoot(root: ShadowRoot | null): string | null {
-  return root?.host?.querySelector('[data-krit-file]')?.getAttribute('data-krit-file') || null
+/** The `{ id, element }` pairs CodeView reports for what it currently renders. */
+export interface RenderedHost {
+  id: string
+  element?: HTMLElement | null
+}
+
+// Which file a shadow root is showing. One diffs-container — and therefore one
+// shadow root — is rendered per file, and CodeView's own getRenderedItems()
+// gives the element-to-item mapping, so the file is looked up rather than
+// inferred. Taking it from the root the drag actually happened in is what keeps
+// the anchor's file honest when hover state is stale or names another file.
+//
+// Elements are pooled and reused across items, so this must be resolved at the
+// moment of the drag against the live list; a mapping cached at mount would go
+// quietly wrong the first time a host was recycled.
+export function filePathForRoot(
+  root: ShadowRoot | null,
+  rendered: readonly RenderedHost[] | null | undefined,
+): string | null {
+  const host = root?.host
+  if (!host || !rendered) return null
+  return rendered.find((r) => r.element === host)?.id ?? null
 }
 
 // The rendered line under a point, for the cases hit-testing declines to

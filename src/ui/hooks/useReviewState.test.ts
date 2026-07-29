@@ -138,10 +138,78 @@ describe('useReviewState', () => {
 })
 
 describe('submitReview', () => {
-  it('POSTs to /api/submit', async () => {
+  it('POSTs to /api/submit with the concluding notes', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ json: () => Promise.resolve({}) }))
+    vi.stubGlobal('fetch', fetchMock)
+    await submitReview('looks good')
+    expect(fetchMock).toHaveBeenCalledWith('/api/submit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ summary: 'looks good' }),
+    })
+  })
+
+  it('still POSTs a body when there are no notes', async () => {
+    // One request shape, always. The server reads blank notes as none, so the
+    // caller does not have to decide whether to send a body at all.
     const fetchMock = vi.fn(() => Promise.resolve({ json: () => Promise.resolve({}) }))
     vi.stubGlobal('fetch', fetchMock)
     await submitReview()
-    expect(fetchMock).toHaveBeenCalledWith('/api/submit', { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/submit',
+      expect.objectContaining({ body: JSON.stringify({ summary: '' }) }),
+    )
+  })
+
+  it('drops this tab’s event stream, so the server sees the browser leave', async () => {
+    // This is the mechanism that stops the server on Done reviewing. If the
+    // stream stays open the ui count never reaches zero and the process
+    // lingers until the idle grace period expires -- the exact wait the
+    // button is supposed to skip.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ json: () => Promise.resolve({}) })))
+    renderHook(() => useReviewState())
+    const es = FakeEventSource.last!
+    expect(es.closed).toBe(false)
+    await act(async () => {
+      await submitReview()
+    })
+    expect(es.closed).toBe(true)
+  })
+
+  it('tears down only after the POST has been answered', async () => {
+    // Closing first would race the server: the drafts are posted and
+    // `submitted` is broadcast by that request, and a shutdown triggered by
+    // the disconnect must not overtake it.
+    let resolvePost!: (v: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise((r) => (resolvePost = r))),
+    )
+    renderHook(() => useReviewState())
+    const es = FakeEventSource.last!
+    const pending = submitReview()
+    await Promise.resolve()
+    expect(es.closed, 'the stream must outlive the in-flight POST').toBe(false)
+    resolvePost({})
+    await act(async () => {
+      await pending
+    })
+    expect(es.closed).toBe(true)
+  })
+
+  it('asks the window to close, and survives a browser that refuses', async () => {
+    // A tab the script didn't open ignores window.close(); some environments
+    // throw outright. Either way the teardown above has already happened, so
+    // the refusal must not propagate out of submitReview.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ json: () => Promise.resolve({}) })))
+    const close = vi.fn(() => {
+      throw new Error('Scripts may not close windows that were not opened by script')
+    })
+    vi.stubGlobal('close', close)
+    renderHook(() => useReviewState())
+    const es = FakeEventSource.last!
+    await expect(submitReview()).resolves.toBeUndefined()
+    expect(close).toHaveBeenCalled()
+    expect(es.closed).toBe(true)
   })
 })

@@ -26,7 +26,8 @@ interface ToolbarProps {
   agentCount: number
   /** Timestamp the user clicked Submit on this page, or null. */
   submittedAt: number | null
-  onSubmitReview: () => Promise<void>
+  /** `summary` is the reviewer's concluding notes; '' when they wrote none. */
+  onSubmitReview: (summary: string) => Promise<void>
   refreshMode: RefreshMode
   onRefreshModeChange: (mode: RefreshMode) => void
   /** Files with a background change deferred by refreshMode, waiting to be applied. */
@@ -70,6 +71,13 @@ export function Toolbar({
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
+  // The concluding-notes box, and the discard question guarding an exit from
+  // it once something has been typed.
+  const [finishOpen, setFinishOpen] = useState(false)
+  const [summary, setSummary] = useState('')
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false)
+  const finishRef = useRef<HTMLDivElement>(null)
+  const summaryRef = useRef<HTMLTextAreaElement>(null)
 
   const handleCopy = async () => {
     await onCopyComments()
@@ -86,31 +94,82 @@ export function Toolbar({
   // the streaming flow's transport now that v1 diffx's `watch` is retired).
   const hasWatcher = watcherCount > 0 || agentCount > 0
   const isSubmitted = submittedAt !== null
-  const submitDisabled = submitting || isSubmitted || !hasWatcher || commentCount === 0
+  // A review with no comments is a real verdict — sometimes the change is
+  // simply fine — so an empty comment list no longer blocks finishing. The
+  // concluding notes are where "looks good" gets said, which is also what
+  // keeps a zero-comment submit from reaching the agent as pure silence.
+  const submitDisabled = submitting || isSubmitted || !hasWatcher
   const submitLabel = isSubmitted
     ? 'Done ✓'
     : !hasWatcher
       ? 'No watcher'
-      : `Done reviewing (${commentCount})`
+      : commentCount === 0
+        ? 'Done reviewing'
+        : `Done reviewing (${commentCount})`
   const submitTitle = isSubmitted
     ? 'Review finished — the listening Claude session has been told to stop watching.'
     : !hasWatcher
       ? 'No agent or watcher is currently subscribed to events. Have Claude attach one, or use Copy comments to paste manually.'
-      : commentCount === 0
-        ? 'Leave at least one comment before finishing the review.'
-        : draftCount > 0
-          ? `End the review session — also posts your ${draftCount} remaining draft${draftCount === 1 ? '' : 's'}.`
+      : draftCount > 0
+        ? `End the review session — also posts your ${draftCount} remaining draft${draftCount === 1 ? '' : 's'}.`
+        : commentCount === 0
+          ? 'End the review session with no comments — add any concluding notes first.'
           : 'End the review session — tells the listening Claude session you are done.'
 
-  const handleSubmit = async () => {
+  // The button opens the notes box; the box's own button is what submits.
+  const handleSubmitClick = () => {
     if (submitDisabled) return
+    setFinishOpen(true)
+  }
+
+  const finish = async () => {
+    if (submitting || isSubmitted) return
     setSubmitting(true)
     try {
-      await onSubmitReview()
+      await onSubmitReview(summary)
+      setFinishOpen(false)
     } finally {
       setSubmitting(false)
     }
   }
+
+  // Every exit from the notes box runs through here, so no path drops typed
+  // notes without asking — the rule CommentForm's requestCancel and
+  // FileEditorModal's requestClose already follow.
+  const requestCancel = () => {
+    if (summary.trim() !== '') {
+      setConfirmingDiscard(true)
+      return
+    }
+    setFinishOpen(false)
+  }
+
+  const discard = () => {
+    setConfirmingDiscard(false)
+    setFinishOpen(false)
+    setSummary('')
+  }
+
+  useEffect(() => {
+    if (!finishOpen) {
+      setConfirmingDiscard(false)
+      return
+    }
+    // Focused on open so the notes can be typed and submitted without ever
+    // reaching for the mouse.
+    summaryRef.current?.focus()
+  }, [finishOpen])
+
+  useEffect(() => {
+    if (!finishOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (finishRef.current && !finishRef.current.contains(e.target as Node)) requestCancel()
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+    // `summary` is a dependency because requestCancel reads it: a listener
+    // bound while the box was empty would close it silently once it wasn't.
+  }, [finishOpen, summary])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -297,15 +356,82 @@ export function Toolbar({
         >
           {copied ? 'Copied!' : `Copy (${postableCommentCount})`}
         </button>
-        <button
-          className={`btn btn-primary btn-sm ${isSubmitted ? 'btn-active' : ''}`}
-          onClick={handleSubmit}
-          disabled={submitDisabled}
-          title={submitTitle}
-        >
-          <Send size={12} style={{ marginRight: 4, verticalAlign: -1 }} />
-          {submitLabel}
-        </button>
+        <div className="finish-wrap" ref={finishRef}>
+          <button
+            className={`btn btn-primary btn-sm ${isSubmitted ? 'btn-active' : ''}`}
+            onClick={handleSubmitClick}
+            disabled={submitDisabled}
+            title={submitTitle}
+            aria-expanded={finishOpen}
+          >
+            <Send size={12} style={{ marginRight: 4, verticalAlign: -1 }} />
+            {submitLabel}
+          </button>
+          {finishOpen && (
+            <div className="finish-panel" role="dialog" aria-label="Finish review">
+              <label className="finish-label" htmlFor="finish-summary">
+                Concluding notes
+              </label>
+              <textarea
+                id="finish-summary"
+                ref={summaryRef}
+                className="finish-summary"
+                value={summary}
+                placeholder={
+                  commentCount === 0
+                    ? 'No comments — say what you concluded. Optional.'
+                    : 'Anything to add alongside your comments? Optional.'
+                }
+                onChange={(e) => setSummary(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault()
+                    void finish()
+                  }
+                  // Escape backs out the same way Cancel does, question
+                  // included — a keyboard-only exit must not be the one path
+                  // that discards notes silently.
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    requestCancel()
+                  }
+                }}
+              />
+              {confirmingDiscard ? (
+                <div className="finish-confirm" role="alert">
+                  <span>Discard your notes?</span>
+                  <button type="button" className="btn btn-danger" onClick={discard}>
+                    Discard
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setConfirmingDiscard(false)}
+                  >
+                    Keep editing
+                  </button>
+                </div>
+              ) : (
+                <div className="finish-actions">
+                  <span className="finish-hint">
+                    {summary.trim() === '' ? 'Finishing without notes' : '⌘↵ to finish'}
+                  </span>
+                  <button type="button" className="btn btn-secondary" onClick={requestCancel}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => void finish()}
+                    disabled={submitting}
+                  >
+                    {submitting ? 'Finishing…' : 'Finish review'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )

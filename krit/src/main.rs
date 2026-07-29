@@ -35,6 +35,13 @@ Options:
                      baseBranches ladder in settings. Any rev. The scope diffs
                      the working tree against its merge-base with HEAD.
   --no-open          Don't open the browser automatically
+  --idle-timeout <ms>
+                     How long to keep serving after the last browser tab
+                     disconnects (default: 5000; also KRIT_IDLE_TIMEOUT_MS).
+                     The window exists to survive a page refresh; raise it if
+                     something slower is in the loop. Clicking Done reviewing
+                     bypasses it — the last tab closing then stops the server
+                     at once.
   -v, --version      Show version number
   -h, --help         Show this help message
 
@@ -44,7 +51,9 @@ Subcommands (talk to the running krit server for the current session):
   reply <id> <text...>        Reply to a comment
   resolve <id>                Mark a comment resolved
   reopen <id>                 Reopen a resolved comment
-  wait-for-submit             Block until the user clicks Done reviewing in the browser UI
+  wait-for-submit             Block until the user clicks Done reviewing in the browser UI,
+                              then print the submit as JSON — including `summary`, the
+                              reviewer's concluding notes, when they wrote any
                               (exit 0 on submit, 1 if no server is reachable or
                               the state file is unusable, 2 if the connection
                               drops before submit)
@@ -91,6 +100,11 @@ fn main() {
     let mut host = "127.0.0.1".to_string();
     let mut no_open = false;
     let mut base_ref: Option<String> = None;
+    // Flag beats env beats default; an unparseable env value is ignored rather
+    // than fatal, since it can come from a shell profile the caller forgot.
+    let mut idle_timeout_ms: Option<u64> = std::env::var("KRIT_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let mut positionals: Vec<String> = Vec::new();
     let mut past_dash_dash = false;
     let mut iter = raw_args.iter();
@@ -122,6 +136,13 @@ fn main() {
                 };
                 base_ref = Some(v.clone());
             }
+            "--idle-timeout" => {
+                let Some(v) = iter.next().and_then(|v| v.parse().ok()) else {
+                    eprintln!("Error: --idle-timeout requires a number of milliseconds");
+                    std::process::exit(1);
+                };
+                idle_timeout_ms = Some(v);
+            }
             "--no-open" => no_open = true,
             "-h" | "--help" => {
                 println!("{HELP}");
@@ -150,7 +171,14 @@ fn main() {
     }
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    runtime.block_on(serve(port_arg, host, no_open, custom_diff_args, base_ref));
+    runtime.block_on(serve(
+        port_arg,
+        host,
+        no_open,
+        custom_diff_args,
+        base_ref,
+        idle_timeout_ms,
+    ));
 }
 
 /// What argv means before any of it is acted on.
@@ -268,6 +296,7 @@ async fn serve(
     no_open: bool,
     custom_diff_args: Option<Vec<String>>,
     base_ref: Option<String>,
+    idle_timeout_ms: Option<u64>,
 ) {
     let repo_root = PathBuf::from(git::repo_root().expect("repo root (checked above)"));
 
@@ -284,6 +313,9 @@ async fn serve(
     };
 
     let hub = hub::Hub::new();
+    if let Some(ms) = idle_timeout_ms {
+        hub.set_idle_shutdown_ms(ms);
+    }
     let app_state = server::new_state(
         hub.clone(),
         comment_store,
@@ -317,6 +349,15 @@ async fn serve(
     let local_url = format!("http://{host}:{actual_port}");
 
     println!("krit server running at {local_url}");
+    // Only when overridden. A grace period set in a shell profile and long
+    // forgotten is otherwise invisible until someone wonders why the port is
+    // still held.
+    if idle_timeout_ms.is_some() {
+        println!(
+            "idle timeout: {}ms after the last tab closes",
+            hub.idle_shutdown_ms()
+        );
+    }
     if api_token.is_some() {
         // The state file stays token-free on purpose: subcommands connect
         // over loopback and never need it, so the secret has no reason to
