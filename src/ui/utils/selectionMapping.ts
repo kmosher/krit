@@ -130,6 +130,17 @@ export function shadowRootOf(eventTarget: EventTarget | null): ShadowRoot | null
   return root instanceof ShadowRoot ? root : null
 }
 
+// Which file a shadow root is showing. One diffs-container (and one shadow
+// root) is rendered per file, but the host carries nothing identifying — no id,
+// no data attribute — and CodeView exposes no element-to-item lookup. What it
+// does expose is the header-prefix slot, whose contents krit renders itself
+// (see renderHeaderPrefix in CodeViewWrapper) into the host's light DOM; the
+// path is stamped there. Reading it from the root the drag actually happened in
+// is what keeps the anchor's file honest when hover state is stale or wrong.
+export function filePathForRoot(root: ShadowRoot | null): string | null {
+  return root?.host?.querySelector('[data-krit-file]')?.getAttribute('data-krit-file') || null
+}
+
 // The rendered line under a point, for the cases hit-testing declines to
 // answer: the gutter, the padding past end-of-line, the gap between rows.
 // `elementFromPoint` on the shadow root reports the deep node directly, and

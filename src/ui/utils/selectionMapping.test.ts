@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mapRangeToAnchor, rangeFromClick, rangeFromDragPoints, shadowRootOf } from './selectionMapping'
+import {
+  filePathForRoot,
+  mapRangeToAnchor,
+  rangeFromClick,
+  rangeFromDragPoints,
+  shadowRootOf,
+} from './selectionMapping'
 
 // Mirrors the shape @pierre/diffs renders: one [data-line] block per line,
 // each holding several <span>s because syntax highlighting splits the text.
@@ -227,6 +233,50 @@ describe('shadowRootOf', () => {
     expect(shadowRootOf(span(1, 0))).toBeNull()
     expect(shadowRootOf(new EventTarget())).toBeNull()
     expect(shadowRootOf(null)).toBeNull()
+  })
+})
+
+describe('filePathForRoot', () => {
+  // The stamp lives in the host's light DOM, where Pierre slots krit's
+  // header-prefix content — not inside the shadow root the drag happened in.
+  function stampedRoot(path: string | null): ShadowRoot {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = host.attachShadow({ mode: 'open' })
+    if (path !== null) {
+      const slot = document.createElement('div')
+      slot.slot = 'header-prefix'
+      const prefix = document.createElement('div')
+      prefix.setAttribute('data-krit-file', path)
+      slot.appendChild(prefix)
+      host.appendChild(slot)
+    }
+    return root
+  }
+
+  it('reads the path off the host of the root the drag happened in', () => {
+    expect(filePathForRoot(stampedRoot('src/anchor.ts'))).toBe('src/anchor.ts')
+  })
+
+  it('does not answer with a neighbouring file', () => {
+    // Two files are mounted; each root must report its own. Getting this wrong
+    // is the whole failure being fixed — the columns are right and the file is
+    // someone else's, which no reviewer would think to check.
+    const a = stampedRoot('src/anchor.ts')
+    const b = stampedRoot('main.go')
+    expect(filePathForRoot(a)).toBe('src/anchor.ts')
+    expect(filePathForRoot(b)).toBe('main.go')
+  })
+
+  it('returns null when nothing is stamped, and for no root at all', () => {
+    // A header that hasn't rendered yet must read as "unknown" so the caller
+    // falls back, rather than as some other file.
+    expect(filePathForRoot(stampedRoot(null))).toBeNull()
+    expect(filePathForRoot(null)).toBeNull()
+  })
+
+  it('treats an empty stamp as unknown', () => {
+    expect(filePathForRoot(stampedRoot(''))).toBeNull()
   })
 })
 

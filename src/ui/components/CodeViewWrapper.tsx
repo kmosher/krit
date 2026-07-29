@@ -15,9 +15,11 @@ import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 import { SelectionPill } from './SelectionPill'
 import {
+  filePathForRoot,
   mapRangeToAnchor,
   rangeFromClick,
   rangeFromDragPoints,
+  shadowRootOf,
   type DragPoint,
   type SelectionAnchor,
 } from '../utils/selectionMapping'
@@ -869,22 +871,20 @@ export const CodeViewWrapper = memo(
         const anchor = mapRangeToAnchor(range)
         if (!anchor) return
         const hovered = lastHoveredRef.current
-        // onLineEnter (which populates lastHoveredRef) only fires when
-        // the pointer *crosses into* a line. Right after a per-file
-        // remount (e.g. a delete's file-changed refetch) the pointer can
-        // already be resting inside the line the user is about to drag
-        // over, so onLineEnter never re-fires and hovered is stale null
-        // -- bailing here made the pill flaky on exactly that first
-        // drag. Fall back to the scroll-tracked "active" file (already
-        // maintained independent of hover, see handleScroll below) with
-        // side defaulting to 'additions', the same fallback used
-        // elsewhere in this file (handleGutterClick) when the side can't
-        // be determined precisely -- an imprecise guess beats no pill at
-        // all, and this path is only reached when hover tracking hasn't
-        // caught up yet.
-        const filePath = hovered?.filePath ?? lastActiveFileRef.current
+        // The file comes from the shadow root the drag happened in, never from
+        // hover. onLineEnter (which populates lastHoveredRef) only fires when
+        // the pointer *crosses into* a line, so after a per-file remount, or a
+        // drag begun on a line the pointer was already resting in, it holds
+        // some other file entirely -- and a comment filed against the wrong
+        // file with the right columns is invisibly wrong, which is worse than
+        // no pill. Hover is kept only for the side, and only when it agrees
+        // about the file; the scroll-tracked active file is the last resort,
+        // for a root that somehow has no header rendered.
+        const filePath = filePathForRoot(shadowRootOf(deepTarget)) ?? lastActiveFileRef.current
         if (!filePath) return
-        const side = hovered?.side ?? 'additions'
+        // 'additions' as the default matches handleGutterClick: when the side
+        // can't be determined precisely, that's where reviewers comment.
+        const side = hovered && hovered.filePath === filePath ? hovered.side : 'additions'
         const rect = range.getBoundingClientRect()
         setTextSelection({
           x: rect.right,
@@ -1075,8 +1075,14 @@ export const CodeViewWrapper = memo(
         const confirmingSave = editing && confirmSaveFiles.has(item.id)
         const empty =
           item.fileDiff.splitLineCount === 0 && item.fileDiff.unifiedLineCount === 0
+        // data-krit-file: Pierre slots this into the host element's light DOM,
+        // which makes it the one place a rendered file names itself in the DOM.
+        // The diffs-container host carries no id or data attribute of its own
+        // and there is no public element-to-item lookup, so filePathForRoot
+        // reads this back to answer "which file is this shadow root showing" —
+        // see the mouseup handler.
         return (
-          <div className="codeview-header-prefix">
+          <div className="codeview-header-prefix" data-krit-file={item.id}>
             <button
               type="button"
               className="codeview-collapse-btn"
