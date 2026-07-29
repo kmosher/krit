@@ -24,6 +24,43 @@ skill together when you do.
   `splitFilePatches`, `computeRowWindow`, App's patch-fragment helpers).
 - Fresh worktrees have no `dist/` — build.rs handles it, but the vite build
   needs `node_modules` (symlink from canonical or `pnpm install`).
+- **Driving the UI in a real browser.** Vitest under happy-dom cannot test the
+  selection path at all: no layout, so no `caretPositionFromPoint`, no
+  `ShadowRoot.elementFromPoint`, every rect zero. Anything about pointers,
+  carets or geometry has to be proven in a real engine — Playwright WebKit is
+  the closest stand-in for the WKWebView krit.app embeds, and its `page.mouse`
+  produces trusted events.
+  - **Hit-test every coordinate before using it.** A point derived from a text
+    node's `getBoundingClientRect()` is not good enough; feed it back through
+    `document.caretPositionFromPoint(x, y, {shadowRoots: [root]})` and require
+    `root.contains(offsetNode)`. Four false failures in one session came from
+    unvalidated points: a y over the sticky file header, a line scrolled out of
+    view, a point over Pierre's hover `+` button, and — twice — coordinates
+    measured before something reflowed. **Re-measure after anything that
+    reflows**, including posting a comment, which inserts an annotation row and
+    moves every y below it.
+  - `ShadowRoot.elementFromPoint()` will return *another* file's
+    `diffs-container` host, whose root is the document. Require
+    `sr.contains(el)`.
+  - **Pierre binds pointer events, not mouse events** (`InteractionManager`:
+    `pointerdown`/`pointermove`/`pointerup`). Browsers don't synthesize pointer
+    events from a dispatched `MouseEvent`, so hand-dispatched drags must send
+    `PointerEvent`s alongside the mouse ones or Pierre sees nothing at all.
+  - **Hover-staleness bugs can't be reproduced synthetically.** Playwright's
+    `mouse.click`/`dblclick` always emit a move first, which re-fires
+    `onLineEnter` and heals the stale hover before mouseup; raw `down/up/down/up`
+    with no move never reaches `detail: 2` in WebKit. Verify that class of bug
+    from the other end — assert the value that *should* be authoritative —
+    rather than burning a day on a repro.
+  - **The state file is keyed by worktree+branch**, so two test servers in one
+    checkout share it, including per-file collapsed state, which changes the
+    layout under the next run. Delete it between runs.
+  - Done reviewing needs a listener: attach `krit wait-for-submit` (background
+    it properly — it blocks) or an agent WS subscriber, or it renders as a
+    disabled "No watcher". It does not need any comments.
+  - Playwright needs `PLAYWRIGHT_BROWSERS_PATH` somewhere writable, and
+    launching the browser needs the sandbox off (XPC fails "Connection
+    Invalid" otherwise).
 - **The fs-watcher needs `com.apple.FSEvents` in the sandbox's
   `allowMachLookup`**: without it `FSEventStreamStart` fails silently, so
   `cargo test watcher` fails and a sandboxed `krit` never emits
@@ -81,6 +118,13 @@ skill together when you do.
   tree resolves `@pierre/theme@2.0.0` — an unsatisfied peer inside upstream's
   own dependency graph, not ours. Installs fine (optional peer,
   `strict-peer-dependencies` off). Nothing to do; don't "fix" it by pinning.
+
+- Pierre resolves selection at **line** granularity only — `SelectionPoint` is
+  `{lineNumber, side}`, and upstream never touches the DOM Selection API or
+  caret-from-point (its one `getSelection` is `InteractionManager`'s own
+  line-range tracker). Every character column krit persists comes from
+  `selectionMapping.ts` doing that work itself. Don't go looking upstream for
+  an API to switch to; there isn't one yet.
 
 - An **inline edit session plus an open comment/suggest draft on the same
   file** is untested. Both render into Pierre's shadow root, historically
