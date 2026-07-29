@@ -138,11 +138,27 @@ describe('useReviewState', () => {
 })
 
 describe('submitReview', () => {
-  it('POSTs to /api/submit', async () => {
+  it('POSTs to /api/submit with the concluding notes', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ json: () => Promise.resolve({}) }))
+    vi.stubGlobal('fetch', fetchMock)
+    await submitReview('looks good')
+    expect(fetchMock).toHaveBeenCalledWith('/api/submit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ summary: 'looks good' }),
+    })
+  })
+
+  it('still POSTs a body when there are no notes', async () => {
+    // One request shape, always. The server reads blank notes as none, so the
+    // caller does not have to decide whether to send a body at all.
     const fetchMock = vi.fn(() => Promise.resolve({ json: () => Promise.resolve({}) }))
     vi.stubGlobal('fetch', fetchMock)
     await submitReview()
-    expect(fetchMock).toHaveBeenCalledWith('/api/submit', { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/submit',
+      expect.objectContaining({ body: JSON.stringify({ summary: '' }) }),
+    )
   })
 
   it('drops this tab’s event stream, so the server sees the browser leave', async () => {

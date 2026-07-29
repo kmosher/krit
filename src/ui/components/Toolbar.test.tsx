@@ -205,14 +205,102 @@ describe('Toolbar — finishing the review', () => {
     const btn = screen.getByRole('button', { name: /Done reviewing \(2\)/ })
     expect(btn).toBeEnabled()
     fireEvent.click(btn)
+    fireEvent.click(screen.getByRole('button', { name: 'Finish review' }))
     expect(onSubmitReview).toHaveBeenCalled()
   })
 
-  it('refuses to finish a review with no comments', () => {
+  it('finishes a review with no comments at all', () => {
+    // Sometimes the change is simply fine. Requiring a comment made the only
+    // way to say so a fake one, and the count is dropped from the label rather
+    // than shown as a reproachful (0).
     const { onSubmitReview } = renderToolbar({ commentCount: 0, watcherCount: 1 })
-    const btn = screen.getByRole('button', { name: /Done reviewing \(0\)/ })
-    expect(btn).toBeDisabled()
+    const btn = screen.getByRole('button', { name: /Done reviewing$/ })
+    expect(btn).toBeEnabled()
     fireEvent.click(btn)
+    fireEvent.click(screen.getByRole('button', { name: 'Finish review' }))
+    expect(onSubmitReview).toHaveBeenCalledWith('')
+  })
+
+  it('asks for concluding notes before submitting anything', () => {
+    // The click opens the box; nothing is sent until Finish review. Submitting
+    // on the first click would give the reviewer no chance to write them.
+    const { onSubmitReview } = renderToolbar({ commentCount: 1, watcherCount: 1 })
+    fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+    expect(screen.getByRole('dialog', { name: 'Finish review' })).toBeInTheDocument()
+    expect(onSubmitReview).not.toHaveBeenCalled()
+  })
+
+  it('passes the typed notes through', () => {
+    const { onSubmitReview } = renderToolbar({ commentCount: 1, watcherCount: 1 })
+    fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+    fireEvent.change(screen.getByLabelText('Concluding notes'), {
+      target: { value: 'Looks good.\n\nOne nit inline.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Finish review' }))
+    expect(onSubmitReview).toHaveBeenCalledWith('Looks good.\n\nOne nit inline.')
+  })
+
+  it('finishes on Cmd-Enter from the notes box', () => {
+    // The box takes focus on open, so a keyboard-only reviewer (and an agent
+    // driving by keys) must be able to finish without finding a button.
+    const { onSubmitReview } = renderToolbar({ commentCount: 1, watcherCount: 1 })
+    fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+    const box = screen.getByLabelText('Concluding notes')
+    fireEvent.change(box, { target: { value: 'ship it' } })
+    fireEvent.keyDown(box, { key: 'Enter', metaKey: true })
+    expect(onSubmitReview).toHaveBeenCalledWith('ship it')
+  })
+
+  it('does not finish on a bare Enter — notes are multi-line', () => {
+    const { onSubmitReview } = renderToolbar({ commentCount: 1, watcherCount: 1 })
+    fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+    fireEvent.keyDown(screen.getByLabelText('Concluding notes'), { key: 'Enter' })
+    expect(onSubmitReview).not.toHaveBeenCalled()
+  })
+
+  it('closes without asking when the box is empty', () => {
+    renderToolbar({ commentCount: 1, watcherCount: 1 })
+    fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Finish review' })).toBeNull()
+  })
+
+  it('asks before discarding typed notes, on every way out', () => {
+    // Cancel, Escape and a click outside all have to ask. Whichever one skips
+    // the question is the one that loses the notes, and it will be the one the
+    // reviewer happens to use.
+    for (const exit of ['cancel', 'escape', 'outside'] as const) {
+      renderToolbar({ commentCount: 1, watcherCount: 1 })
+      fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+      const box = screen.getByLabelText('Concluding notes')
+      fireEvent.change(box, { target: { value: 'worth keeping' } })
+      if (exit === 'cancel') fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      if (exit === 'escape') fireEvent.keyDown(box, { key: 'Escape' })
+      if (exit === 'outside') fireEvent.mouseDown(document.body)
+      expect(screen.getByRole('alert'), `exit: ${exit}`).toHaveTextContent('Discard your notes?')
+      // Still there to go back to.
+      expect(screen.getByLabelText('Concluding notes')).toHaveValue('worth keeping')
+      cleanup()
+    }
+  })
+
+  it('keeps the notes when the discard question is declined', () => {
+    renderToolbar({ commentCount: 1, watcherCount: 1 })
+    fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+    fireEvent.change(screen.getByLabelText('Concluding notes'), { target: { value: 'keep me' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByLabelText('Concluding notes')).toHaveValue('keep me')
+  })
+
+  it('discards only when the question is answered', () => {
+    const { onSubmitReview } = renderToolbar({ commentCount: 1, watcherCount: 1 })
+    fireEvent.click(screen.getByRole('button', { name: /Done reviewing/ }))
+    fireEvent.change(screen.getByLabelText('Concluding notes'), { target: { value: 'bye' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+    expect(screen.queryByRole('dialog', { name: 'Finish review' })).toBeNull()
     expect(onSubmitReview).not.toHaveBeenCalled()
   })
 

@@ -88,8 +88,14 @@ export function useReviewState(): ReviewState {
  * tab's streams go; the disconnect that follows is what lets it shut down at
  * once if this was the last browser.
  */
-export async function submitReview(): Promise<void> {
-  await fetch('/api/submit', { method: 'POST' })
+export async function submitReview(summary = ''): Promise<void> {
+  // The body is always sent, even empty: one request shape is easier to reason
+  // about than two, and the server treats blank notes as none.
+  await fetch('/api/submit', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ summary }),
+  })
   endReviewSession()
   closeReviewWindow()
 }

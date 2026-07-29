@@ -48,7 +48,9 @@ Subcommands (talk to the running krit server for the current session):
   reply <id> <text...>        Reply to a comment
   resolve <id>                Mark a comment resolved
   reopen <id>                 Reopen a resolved comment
-  wait-for-submit             Block until the user clicks Done reviewing in the browser UI
+  wait-for-submit             Block until the user clicks Done reviewing in the browser UI,
+                              then print the submit as JSON — including `summary`, the
+                              reviewer's concluding notes, when they wrote any
                               (exit 0 on submit, 1 if no server is reachable or
                               the state file is unusable, 2 if the connection
                               drops before submit)

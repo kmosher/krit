@@ -52,7 +52,7 @@ export type KritEvent =
       insertedText?: string
     }
   // The reviewer clicked "Done reviewing"; drafts have already been posted.
-  | { type: 'submitted'; timestamp: number }
+  | { type: 'submitted'; timestamp: number; summary?: string }
   | { type: 'review-ended'; reason: string }
 
 export interface CommentReply {

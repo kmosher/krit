@@ -24,7 +24,7 @@ Run in any git repository:
 krit
 ```
 
-This starts a local server on a random available port and opens the review UI — a browser tab by default, or the desktop app (below). The server waits for inline comments; click **Done reviewing** when finished (Ctrl+C to abort).
+This starts a local server on a random available port and opens the review UI — a browser tab by default, or the desktop app (below). The server waits for inline comments; click **Done reviewing** when finished (Ctrl+C to abort). That button opens a box for concluding notes and then ends the session — comments are optional, so a clean review is just notes, or nothing at all.
 
 ### Desktop app
 
@@ -72,7 +72,8 @@ krit reply <id> <text...>         # Reply to a comment (tagged author: 'agent')
 krit resolve <id>                 # Mark a comment resolved
 krit reopen <id>                  # Reopen a resolved comment
 krit refresh                      # Re-diff and push updates to the UI
-krit wait-for-submit              # Block until the user clicks Done reviewing
+krit wait-for-submit              # Block until the user clicks Done reviewing, then print
+                                  # the submit as JSON (with their concluding notes, if any)
 ```
 
 The WebSocket endpoint `ws://<host>:<port>/api/events-ws` is the integration point for an agent responding to comments live — each new comment or user reply arrives as one JSON frame. The stream carries only human-originated events (the agent's own replies and file edits don't echo back), so there's no self-feedback loop.
