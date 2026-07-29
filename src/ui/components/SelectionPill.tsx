@@ -42,10 +42,11 @@ export function SelectionPill({ x, y, onComment, onDelete }: SelectionPillProps)
       ref={ref}
       className="selection-pill"
       style={{ position: 'fixed', left: pos.left, top: pos.top }}
-      // Selecting again inside the pill (e.g. clicking) shouldn't collapse
-      // the underlying text selection before the click handler reads it —
-      // mousedown is where browsers normally clear a selection on
-      // click-elsewhere, so stop it here specifically.
+      // mousedown is where browsers clear a selection on click-elsewhere.
+      // The anchor was already captured when the drag ended, so nothing here
+      // depends on the selection surviving — but the reviewer is looking at
+      // the highlight they are about to comment on, and it should still be
+      // there while they aim at the button.
       onMouseDown={(e) => e.preventDefault()}
     >
       <button type="button" className="selection-pill-btn" onClick={onComment} title="Comment on this selection">

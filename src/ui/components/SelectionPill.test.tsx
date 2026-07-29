@@ -27,8 +27,8 @@ describe('SelectionPill', () => {
   })
 
   it('swallows mousedown so the click does not clear the text selection', () => {
-    // The handlers read the live selection; browsers collapse it on mousedown
-    // elsewhere, so without preventDefault both actions get an empty range.
+    // Browsers collapse the selection on mousedown elsewhere; the highlight
+    // has to stay visible while the reviewer aims at the button.
     const { container } = renderPill()
     const pill = container.querySelector('.selection-pill') as HTMLElement
     const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true })

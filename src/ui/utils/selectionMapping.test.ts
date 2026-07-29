@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { getActiveSelectionRange, mapRangeToAnchor } from './selectionMapping'
+import { mapRangeToAnchor, rangeFromDragPoints, shadowRootOf } from './selectionMapping'
 
 // Mirrors the shape @pierre/diffs renders: one [data-line] block per line,
 // each holding several <span>s because syntax highlighting splits the text.
@@ -213,195 +213,204 @@ describe('mapRangeToAnchor', () => {
   })
 })
 
-describe('getActiveSelectionRange', () => {
-  function selectInDocument(start: Node, startOffset: number, end: Node, endOffset: number): Range {
-    const r = rangeBetween(start, startOffset, end, endOffset)
-    const sel = document.getSelection()!
-    sel.removeAllRanges()
-    sel.addRange(r)
-    return r
+
+describe('shadowRootOf', () => {
+  it('finds the shadow root of a shadow-internal node', () => {
+    const { container, span } = renderLines([['abc']], { shadow: true })
+    expect(shadowRootOf(span(1, 0))).toBe(container)
+  })
+
+  it('returns null for a light-DOM node or a non-Node target', () => {
+    // A mouseup on light-DOM chrome, or an EventTarget with no getRootNode at
+    // all, must not throw — it just means there is nothing to hit-test into.
+    const { span } = renderLines([['abc']])
+    expect(shadowRootOf(span(1, 0))).toBeNull()
+    expect(shadowRootOf(new EventTarget())).toBeNull()
+    expect(shadowRootOf(null)).toBeNull()
+  })
+})
+
+// happy-dom implements no layout, so it has no caretPositionFromPoint. These
+// stubs stand in for the browser's hit-testing: a coordinate is looked up in
+// a fixture map, and — like a real engine — the shadow-internal answer is
+// only given when the shadow root was passed in the options. The stubs prove
+// our dispatch and normalization logic; they cannot prove any engine behaves
+// this way (that was measured separately, in Chrome, Playwright WebKit and
+// the system WKWebView).
+describe('rangeFromDragPoints', () => {
+  type Caret = { node: Node; offset: number }
+
+  function stubCaret(
+    points: Array<[number, number, Caret]>,
+    opts: { pierces?: boolean; retargetTo?: Caret } = {},
+  ) {
+    const pierces = opts.pierces ?? true
+    const calls: Array<{ x: number; y: number; roots: ShadowRoot[] | undefined }> = []
+    const fn = (x: number, y: number, options?: { shadowRoots?: ShadowRoot[] }) => {
+      calls.push({ x, y, roots: options?.shadowRoots })
+      const hit = points.find(([px, py]) => px === x && py === y)
+      if (!hit) return null
+      const caret = hit[2]
+      const root = caret.node.getRootNode()
+      // An engine that ignores the option (or was not given one) answers
+      // outside the shadow root — at the host, whose offsets are child
+      // indices rather than characters. `retargetTo` lets a test aim that at
+      // a position which is perfectly well-formed but simply not ours, so the
+      // containment check is the only thing that can reject it.
+      const asked = options?.shadowRoots?.includes(root as ShadowRoot) ?? false
+      if (root instanceof ShadowRoot && !(pierces && asked)) {
+        const away = opts.retargetTo
+        return away
+          ? { offsetNode: away.node, offset: away.offset + caret.offset }
+          : { offsetNode: root.host, offset: 0 }
+      }
+      return { offsetNode: caret.node, offset: caret.offset }
+    }
+    Object.defineProperty(document, 'caretPositionFromPoint', {
+      value: fn,
+      configurable: true,
+      writable: true,
+    })
+    return calls
   }
 
-  it('returns the live range for a light-DOM selection', () => {
-    const { span } = renderLines([['abcdef']])
-    selectInDocument(span(1, 0), 1, span(1, 0), 4)
-    const range = getActiveSelectionRange(span(1, 0))
+  afterEach(() => {
+    delete (document as { caretPositionFromPoint?: unknown }).caretPositionFromPoint
+  })
+
+  it('builds a forward range from the two drag coordinates', () => {
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    stubCaret([
+      [10, 5, { node: span(1, 0), offset: 1 }],
+      [40, 5, { node: span(1, 0), offset: 4 }],
+    ])
+    const range = rangeFromDragPoints({ x: 10, y: 5 }, { x: 40, y: 5 }, span(1, 0))
     expect(range?.toString()).toBe('bcd')
   })
 
-  it('returns null when the selection is collapsed', () => {
-    // Every click collapses the selection; returning a range here would make
-    // the comment pill flicker on every click in the diff.
-    const { span } = renderLines([['abcdef']])
-    selectInDocument(span(1, 0), 2, span(1, 0), 2)
-    expect(getActiveSelectionRange(span(1, 0))).toBeNull()
+  it('passes the shadow root so hit-testing pierces the boundary', () => {
+    // Without the shadowRoots option every engine answers with the host, which
+    // is exactly the bug this rewrite exists to avoid.
+    const { container, span } = renderLines([['abcdef']], { shadow: true })
+    const calls = stubCaret([
+      [10, 5, { node: span(1, 0), offset: 1 }],
+      [40, 5, { node: span(1, 0), offset: 4 }],
+    ])
+    rangeFromDragPoints({ x: 10, y: 5 }, { x: 40, y: 5 }, span(1, 0))
+    expect(calls).toHaveLength(2)
+    expect(calls[0].roots).toEqual([container])
+    expect(calls[1].roots).toEqual([container])
   })
 
-  it('returns null when there is no selection at all', () => {
-    const { span } = renderLines([['abcdef']])
-    document.getSelection()!.removeAllRanges()
-    expect(getActiveSelectionRange(span(1, 0))).toBeNull()
+  it('normalizes a backwards drag within one line', () => {
+    // Dragging right-to-left must anchor the same characters as left-to-right;
+    // an inverted anchor cannot be highlighted when the comment is replayed.
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    stubCaret([
+      [40, 5, { node: span(1, 0), offset: 4 }],
+      [10, 5, { node: span(1, 0), offset: 1 }],
+    ])
+    const range = rangeFromDragPoints({ x: 40, y: 5 }, { x: 10, y: 5 }, span(1, 0))
+    expect(range?.toString()).toBe('bcd')
+    expect(range?.startOffset).toBe(1)
   })
 
-  it('falls back to the document selection for a non-Node event target', () => {
-    // The target only exists to name a shadow root; without one there is
-    // nothing to retarget past, so the document selection stands. It must not
-    // throw on a target that has no getRootNode.
-    const { span } = renderLines([['abcdef']])
-    selectInDocument(span(1, 0), 1, span(1, 0), 4)
-    expect(getActiveSelectionRange(new EventTarget())?.toString()).toBe('bcd')
-    expect(getActiveSelectionRange(null)?.toString()).toBe('bcd')
+  it('normalizes a backwards drag spanning lines', () => {
+    // Different nodes, so the ordering has to come from document position, not
+    // from comparing offsets.
+    const { span } = renderLines([['abc'], ['def']], { shadow: true })
+    stubCaret([
+      [30, 25, { node: span(2, 0), offset: 2 }],
+      [10, 5, { node: span(1, 0), offset: 1 }],
+    ])
+    const range = rangeFromDragPoints({ x: 30, y: 25 }, { x: 10, y: 5 }, span(1, 0))
+    expect(range?.startContainer).toBe(span(1, 0))
+    expect(range?.startOffset).toBe(1)
+    expect(range?.endContainer).toBe(span(2, 0))
+    expect(range?.endOffset).toBe(2)
   })
 
-  it('accepts a shadow-internal range from document.getSelection()', () => {
-    // Some engines hand back the real shadow-internal nodes; when they do we
-    // must use that range directly rather than falling through to the
-    // composed-range path.
-    const { span } = renderLines([['shadow text']], { shadow: true })
-    selectInDocument(span(1, 0), 0, span(1, 0), 6)
-    expect(getActiveSelectionRange(span(1, 0))?.toString()).toBe('shadow')
+  it('spans lines on a forward drag', () => {
+    const { span } = renderLines([['abc'], ['def']], { shadow: true })
+    stubCaret([
+      [10, 5, { node: span(1, 0), offset: 1 }],
+      [30, 25, { node: span(2, 0), offset: 2 }],
+    ])
+    const range = rangeFromDragPoints({ x: 10, y: 5 }, { x: 30, y: 25 }, span(1, 0))
+    expect(mapRangeToAnchor(range!)).toMatchObject({
+      startLine: 1,
+      startColumn: 1,
+      endLine: 2,
+      endColumn: 2,
+      selectedText: 'bc\nde',
+    })
   })
 
-  it('rejects a host-retargeted range for a shadow-internal target', () => {
-    // The engines that retarget hand back a range pointing at the shadow HOST,
-    // whose offsets are child indices, not characters. Mapping that would
-    // anchor the comment to garbage, so it must be discarded.
-    const { span } = renderLines([['shadow text']], { shadow: true })
+  it('returns null for a click, where both endpoints resolve to the same caret', () => {
+    // A click still fires mousedown and mouseup; it must not open a pill.
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    stubCaret([
+      [20, 5, { node: span(1, 0), offset: 2 }],
+      [21, 5, { node: span(1, 0), offset: 2 }],
+    ])
+    expect(rangeFromDragPoints({ x: 20, y: 5 }, { x: 21, y: 5 }, span(1, 0))).toBeNull()
+  })
+
+  it('returns null when the engine ignores the shadowRoots option', () => {
+    // The degradation that matters: an engine without the option answers
+    // outside the shadow root. The answer is a valid, non-collapsed position
+    // — it is simply about different text — so only checking that it landed
+    // inside the root we asked about can tell it from a real hit.
+    const { span } = renderLines([['abcdef']], { shadow: true })
     const light = document.createElement('p')
     light.textContent = 'outside the shadow root'
     document.body.appendChild(light)
-    selectInDocument(light.firstChild!, 0, light.firstChild!, 7)
-    // No getComposedRanges in happy-dom, so the fallback yields null — the
-    // point of the assertion is that the light-DOM range is NOT returned.
-    expect(getActiveSelectionRange(span(1, 0))).toBeNull()
+    stubCaret(
+      [
+        [10, 5, { node: span(1, 0), offset: 1 }],
+        [40, 5, { node: span(1, 0), offset: 4 }],
+      ],
+      { pierces: false, retargetTo: { node: light.firstChild!, offset: 0 } },
+    )
+    expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 40, y: 5 }, span(1, 0))).toBeNull()
   })
 
-  // happy-dom implements neither ShadowRoot.getSelection() (Chrome-only) nor
-  // Selection.getComposedRanges() (Safari), so the branches that consume them
-  // are exercised with stubs shaped like the real APIs. The stubs cover our
-  // dispatch logic only; they cannot prove the real engines behave this way.
-  describe('with stubbed engine selection APIs', () => {
-    type ComposedSelection = Omit<Selection, 'getComposedRanges'> & {
-      getComposedRanges?: (arg?: unknown) => StaticRange[]
-    }
+  it('returns null when caretPositionFromPoint is missing entirely', () => {
+    // Older WebKit has only the legacy caretRangeFromPoint, which does not
+    // pierce the shadow boundary in any engine. No pill beats a wrong anchor.
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    delete (document as { caretPositionFromPoint?: unknown }).caretPositionFromPoint
+    expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 40, y: 5 }, span(1, 0))).toBeNull()
+  })
 
-    function fakeSelection(over: Partial<Selection> & Record<string, unknown>): Selection {
-      return { isCollapsed: false, rangeCount: 0, ...over } as unknown as Selection
-    }
+  it('returns null when an endpoint hits nothing', () => {
+    // Releasing the mouse outside the window resolves to no caret at all.
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    stubCaret([[10, 5, { node: span(1, 0), offset: 1 }]])
+    expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 999, y: 999 }, span(1, 0))).toBeNull()
+    expect(rangeFromDragPoints({ x: 999, y: 999 }, { x: 10, y: 5 }, span(1, 0))).toBeNull()
+  })
 
-    function composedSelection(): ComposedSelection {
-      return document.getSelection()! as unknown as ComposedSelection
-    }
+  it('returns null when the drag did not start inside a shadow root', () => {
+    // Light-DOM chrome around the diff: there is no code surface to anchor to.
+    const { span } = renderLines([['abcdef']])
+    stubCaret([
+      [10, 5, { node: span(1, 0), offset: 1 }],
+      [40, 5, { node: span(1, 0), offset: 4 }],
+    ])
+    expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 40, y: 5 }, span(1, 0))).toBeNull()
+  })
 
-    function staticRange(sc: Node, so: number, ec: Node, eo: number): StaticRange {
-      return { startContainer: sc, startOffset: so, endContainer: ec, endOffset: eo, collapsed: sc === ec && so === eo }
-    }
-
-    // Puts the document selection in the light DOM while the event target is
-    // shadow-internal — indistinguishable, to this code, from an engine that
-    // retargeted a shadow selection to the host.
-    function selectOutsideTheShadowRoot() {
-      const light = document.createElement('p')
-      light.textContent = 'outside'
-      document.body.appendChild(light)
-      selectInDocument(light.firstChild!, 0, light.firstChild!, 7)
-    }
-
-    it("prefers ShadowRoot.getSelection() over the document's retargeted one", () => {
-      const { container, span } = renderLines([['shadow text']], { shadow: true })
-      selectOutsideTheShadowRoot()
-      const real = rangeBetween(span(1, 0), 0, span(1, 0), 6)
-      Object.assign(container as ShadowRoot, {
-        getSelection: () => fakeSelection({ rangeCount: 1, getRangeAt: () => real }),
-      })
-      expect(getActiveSelectionRange(span(1, 0))).toBe(real)
+  it('survives an engine that throws from caretPositionFromPoint', () => {
+    // A throw here would take down the mouseup handler and freeze commenting.
+    const { span } = renderLines([['abcdef']], { shadow: true })
+    Object.defineProperty(document, 'caretPositionFromPoint', {
+      value: () => {
+        throw new Error('unsupported options argument')
+      },
+      configurable: true,
+      writable: true,
     })
-
-    it('does not call getRangeAt on a selection with no ranges', () => {
-      // Chrome's ShadowRoot.getSelection() can hand back a selection object
-      // with rangeCount 0; getRangeAt(0) throws IndexSizeError there, which
-      // would take down the mouseup handler and freeze commenting entirely.
-      const { container, span } = renderLines([['shadow text']], { shadow: true })
-      Object.assign(container as ShadowRoot, {
-        getSelection: () =>
-          fakeSelection({
-            rangeCount: 0,
-            getRangeAt: () => {
-              throw new Error('IndexSizeError')
-            },
-          }),
-      })
-      expect(getActiveSelectionRange(span(1, 0))).toBeNull()
-    })
-
-    it('falls back to the document selection when ShadowRoot.getSelection() returns nothing', () => {
-      const { container, span } = renderLines([['shadow text']], { shadow: true })
-      Object.assign(container as ShadowRoot, { getSelection: () => null })
-      selectInDocument(span(1, 0), 0, span(1, 0), 6)
-      expect(getActiveSelectionRange(span(1, 0))?.toString()).toBe('shadow')
-    })
-
-    it('rebuilds a live range from getComposedRanges when the selection is retargeted', () => {
-      // The Safari/WKWebView path, which is what the Tauri desktop shell runs.
-      const { span } = renderLines([['shadow text']], { shadow: true })
-      selectOutsideTheShadowRoot()
-      const sel = composedSelection()
-      sel.getComposedRanges = () => [staticRange(span(1, 0), 0, span(1, 0), 6)]
-      try {
-        expect(getActiveSelectionRange(span(1, 0))?.toString()).toBe('shadow')
-      } finally {
-        delete sel.getComposedRanges
-      }
-    })
-
-    it('retries the variadic signature when the spec-shaped call does not pierce the shadow root', () => {
-      // Safari 17 shipped getComposedRanges(...shadowRoots) before the spec
-      // settled on an options object. Passing the wrong shape is not an error —
-      // it silently returns host-retargeted ranges — so the only way to notice
-      // is that the result is not inside our root.
-      const { container, span } = renderLines([['shadow text']], { shadow: true })
-      const host = (container as ShadowRoot).host
-      selectOutsideTheShadowRoot()
-      const sel = composedSelection()
-      const calls: unknown[] = []
-      sel.getComposedRanges = (arg?: unknown) => {
-        calls.push(arg)
-        if (arg && !(arg instanceof ShadowRoot)) return [staticRange(host, 0, host, 1)]
-        return [staticRange(span(1, 0), 0, span(1, 0), 6)]
-      }
-      try {
-        expect(getActiveSelectionRange(span(1, 0))?.toString()).toBe('shadow')
-        expect(calls).toHaveLength(2)
-        expect(calls[1]).toBe(container)
-      } finally {
-        delete sel.getComposedRanges
-      }
-    })
-
-    it('returns null when the composed range is collapsed', () => {
-      // A click inside the shadow root under Safari still produces a composed
-      // range; it is just zero-width and must not open a comment.
-      const { span } = renderLines([['shadow text']], { shadow: true })
-      selectOutsideTheShadowRoot()
-      const sel = composedSelection()
-      sel.getComposedRanges = () => [staticRange(span(1, 0), 3, span(1, 0), 3)]
-      try {
-        expect(getActiveSelectionRange(span(1, 0))).toBeNull()
-      } finally {
-        delete sel.getComposedRanges
-      }
-    })
-
-    it('returns null when getComposedRanges yields no ranges at all', () => {
-      const { span } = renderLines([['shadow text']], { shadow: true })
-      selectOutsideTheShadowRoot()
-      const sel = composedSelection()
-      sel.getComposedRanges = () => []
-      try {
-        expect(getActiveSelectionRange(span(1, 0))).toBeNull()
-      } finally {
-        delete sel.getComposedRanges
-      }
-    })
+    expect(rangeFromDragPoints({ x: 10, y: 5 }, { x: 40, y: 5 }, span(1, 0))).toBeNull()
   })
 })

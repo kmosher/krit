@@ -14,7 +14,7 @@ import type { ReviewComment } from '../../types'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 import { SelectionPill } from './SelectionPill'
-import { getActiveSelectionRange, mapRangeToAnchor, type SelectionAnchor } from '../utils/selectionMapping'
+import { mapRangeToAnchor, rangeFromDragPoints, type DragPoint, type SelectionAnchor } from '../utils/selectionMapping'
 import { computeSingleEdit } from '../utils/textEdits'
 
 type DraftMetadata = {
@@ -749,6 +749,11 @@ export const CodeViewWrapper = memo(
     // the rendered DOM we can inspect ourselves; see selectionMapping.ts).
     const lastHoveredRef = useRef<{ filePath: string; lineNumber: number; side: AnnotationSide } | null>(null)
 
+    // Where the current drag began, in viewport coordinates. The anchor is
+    // hit-tested from the drag's two endpoints, and mouseup only carries one
+    // of them.
+    const dragStartRef = useRef<DragPoint | null>(null)
+
     // Clear the lib's line selection when the user hovers a line outside the
     // currently selected range. See the enableLineSelection comment in the
     // options block for the why.
@@ -821,61 +826,67 @@ export const CodeViewWrapper = memo(
       },
     )
 
-    // Native text selection inside the code surface -> floating
-    // Comment/Delete pill (Stage 6). Listens on scrollRef (the same element
-    // handed to CodeView as containerRef) rather than document, since
-    // mouseup is a composed event and bubbles out through an open shadow
-    // root to any light-DOM ancestor listener. But at a light-DOM listener
-    // `e.target` is retargeted to the shadow *host*, whose root node is the
-    // document — seeding the selection lookup with it makes
-    // getActiveSelectionRange fall back to document.getSelection(), which
-    // Chrome blinds for shadow-internal selections. composedPath()[0] is
-    // the untargeted deep node and identifies the right shadow root.
+    // Text drag over the code surface -> floating Comment/Delete pill
+    // (Stage 6). Listens on scrollRef (the same element handed to CodeView as
+    // containerRef) rather than document, since mouse events are composed and
+    // bubble out through the open shadow root to any light-DOM ancestor
+    // listener. At a light-DOM listener `e.target` is retargeted to the shadow
+    // *host*, whose root node is the document; composedPath()[0] is the
+    // untargeted deep node and is what identifies the right shadow root.
+    //
+    // The anchor comes from the drag's own coordinates — mousedown's and
+    // mouseup's — hit-tested by the browser, rather than from the Selection
+    // API, whose shadow-piercing form differs per engine (see
+    // selectionMapping.ts). Both endpoints are therefore ours to keep.
     useEffect(() => {
       const container = scrollRef.current
       if (!container) return
+      const handleMouseDown = (e: MouseEvent) => {
+        dragStartRef.current = { x: e.clientX, y: e.clientY }
+      }
       const handleMouseUp = (e: MouseEvent) => {
+        const start = dragStartRef.current
+        dragStartRef.current = null
+        if (!start) return
         // composedPath() must be read synchronously — after dispatch
         // completes it returns [], per spec.
         const deepTarget = e.composedPath()[0] ?? e.target
-        // requestAnimationFrame: on mouseup the browser hasn't always
-        // finished finalizing the Selection object yet (most visible in
-        // Chrome on a fast double-click-drag); reading it a tick later is
-        // more reliable than reading synchronously in the handler.
-        requestAnimationFrame(() => {
-          const range = getActiveSelectionRange(deepTarget)
-          if (!range) return
-          const anchor = mapRangeToAnchor(range)
-          if (!anchor) return
-          const hovered = lastHoveredRef.current
-          // onLineEnter (which populates lastHoveredRef) only fires when
-          // the pointer *crosses into* a line. Right after a per-file
-          // remount (e.g. a delete's file-changed refetch) the pointer can
-          // already be resting inside the line the user is about to drag
-          // over, so onLineEnter never re-fires and hovered is stale null
-          // -- bailing here made the pill flaky on exactly that first
-          // drag. Fall back to the scroll-tracked "active" file (already
-          // maintained independent of hover, see handleScroll below) with
-          // side defaulting to 'additions', the same fallback used
-          // elsewhere in this file (handleGutterClick) when the side can't
-          // be determined precisely -- an imprecise guess beats no pill at
-          // all, and this path is only reached when hover tracking hasn't
-          // caught up yet.
-          const filePath = hovered?.filePath ?? lastActiveFileRef.current
-          if (!filePath) return
-          const side = hovered?.side ?? 'additions'
-          const rect = range.getBoundingClientRect()
-          setTextSelection({
-            x: rect.right,
-            y: rect.bottom + 6,
-            filePath,
-            side,
-            anchor,
-          })
+        const range = rangeFromDragPoints(start, { x: e.clientX, y: e.clientY }, deepTarget)
+        if (!range) return
+        const anchor = mapRangeToAnchor(range)
+        if (!anchor) return
+        const hovered = lastHoveredRef.current
+        // onLineEnter (which populates lastHoveredRef) only fires when
+        // the pointer *crosses into* a line. Right after a per-file
+        // remount (e.g. a delete's file-changed refetch) the pointer can
+        // already be resting inside the line the user is about to drag
+        // over, so onLineEnter never re-fires and hovered is stale null
+        // -- bailing here made the pill flaky on exactly that first
+        // drag. Fall back to the scroll-tracked "active" file (already
+        // maintained independent of hover, see handleScroll below) with
+        // side defaulting to 'additions', the same fallback used
+        // elsewhere in this file (handleGutterClick) when the side can't
+        // be determined precisely -- an imprecise guess beats no pill at
+        // all, and this path is only reached when hover tracking hasn't
+        // caught up yet.
+        const filePath = hovered?.filePath ?? lastActiveFileRef.current
+        if (!filePath) return
+        const side = hovered?.side ?? 'additions'
+        const rect = range.getBoundingClientRect()
+        setTextSelection({
+          x: rect.right,
+          y: rect.bottom + 6,
+          filePath,
+          side,
+          anchor,
         })
       }
+      container.addEventListener('mousedown', handleMouseDown)
       container.addEventListener('mouseup', handleMouseUp)
-      return () => container.removeEventListener('mouseup', handleMouseUp)
+      return () => {
+        container.removeEventListener('mousedown', handleMouseDown)
+        container.removeEventListener('mouseup', handleMouseUp)
+      }
     }, [])
 
     // Dismiss the pill on Escape or a click outside it. Clicking the pill's

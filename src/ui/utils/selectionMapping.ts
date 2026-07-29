@@ -1,33 +1,47 @@
-// Maps a native browser text selection made inside @pierre/diffs' rendered
-// code surface to a (line, column) character anchor krit can persist.
+// Maps a mouse drag over @pierre/diffs' rendered code surface to a
+// (line, column) character anchor krit can persist.
 //
-// Two things make this non-obvious rather than "just use Range APIs":
+// The anchor is derived from the drag's own pointer coordinates, resolved by
+// the browser's hit-testing via `document.caretPositionFromPoint(x, y,
+// { shadowRoots: [root] })`, rather than from the Selection API.
 //
-// 1. CodeView renders into an *open* shadow root (confirmed by reading
-//    @pierre/diffs' dist output — FileStream.js calls
-//    `container.attachShadow({ mode: 'open' })`). The standard
-//    `document.getSelection()` retargets a shadow-internal selection's
-//    anchor/focus nodes to the shadow *host* rather than the real text
-//    node, which throws away the offsets we need. Chrome (only) exposes
-//    `ShadowRoot.getSelection()` as a non-standard extension that returns
-//    the real, untargeted selection — we use that when available and fall
-//    back to `document.getSelection()` otherwise (Firefox/Safari will only
-//    get line-level granularity worst case, not a crash).
-// 2. Each rendered line's container carries `data-line="<lineNumber>"`
-//    (confirmed in @pierre/diffs' createRowNodes.js / FileStream.js), but
-//    the text inside it is wrapped in nested `<span>`s for syntax
-//    highlighting — so a raw `Range.startOffset` isn't "column within the
-//    line," it's "offset within whichever span the selection happened to
-//    land in." We compute the true column with the standard
-//    range-to-string-length trick: build a Range from the line container's
-//    start to the selection point and take `.toString().length` — that
-//    concatenates all text content in document order regardless of markup,
-//    matching what the reviewer visually selected.
-// 3. Range.toString() has no concept of line boundaries either — for a
-//    multi-line selection it silently drops the line break (see
-//    reconstructSelectedText below), so the final selectedText is rebuilt
-//    from the range's cloned per-line DOM structure instead of trusting
-//    Range.toString() directly.
+// CodeView renders into an open shadow root (FileStream.js calls
+// `attachShadow({ mode: 'open' })`), and reading a selection back across
+// that boundary took a different API per engine: `document.getSelection()`
+// retargets both endpoints to the shadow host, Chrome exposes a non-standard
+// `ShadowRoot.getSelection()`, and `Selection.getComposedRanges()` — the
+// standard answer, and the one @pierre/diffs itself uses upstream — shipped
+// in two call signatures. Choosing between them meant detecting retargeting
+// by hand, and the retargeted view of a real selection is misleading in ways
+// that are easy to build on by accident: a multi-character shadow-internal
+// selection reports `isCollapsed: true` at the document level, because both
+// of its endpoints collapse onto the host. Nothing here may gate on
+// `isCollapsed`, or on any other document-level view of a selection that
+// lives inside the shadow root.
+//
+// caretPositionFromPoint with the `shadowRoots` option resolves correctly in
+// Chrome, Playwright WebKit and the system WKWebView krit.app embeds alike,
+// so there is one path here and no fork. It also asks the layout engine
+// where a coordinate lands instead of inferring it, which is what makes tabs,
+// ligatures, CJK, font fallback and wrapped lines someone else's problem.
+// (WebKit's legacy `caretRangeFromPoint` does *not* pierce the boundary in
+// any engine — it is not a usable fallback.)
+//
+// Caret resolution is "nearest insertion point", so two engines can disagree
+// by one column when the pointer sits at the exact horizontal midpoint of a
+// character — one rounds back, one forward. That is correct for a selection
+// endpoint; nothing here may assume a rounding direction.
+//
+// Two further details of the rendered markup:
+//
+// - Each line's container carries `data-line="<lineNumber>"`, but its text is
+//   split across nested syntax-highlighting `<span>`s, so a raw caret offset
+//   is "offset within whichever span was hit," not a column. The true column
+//   comes from the range-to-string-length trick: build a Range from the line
+//   container's start to the caret point and take `.toString().length`.
+// - `Range.toString()` has no concept of line boundaries and silently drops
+//   line breaks, so `selectedText` is rebuilt from the range's cloned
+//   per-line DOM structure instead (see reconstructSelectedText).
 
 export interface SelectionAnchor {
   startLine: number
@@ -37,74 +51,88 @@ export interface SelectionAnchor {
   selectedText: string
 }
 
-function getShadowAwareSelection(target: Node | null): Selection | null {
-  const root = target?.getRootNode?.()
-  if (root instanceof ShadowRoot) {
-    const shadowGetSelection = (root as ShadowRoot & { getSelection?: () => Selection | null }).getSelection
-    if (typeof shadowGetSelection === 'function') {
-      const sel = shadowGetSelection.call(root)
-      if (sel) return sel
-    }
-  }
-  return document.getSelection()
+// Viewport coordinates of one end of the drag (a mousedown or mouseup).
+export interface DragPoint {
+  x: number
+  y: number
 }
 
-// Safari/WebKit path (incl. the Tauri desktop shell's WKWebView): no
-// ShadowRoot.getSelection(), but the standard Selection.getComposedRanges()
-// pierces the shadow boundary when handed the shadow root. Returns a live
-// Range rebuilt from the first composed StaticRange, or null if the API is
-// missing or the composed range still isn't shadow-internal.
-//
-// The API shipped with two signatures: the current spec takes an options
-// object ({ shadowRoots }); original Safari 17 took variadic shadow roots.
-// The wrong shape isn't an error — it just returns host-retargeted ranges —
-// so try the spec form and fall back to variadic if the result didn't
-// actually pierce into our root.
-function getComposedSelectionRange(root: ShadowRoot): Range | null {
-  const sel = document.getSelection() as
-    | (Selection & {
-        getComposedRanges?: (opts?: { shadowRoots?: ShadowRoot[] } | ShadowRoot) => StaticRange[]
-      })
-    | null
-  if (!sel || typeof sel.getComposedRanges !== 'function') return null
+interface CaretPoint {
+  node: Node
+  offset: number
+}
 
-  let ranges = sel.getComposedRanges({ shadowRoots: [root] })
-  if (ranges.length === 0 || !root.contains(ranges[0].startContainer)) {
-    ranges = sel.getComposedRanges(root)
-  }
-  const sr = ranges[0]
-  if (!sr) return null
-  if (sr.startContainer === sr.endContainer && sr.startOffset === sr.endOffset) return null
+type CaretPositionFromPoint = (
+  x: number,
+  y: number,
+  options?: { shadowRoots?: ShadowRoot[] },
+) => { offsetNode: Node; offset: number } | null
+
+// Resolves a viewport coordinate to a caret position inside `root`.
+//
+// The `shadowRoots` option is what makes the result shadow-internal; an
+// engine that doesn't support it ignores it silently and hands back a
+// position retargeted to the shadow host. That is indistinguishable from
+// success except by checking containment, which is why the result is
+// rejected unless it landed inside the root we asked about — degrading to
+// "no anchor" rather than to a wrong one.
+function caretPointFromCoords(point: DragPoint, root: ShadowRoot): CaretPoint | null {
+  const fn = (document as Document & { caretPositionFromPoint?: CaretPositionFromPoint })
+    .caretPositionFromPoint
+  if (typeof fn !== 'function') return null
+  let pos: { offsetNode: Node; offset: number } | null
   try {
-    const r = document.createRange()
-    r.setStart(sr.startContainer, sr.startOffset)
-    r.setEnd(sr.endContainer, sr.endOffset)
-    return r
+    pos = fn.call(document, point.x, point.y, { shadowRoots: [root] })
   } catch {
     return null
   }
+  if (!pos?.offsetNode) return null
+  if (!root.contains(pos.offsetNode)) return null
+  return { node: pos.offsetNode, offset: pos.offset }
 }
 
-// Returns the active selection's Range, using the shadow-aware lookup
-// above, seeded from the node an originating event touched (its
-// composedPath()[0] is the deepest — possibly shadow-internal — target,
-// which is what tells us which shadow root to ask).
-export function getActiveSelectionRange(eventTarget: EventTarget | null): Range | null {
+// True if `b` precedes `a` in document order — i.e. the user dragged
+// backwards, upward or right-to-left.
+function isBackwards(a: CaretPoint, b: CaretPoint): boolean {
+  if (a.node === b.node) return b.offset < a.offset
+  const rel = a.node.compareDocumentPosition(b.node)
+  return (rel & Node.DOCUMENT_POSITION_PRECEDING) !== 0
+}
+
+// The shadow root the drag happened inside, taken from the deep (untargeted)
+// event target — `e.composedPath()[0]`. At a light-DOM listener `e.target`
+// has already been retargeted to the host, whose root is the document, so
+// only the composed path identifies the right root.
+export function shadowRootOf(eventTarget: EventTarget | null): ShadowRoot | null {
   const node = eventTarget instanceof Node ? eventTarget : null
   const root = node?.getRootNode?.()
-  const sel = getShadowAwareSelection(node)
-  if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
-    const range = sel.getRangeAt(0)
-    // document.getSelection() inside a shadow root hands back a range
-    // retargeted to the host — detectable because it no longer sits inside
-    // our shadow root. Fall through to getComposedRanges in that case
-    // instead of returning a useless host-level range.
-    if (!(root instanceof ShadowRoot) || root.contains(range.startContainer)) {
-      return range
-    }
+  return root instanceof ShadowRoot ? root : null
+}
+
+// Builds a forward Range spanning the drag, from the coordinates of its
+// mousedown and mouseup. Returns null if either endpoint can't be resolved
+// inside the shadow root, or if the drag was really a click (both endpoints
+// resolve to the same caret) — a collapsed selection must produce no anchor
+// and no pill.
+export function rangeFromDragPoints(
+  start: DragPoint,
+  end: DragPoint,
+  eventTarget: EventTarget | null,
+): Range | null {
+  const root = shadowRootOf(eventTarget)
+  if (!root) return null
+  const a = caretPointFromCoords(start, root)
+  const b = caretPointFromCoords(end, root)
+  if (!a || !b) return null
+  const [from, to] = isBackwards(a, b) ? [b, a] : [a, b]
+  try {
+    const range = document.createRange()
+    range.setStart(from.node, from.offset)
+    range.setEnd(to.node, to.offset)
+    return range.collapsed ? null : range
+  } catch {
+    return null
   }
-  if (root instanceof ShadowRoot) return getComposedSelectionRange(root)
-  return null
 }
 
 function closestLineElement(node: Node): HTMLElement | null {
@@ -120,8 +148,8 @@ function columnWithinLine(lineEl: HTMLElement, node: Node, offset: number): numb
     return r.toString().length
   } catch {
     // setEnd throws if `node` isn't actually a descendant of `lineEl` (e.g.
-    // the selection end landed outside any [data-line] container) —
-    // treat as unmappable rather than guessing.
+    // the caret landed outside any [data-line] container) — treat as
+    // unmappable rather than guessing.
     return null
   }
 }
@@ -173,10 +201,9 @@ export function mapRangeToAnchor(range: Range): SelectionAnchor | null {
   const selectedText = reconstructSelectedText(range, range.toString())
   if (selectedText.length === 0) return null
 
-  // Range should already be start-before-end (Selection.getRangeAt(0)
-  // normalizes forward/backward drags), but guard anyway — a caller
-  // feeding in an arbitrary Range shouldn't be able to produce an inverted
-  // anchor.
+  // rangeFromDragPoints already normalizes direction, but guard anyway — a
+  // caller feeding in an arbitrary Range shouldn't be able to produce an
+  // inverted anchor.
   if (startLine > endLine || (startLine === endLine && startColumn > endColumn)) {
     return { startLine: endLine, startColumn: endColumn, endLine: startLine, endColumn: startColumn, selectedText }
   }
