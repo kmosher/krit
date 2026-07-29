@@ -114,6 +114,22 @@ skill together when you do.
   1.3.0 final once it publishes. An exact pin has no caret for `pnpm update`
   to follow, so nothing will prompt you.
 
+- **Do not move the pin to `1.3.0-rc.2` or `-rc.3`: both break inline
+  editing.** Clicking Edit throws ``ShikiError: Theme `github-light` not
+  found`` from the page and the editor never attaches — the `contenteditable`
+  host never appears, so the file is stuck in a session that can't take input.
+  rc.2 introduced it and rc.3 carries it; rc.1 is clean on the same tree. The
+  cause is visible in the published diff: rc.2 moved the force-token-transformer
+  behaviour out of CodeView's option prototypes into the renderers'
+  `beginEditSession()`, which renders an edit session **locally** with the
+  worker pool suspended. The local highlighter never had krit's themes
+  registered — only the pool's did — and the `hasResolvedThemes` guard added
+  alongside it doesn't cover this path. Not a theme-shape problem on our side:
+  collapsing `theme: {dark, light}` + `themeType: 'system'` to a single
+  `'github-light'` string fails identically. Nothing to fix here; it needs an
+  upstream fix, and the whole rest of the rc.1→rc.3 diff is safe for us (no API
+  krit calls changed, and the selection path is byte-identical in WebKit).
+
 - `@pierre/theming@1.0.0` declares a peer of `@pierre/theme: ^1.1.0` but the
   tree resolves `@pierre/theme@2.0.0` — an unsatisfied peer inside upstream's
   own dependency graph, not ours. Installs fine (optional peer,
