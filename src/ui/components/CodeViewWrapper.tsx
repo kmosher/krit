@@ -1348,7 +1348,14 @@ export const CodeViewWrapper = memo(
         // Pierre reanchors scroll when it lands.
         itemMetrics,
         themeType: 'system' as const,
-        theme: { dark: 'github-dark' as const, light: 'github-light' as const },
+        // No `theme`: Pierre's own default (pierre-dark/pierre-light) is what
+        // krit has always actually rendered, because the theme that reaches the
+        // *worker pool* is the one that paints, and `main.tsx` passes the pool
+        // no theme at all. Naming github-* here only ever changed the editor's
+        // tokenizer, so the two disagreed — and from 1.3.0-rc.2 that
+        // disagreement throws `Theme not found` and leaves an edit session with
+        // no editable element. Leaving both sides on the default keeps them
+        // honest; set a theme in both places or neither.
         enableGutterUtility: true,
         // Line selection is on (so drag-to-select-range works visually), but
         // we auto-clear the selection in onLineEnter when the user hovers a

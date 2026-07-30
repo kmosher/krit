@@ -106,7 +106,7 @@ skill together when you do.
 
 ## Known gaps
 
-- `@pierre/diffs` is pinned to an exact **prerelease** (`1.3.0-rc.1`), not a
+- `@pierre/diffs` is pinned to an exact **prerelease** (`1.3.0-rc.3`), not a
   caret range: inline editing needs 1.3.0-only APIs (`item.edit`,
   `onItemEditComplete`, `EditProvider`, the `./edit` entry point). Because
   `dist/` is gitignored and `build.rs` runs vite, a from-source build of the
@@ -114,21 +114,23 @@ skill together when you do.
   1.3.0 final once it publishes. An exact pin has no caret for `pnpm update`
   to follow, so nothing will prompt you.
 
-- **Do not move the pin to `1.3.0-rc.2` or `-rc.3`: both break inline
-  editing.** Clicking Edit throws ``ShikiError: Theme `github-light` not
-  found`` from the page and the editor never attaches — the `contenteditable`
-  host never appears, so the file is stuck in a session that can't take input.
-  rc.2 introduced it and rc.3 carries it; rc.1 is clean on the same tree. The
-  cause is visible in the published diff: rc.2 moved the force-token-transformer
-  behaviour out of CodeView's option prototypes into the renderers'
-  `beginEditSession()`, which renders an edit session **locally** with the
-  worker pool suspended. The local highlighter never had krit's themes
-  registered — only the pool's did — and the `hasResolvedThemes` guard added
-  alongside it doesn't cover this path. Not a theme-shape problem on our side:
-  collapsing `theme: {dark, light}` + `themeType: 'system'` to a single
-  `'github-light'` string fails identically. Nothing to fix here; it needs an
-  upstream fix, and the whole rest of the rc.1→rc.3 diff is safe for us (no API
-  krit calls changed, and the selection path is byte-identical in WebKit).
+- **The theme that reaches the worker pool is the one that paints. Set a theme
+  in both places or neither.** The pool renders every surface that isn't in an
+  edit session, and it is configured by `highlighterOptions` on
+  `WorkerPoolContextProvider` (`main.tsx`) — *not* by the `theme` option on the
+  view. krit passes the pool no theme, so everything renders in Pierre's own
+  `pierre-dark`/`pierre-light`. A `theme` named on the CodeView options alone
+  reaches only the editor's tokenizer, so the two disagree, and from
+  `1.3.0-rc.2` that disagreement is fatal: the tokenizer's constructor calls
+  `setTheme` for a theme the shared highlighter never attached, throws
+  ``Theme not found``, and — because the throw lands before the content element
+  is made `contentEditable` — the file enters an edit session with no editable
+  element at all. The only symptom is an unhandled rejection. krit therefore
+  names no theme on either side; that is why `CodeViewWrapper`'s options carry
+  `themeType` but no `theme`. Upstream fix (attach both themes) is filed from
+  `kmosher/pierre`, branch `kmosher/shiki-fix`; once it ships, naming a theme in
+  both places becomes safe. rc.1 tolerated the mismatch because
+  `initializeHighlighter` read the instance options instead of the pool's.
 
 - `@pierre/theming@1.0.0` declares a peer of `@pierre/theme: ^1.1.0` but the
   tree resolves `@pierre/theme@2.0.0` — an unsatisfied peer inside upstream's
