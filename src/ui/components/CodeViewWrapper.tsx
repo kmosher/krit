@@ -7,6 +7,8 @@ import type {
   DiffLineAnnotation,
   FileDiffMetadata,
   AnnotationSide,
+  DiffsEditableComponent,
+  PostRenderPhase,
   SelectedLineRange,
   SelectionSide,
 } from '@pierre/diffs'
@@ -32,6 +34,7 @@ import {
   type SelectionAnchor,
 } from '../utils/selectionMapping'
 import { computeSingleEdit } from '../utils/textEdits'
+import { linesToReveal } from '../utils/collapsedContext'
 import { usePendingDrafts } from '../hooks/usePendingDrafts'
 
 type DraftMetadata = {
@@ -119,6 +122,10 @@ function AnnotationEventGuard(props: { children: React.ReactNode }) {
 // line count, not the diff size — which would collapse every moderately-sized
 // file regardless of whether the diff itself is large.
 const AUTO_COLLAPSE_CHANGE_THRESHOLD = 500
+
+// Reveal passes allowed in a row on one file before we stop asking. See
+// handlePostRender: two is the honest ceiling, the rest is slack.
+const MAX_REVEAL_PASSES = 4
 
 // What CodeView needs to size an unrendered file: how tall one visual row is,
 // how many characters fit on one before `overflow: 'wrap'` breaks it, and how
@@ -477,6 +484,17 @@ export const CodeViewWrapper = memo(
       anchor: SelectionAnchor
     } | null>(null)
     const pillRef = useRef<HTMLDivElement | null>(null)
+    // A jump requested while its file's collapsed regions were still closed.
+    // Cleared by the first render pass that has nothing left to reveal; see
+    // handlePostRender.
+    const pendingJumpRef = useRef<{
+      filePath: string
+      side: SelectionSide
+      lineNumber: number
+      revealed: boolean
+    } | null>(null)
+    // Consecutive render passes that opened a collapsed region, per file.
+    const revealPassesRef = useRef<Map<string, number>>(new Map())
 
     const lastActiveDraftsRef = useRef<Set<string>>(new Set())
     useEffect(() => {
@@ -581,6 +599,12 @@ export const CodeViewWrapper = memo(
             item.version = bumpVersion(item)
             viewer.updateItem(item)
           }
+          // The target may be inside a collapsed unchanged region, which only
+          // the file's own instance can open — and there is no instance until
+          // the file mounts. Scroll now (that mounts it), and leave the jump
+          // for handlePostRender to redo if opening the region moved rows
+          // above the target.
+          pendingJumpRef.current = { filePath, side, lineNumber, revealed: false }
           viewer.scrollTo({
             type: 'line',
             id: filePath,
@@ -1445,6 +1469,63 @@ export const CodeViewWrapper = memo(
       })
     })
 
+    // Pierre hides the unchanged stretches between hunks and draws no
+    // annotation for a line it did not render, so a comment anchored inside
+    // one is invisible — no marker, no gutter hint, nothing on screen saying
+    // it is there. Open every region an annotation lives in as its file
+    // renders. This hangs off the render pass rather than off an item write
+    // because virtualization rebuilds a file from scratch, and the expansion
+    // state lives on the instance, not on the item.
+    const handlePostRender = useStableCallback(
+      (
+        _node: HTMLElement,
+        instance: DiffsEditableComponent<Metadata>,
+        phase: PostRenderPhase,
+        context: { item: CodeViewItem<Metadata> },
+      ) => {
+        const item = context.item
+        if (phase === 'unmount' || item.type !== 'diff') return
+        // Optional upstream — a component with no collapsible regions leaves
+        // it unimplemented.
+        const reveal = instance.revealLine?.bind(instance)
+        // Every reveal queues another render pass, so an expansion that failed
+        // to make its line renderable would spin the render loop and hang the
+        // tab. One pass opens every region this file needs (each anchor queues
+        // its own expansion); the pass after it should find nothing left.
+        const passes = revealPassesRef.current.get(item.id) ?? 0
+        let revealed = false
+        if (reveal && passes < MAX_REVEAL_PASSES) {
+          for (const line of linesToReveal(item.fileDiff, item.annotations ?? [])) {
+            if (reveal(line)) revealed = true
+          }
+        }
+        revealPassesRef.current.set(item.id, revealed ? passes + 1 : 0)
+
+        const jump = pendingJumpRef.current
+        if (!jump || jump.filePath !== item.id) return
+        if (revealed) {
+          // Opening a region queues another pass. The scroll already issued
+          // resolved against a layout in which those rows did not exist, so
+          // it has to be redone once they do.
+          jump.revealed = true
+          return
+        }
+        pendingJumpRef.current = null
+        if (!jump.revealed) return
+        // Out of Pierre's render pass before touching the viewer again.
+        queueMicrotask(() => {
+          viewerRef.current?.scrollTo({
+            type: 'line',
+            id: jump.filePath,
+            lineNumber: jump.lineNumber,
+            side: jump.side,
+            align: 'center',
+            behavior: 'smooth',
+          })
+        })
+      },
+    )
+
     const options: CodeViewOptions<Metadata> = useMemo(
       () => ({
         diffStyle,
@@ -1505,6 +1586,10 @@ export const CodeViewWrapper = memo(
           }
         `,
         onGutterUtilityClick: (range, context) => handleGutterClick(range, context),
+        // Same wrapping as onLineEnter below: the lib appends an item-context
+        // arg and types the result as an overload pair over File and FileDiff,
+        // neither of which is the shape we narrow to.
+        onPostRender: handlePostRender as never,
         // Lib wraps onLineEnter via defineItemSharedCallback to inject a
         // second arg {item}. The cast keeps us in lockstep with that shape.
         onLineEnter: ((props: unknown, ctx: unknown) =>
@@ -1521,7 +1606,7 @@ export const CodeViewWrapper = memo(
           isSelectingRef.current = false
         },
       }),
-      [diffStyle, defaultTabSize, itemMetrics, handleGutterClick, handleLineEnter],
+      [diffStyle, defaultTabSize, itemMetrics, handleGutterClick, handleLineEnter, handlePostRender],
     )
 
     // One factory for every inline edit session. CodeView calls it per item

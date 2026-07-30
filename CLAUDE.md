@@ -147,6 +147,20 @@ skill together when you do.
     them the containing block for `position: fixed`. Anything fixed inside an
     annotation (the selection pill) must be portaled to `<body>` or it lands
     at an offset.
+- **A comment anchored in a collapsed unchanged region renders nothing at
+  all** — no marker, no gutter hint — because Pierre draws annotations only
+  for lines it rendered. `handlePostRender` therefore calls `revealLine` for
+  every anchored line as each file renders, which is why the reveal hangs off
+  the render pass and not off an item write: virtualization rebuilds a file
+  from scratch and the expansion state lives on the instance. Two consequences
+  worth knowing. Upstream expands *from a hunk boundary outward*, so reaching a
+  line in the middle of a 3000-line gap renders the whole first half of that
+  gap — there is no API for a window around a point, and a huge expansion is
+  still better than an invisible comment. And every reveal queues another
+  render pass, so the loop is bounded (`MAX_REVEAL_PASSES`); without that, an
+  expansion that failed to make its line renderable would hang the tab.
+  `revealLine` is keyed on new-file lines, so a deletion-side anchor goes
+  through `additionLineForAnchor` first.
 - **`remark-rehype` does preserve source positions** on the hast tree, despite
   a lot of advice to the contrary — including on inline nodes. That is what
   makes character-level anchoring on the Markdown preview exact rather than
