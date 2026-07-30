@@ -252,6 +252,23 @@ describe('CommentForm — suggest mode', () => {
     expect(onSubmit).toHaveBeenCalledWith('', { newLines: ['const a = 2'] })
   })
 
+  it('treats a restored draft nobody has typed in as unedited, whatever the file now says', () => {
+    // The contract `suggestionEdited` exists for. A remount or a reload rebuilds
+    // this form from the lifted draft, and by then its seeded text can differ
+    // from the file — so without the stored bit there is nothing left to tell a
+    // rewrite the reviewer typed from one the file moved out from under.
+    const { onCancel } = renderForm({
+      originalLines: 'const a = 99',
+      initialSuggestMode: true,
+      initialSuggestionText: 'const a = 1',
+      initialSuggestionEdited: false,
+    })
+    expect(screen.getByRole('button', { name: 'Suggest rewrite' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('cancels without asking when the file changed under an untouched rewrite', () => {
     // `originalLines` is re-derived from the item's live fileDiff, so an agent
     // writing to the file moves it out from under an open form. Measured

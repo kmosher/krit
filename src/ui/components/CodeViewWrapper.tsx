@@ -720,6 +720,18 @@ export const CodeViewWrapper = memo(
     }
 
     const anchorSettleRef = useRef<number | null>(null)
+    // Keeping the reviewer's scroll position is not the same as keeping their
+    // *place*: an agent's write to any file above the viewport changes that
+    // file's height, and a scrollTop the update never touched then points
+    // somewhere else entirely — which, mid-sentence, walks the comment form off
+    // the screen. So put the draft back where it was rather than the number.
+    //
+    // Only while a draft is open: with nothing being typed into, scroll
+    // position is the ordinary thing to preserve and Pierre reanchors it
+    // itself. And only a lifted draft, since only those carry a
+    // `data-draft-key` — a reply form does not survive a remount either way,
+    // so holding its position would preserve something about to be destroyed.
+    //
     // A single post-update correction is not enough: the rows an update
     // produces are painted by the highlight worker pool over the following
     // frames, and each pass can move everything below it again. Correct on a

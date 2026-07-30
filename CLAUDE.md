@@ -173,8 +173,8 @@ skill together when you do.
   - **Match the key by scanning `dataset`, never with an attribute selector.**
     `draftKey` joins with NUL and `CSS.escape` maps NUL to U+FFFD, so an
     escaped key cannot match the attribute React set. The lookup then returns
-    null on every frame and the whole feature is a silent no-op — which is what
-    it did on the first cut, with every test still green.
+    null on every frame and the whole feature is a silent no-op — no error, and
+    nothing a unit test can see.
 - **A draft's "the reviewer edited the rewrite" bit is stored, not derived**
   (`suggestionEdited`, carried on the draft and across the wire). The obvious
   implementation compares the editor text against the file's current lines, and

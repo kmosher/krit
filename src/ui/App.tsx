@@ -952,11 +952,7 @@ export function App() {
               onDelete={removeComment}
               onJump={(comment) => {
                 setActiveFile(comment.filePath)
-                // The same line the annotation hangs off, not the range's
-                // start: only the annotation's own line is guaranteed to be
-                // rendered — islanding and reveal both work from
-                // `fileAnnotationsMap` — so jumping to the start of a range
-                // that begins inside a collapsed region lands nowhere.
+                // The line the annotation hangs off — see annotationLineFor.
                 diffViewerRef.current?.scrollToLine(
                   comment.filePath,
                   comment.side,
