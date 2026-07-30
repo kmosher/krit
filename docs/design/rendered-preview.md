@@ -1,7 +1,10 @@
 # Rendered previews: reviewing prose and artifacts, not their source
 
-> **Status: proposal.** Nothing here is implemented. Library claims marked
-> "verified" were checked against the installed packages, not read off docs.
+> **Status: stages 1–5 implemented.** Markdown and HTML previews, selection →
+> comment, comment display, suggest-from-source, and the sandboxed HTML path
+> all landed. Stage 6 (whole-surface docs mode) and stage 7 (`.ipynb`, `.csv`)
+> are not built. Deviations from the plan below are recorded in "What changed
+> in the building" at the end.
 
 A growing share of what gets reviewed in krit is not code: design docs,
 READMEs, plans, and self-contained HTML artifacts, all written by an agent. A
@@ -295,3 +298,46 @@ the iframe bridge in particular can only be verified in a real engine.
 6. Docs mode as a whole-surface toggle.
 7. `.ipynb` and `.csv`, which by then are renderers plugged into finished
    machinery.
+
+## What changed in the building
+
+Stages 1–5 shipped. Four things came out differently from the plan.
+
+**`parse5` was not needed, and HTML anchoring is better than tier 2.** The
+plan expected to ship a parser or fall back to quote matching. Instead
+`htmlTextMap.ts` scans the source once and emits the text a browser would
+render alongside the source offset of each character, and the bridge reports a
+selection as an offset into the same string. That is exact for a static
+artifact, with the quote search kept as the documented fallback for one whose
+scripts rewrote the DOM. No new dependency, and the ladder still degrades the
+way the plan describes.
+
+**That scan and the bridge's traversal are one contract, and it is fragile in
+a silent way.** Both halves must agree on what counts as visible text, or every
+offset shifts and the anchor is quietly wrong. Two traps hit during
+implementation — `<!DOCTYPE html>` counted as text, and the newline between
+`</head>` and `<body>` that the parser drops — each shifted the whole document.
+`visibleTextOffsetOf` is therefore serialised into the bridge with `toString()`
+so a single copy of the traversal exists, and the tests assert agreement on
+every text run rather than on a sampled one.
+
+**The exactness rule landed as "locate the run", not "compare lengths".** The
+plan's rule was: map linearly when a text node's rendered length equals its
+source slice length, else snap outward. That is too coarse in practice —
+`<p>Para with **bold** tail.</p>` fails the length check as a whole, so a
+selection anywhere in the paragraph would have widened to the paragraph. What
+ships instead searches for the text node's exact value inside its element's
+source slice, using the rendered prefix length as a search floor (sound,
+because markup only ever adds characters, and it also disambiguates a repeated
+run). Selections inside emphasis, links and code spans come out exact;
+escapes and entities still snap outward as designed.
+
+**The markdown stack is lazy-loaded.** It measured at +324 kB raw / +99 kB
+gzipped, about a quarter of the bundle, on a path most reviews never take.
+`PreviewModal` is a `lazy()` import, which puts it in its own chunk and leaves
+the main bundle within ~1 kB of where it was.
+
+Not covered by tests: a human drag inside the HTML preview's iframe. Nothing
+can deliver input into it (see `CLAUDE.md`), so `BRIDGE_SCRIPT` is executed
+against a document in `htmlSandbox.test.ts` instead — which reaches everything
+except the browser's own selection geometry.

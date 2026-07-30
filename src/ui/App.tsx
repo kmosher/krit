@@ -1,8 +1,8 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect, lazy, Suspense } from 'react'
 import { parsePatchFiles, parseDiffFromFile } from '@pierre/diffs'
 import type { FileDiffMetadata, FileContents } from '@pierre/diffs'
 import type { ReviewComment } from '../types'
-import { useDiff, type BinaryFileInfo, type FileContentsMap } from './hooks/useDiff'
+import { useDiff, splitFilePatches, type BinaryFileInfo, type FileContentsMap } from './hooks/useDiff'
 import { useComments } from './hooks/useComments'
 import { useReviewState, submitReview } from './hooks/useReviewState'
 import { useSettings } from './hooks/useSettings'
@@ -21,6 +21,19 @@ import { FileEditorModal } from './components/FileEditorModal'
 import { UndoToast } from './components/UndoToast'
 import type { SelectionAnchor } from './utils/selectionMapping'
 import { diffHeaderPath } from './utils/diffHeader'
+import {
+  changedNewLines,
+  previewFormatFor,
+  toLineRanges,
+  type PreviewFormat,
+} from './utils/previewFormat'
+
+// Split out: the markdown renderer and its plugins are ~100 kB gzipped, which
+// is a quarter of the whole bundle, and a review that never opens a document
+// should never pay for it. Loaded on the first Preview click.
+const PreviewModal = lazy(() =>
+  import('./components/PreviewModal').then((m) => ({ default: m.PreviewModal })),
+)
 
 // Split a merged multi-file patch into one fragment per file, in patch
 // order. Matches the section-boundary rule useDiff's spliceFilePatches /
@@ -206,6 +219,13 @@ export function App() {
   // Loaded lazily on Edit click (small fetch) rather than carrying every
   // file's contents through React state.
   const [editingFile, setEditingFile] = useState<{ path: string; contents: string } | null>(null)
+  // Active rendered-document preview, loaded on the same terms as the editor:
+  // fetched fresh on click rather than held for every file.
+  const [previewFile, setPreviewFile] = useState<{
+    path: string
+    contents: string
+    format: PreviewFormat
+  } | null>(null)
   // Files with an open draft (comment/suggest form) — merged with
   // editingFile below into the "active" set that gates 'live-unless-active'.
   const [activeDraftFiles, setActiveDraftFiles] = useState<Set<string>>(() => new Set())
@@ -370,6 +390,22 @@ export function App() {
       setEditingFile({ path: filePath, contents: text })
     },
     [rememberTag, reportError],
+  )
+
+  // Same fresh-from-disk read as handleEditFile, and for the same reason: what
+  // /api/diff bundled as 'new' can already be behind what the agent wrote.
+  const handlePreviewFile = useCallback(
+    async (filePath: string) => {
+      const format = previewFormatFor(filePath)
+      if (!format) return
+      const res = await fetch(`/api/file-content?path=${encodeURIComponent(filePath)}&version=new`)
+      if (!res.ok) {
+        reportError(`Could not load ${filePath}: HTTP ${res.status}`)
+        return
+      }
+      setPreviewFile({ path: filePath, contents: await res.text(), format })
+    },
+    [reportError],
   )
 
   // The modal stays open on a throw, so a refused save loses nothing — the
@@ -708,6 +744,28 @@ export function App() {
     return counts
   }, [comments])
 
+  const previewableFiles = useMemo(() => {
+    const set = new Set<string>()
+    for (const f of files) {
+      if (f.name && previewFormatFor(f.name)) set.add(f.name)
+    }
+    return set
+  }, [files])
+
+  // Which of the previewed file's lines this diff touched, so the renderer can
+  // mark the blocks that changed. Scoped to the open file: parsing every
+  // fragment on every render would cost the whole patch for one document.
+  const previewChangedRanges = useMemo(() => {
+    if (!previewFile) return []
+    const fragment = splitFilePatches(patch ?? '').get(previewFile.path)
+    return fragment ? toLineRanges(changedNewLines(fragment)) : []
+  }, [previewFile, patch])
+
+  const previewComments = useMemo(
+    () => (previewFile ? comments.filter((c) => c.filePath === previewFile.path) : []),
+    [previewFile, comments],
+  )
+
   const fileAnnotationsMap = useMemo(() => {
     const map = new Map<string, { side: ReviewComment['side']; lineNumber: number; metadata: ReviewComment }[]>()
     for (const c of comments) {
@@ -849,6 +907,8 @@ export function App() {
             onDeleteRange={handleDeleteRange}
             onActiveFileChange={setActiveFile}
             onEditFile={handleEditFile}
+            onPreviewFile={handlePreviewFile}
+            previewableFiles={previewableFiles}
             editingFiles={inlineEditFiles}
             onToggleEdit={handleToggleEdit}
             onEditComplete={handleInlineEditComplete}
@@ -860,6 +920,21 @@ export function App() {
           />
         </main>
       </div>
+      {previewFile && (
+        <Suspense fallback={<div className="preview-modal-backdrop preview-modal-loading" />}>
+          <PreviewModal
+            filePath={previewFile.path}
+            source={previewFile.contents}
+            format={previewFile.format}
+            changedRanges={previewChangedRanges}
+            comments={previewComments}
+            onClose={() => setPreviewFile(null)}
+            onAddComment={addComment}
+            onDeleteComment={removeComment}
+            onReplyComment={replyToComment}
+          />
+        </Suspense>
+      )}
       {editingFile && (
         <FileEditorModal
           filePath={editingFile.path}

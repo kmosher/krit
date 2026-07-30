@@ -69,6 +69,17 @@ skill together when you do.
   and never consults the watcher. Working saves plus dead live-refresh means
   the sandbox, not the watcher. (The global sandbox config now grants it; the
   note stays because the failure is silent and the diagnosis is not obvious.)
+- **Nothing can deliver input into the HTML preview's iframe.** It is
+  `sandbox="allow-scripts"` with no `allow-same-origin`, so it is a separate,
+  opaque origin and usually a separate process. Chrome DevTools-protocol input
+  aimed at the page never arrives: a synthetic drag, a click and a keystroke
+  all did nothing, and the tell that it is the harness rather than krit is that
+  the *artifact's own* click handlers stay dead too, while the bridge's
+  `postMessage`s keep arriving tagged `fromFrame`. Clicking does focus the
+  `<iframe>` element, which makes it look like the event landed. Don't spend
+  time on it — `htmlSandbox.test.ts` executes `BRIDGE_SCRIPT` against a
+  document instead, which covers everything except the browser's own selection
+  geometry.
 - **Never `confirm()` / `alert()` for a decision.** A native dialog blocks the
   page for anything driving the browser programmatically, which is what krit
   is for — an agent that hits one deadlocks. This covers plain `alert()` on a
@@ -100,6 +111,23 @@ skill together when you do.
   `requestAnimationFrame`, which is why `attachEditors` forces a synchronous
   render rather than waiting for a frame — when something updates for a human
   and not for an agent, suspect the tab's visibility before the feature.
+- **`remark-rehype` does preserve source positions** on the hast tree, despite
+  a lot of advice to the contrary — including on inline nodes. That is what
+  makes character-level anchoring on the Markdown preview exact rather than
+  fuzzy, and it is why `rehypeSourceOffsets` is ten lines instead of a parser.
+  What remark-rehype does *not* do is emit `data-sourcepos`; stamping that is
+  ours. Don't "fix" the plugin away.
+- **The HTML preview's two halves must agree on what counts as visible text**,
+  and nothing catches it if they don't: the iframe reports an offset into a
+  string the parent never sees, and the parent resolves it against a string it
+  built by scanning the source. A disagreement is a silently wrong anchor, not
+  an error. Both traps found so far shift *every* offset in the document —
+  `<!DOCTYPE html>` scanned as text, and the newline between `</head>` and
+  `<body>` that the parser drops but a naive scan keeps. `visibleTextOffsetOf`
+  is serialised into the bridge with `toString()` so there is only one copy of
+  the traversal, and `htmlSandbox.test.ts` asserts the two halves agree on
+  every text run in a sample document. Keep that test honest if you touch
+  either side.
 - The launch message says "Asked the krit app to open" because `open::that`
   Ok only means the OS accepted the URL; a 10s post-launch check reports if
   no UI actually connected.

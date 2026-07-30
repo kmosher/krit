@@ -32,6 +32,8 @@ interface DiffViewerProps {
   onDeleteRange?: (filePath: string, anchor: SelectionAnchor) => void
   onActiveFileChange?: (filePath: string | null) => void
   onEditFile?: (filePath: string) => void
+  onPreviewFile?: (filePath: string) => void
+  previewableFiles: Set<string>
   editingFiles: Set<string>
   onToggleEdit: (filePath: string) => void
   onEditComplete: (filePath: string, contents: string) => void
@@ -60,6 +62,8 @@ export const DiffViewer = memo(
       onDeleteRange,
       onActiveFileChange,
       onEditFile,
+      onPreviewFile,
+      previewableFiles,
       editingFiles,
       onToggleEdit,
       onEditComplete,
@@ -173,6 +177,8 @@ export const DiffViewer = memo(
             onDeleteRange={onDeleteRange}
             onActiveFileChange={onActiveFileChange}
             onEditFile={onEditFile}
+            onPreviewFile={onPreviewFile}
+            previewableFiles={previewableFiles}
             editingFiles={editingFiles}
             onToggleEdit={onToggleEdit}
             onEditComplete={onEditComplete}

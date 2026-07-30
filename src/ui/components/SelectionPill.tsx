@@ -8,7 +8,11 @@ interface SelectionPillProps {
   x: number
   y: number
   onComment: () => void
-  onDelete: () => void
+  // Omitted by the rendered-document preview, where a selection's source range
+  // can be a superset of what was highlighted (previewAnchor.ts snaps outward
+  // when it cannot locate the text exactly). Commenting on slightly too much
+  // is harmless; deleting slightly too much is not.
+  onDelete?: () => void
 }
 
 // Floats at the end of a native text selection inside the code surface,
@@ -53,10 +57,12 @@ export function SelectionPill({ x, y, onComment, onDelete }: SelectionPillProps)
         <MessageSquare size={13} />
         Comment
       </button>
-      <button type="button" className="selection-pill-btn selection-pill-btn-danger" onClick={onDelete} title="Delete this selection from the file">
-        <X size={13} />
-        Delete
-      </button>
+      {onDelete && (
+        <button type="button" className="selection-pill-btn selection-pill-btn-danger" onClick={onDelete} title="Delete this selection from the file">
+          <X size={13} />
+          Delete
+        </button>
+      )}
     </div>
   )
 }

@@ -10,6 +10,7 @@ import type {
   SelectedLineRange,
   SelectionSide,
 } from '@pierre/diffs'
+import { BookOpen } from 'lucide-react'
 import type { ReviewComment } from '../../types'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
@@ -243,6 +244,10 @@ interface Props {
   // Whole-file fallback: opens FileEditorModal. Inline editing (below) is the
   // primary path; this one still reaches regions the diff doesn't render.
   onEditFile?(filePath: string): void
+  // Opens the rendered-document preview. Only offered for files
+  // `previewFormatFor` recognises; the parent decides which those are.
+  onPreviewFile?(filePath: string): void
+  previewableFiles: Set<string>
   // Files currently in inline edit mode — the diff's addition side becomes a
   // live editor in place. Mirrors `viewedFiles`: the parent owns the set and
   // we push it into `item.edit`.
@@ -413,6 +418,8 @@ export const CodeViewWrapper = memo(
       onDeleteRange,
       onActiveFileChange,
       onEditFile,
+      onPreviewFile,
+      previewableFiles,
       editingFiles,
       onToggleEdit,
       onEditComplete,
@@ -1106,6 +1113,21 @@ export const CodeViewWrapper = memo(
               />
               Viewed
             </label>
+            {onPreviewFile && previewableFiles.has(item.id) && !editing && (
+              <button
+                type="button"
+                className="codeview-preview-btn"
+                title="Read this file rendered, and comment on the rendered text"
+                onClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  onPreviewFile(item.id)
+                }}
+              >
+                <BookOpen size={13} />
+                Preview
+              </button>
+            )}
             <button
               type="button"
               className={`codeview-edit-btn ${editing ? 'is-editing' : ''}`}
