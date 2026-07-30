@@ -25,7 +25,7 @@ interface DiffViewerProps {
     lineContent: string,
     body: string,
     suggestion?: { newLines: string[] },
-    asDraft?: boolean,
+    asQueued?: boolean,
     charAnchor?: { startColumn: number; endColumn: number; selectedText: string },
   ) => void
   onDeleteComment: (id: string) => void

@@ -38,12 +38,12 @@ describe('CommentBubble', () => {
       expect(container.querySelector('.comment-resolved')).toBeTruthy()
     })
 
-    it('marks a draft as not-yet-posted', () => {
-      // A draft is invisible to the listening agent; if it looked like a
+    it('marks a queued comment as not-yet-posted', () => {
+      // A queued comment is invisible to the listening agent; if it looked like a
       // posted comment the reviewer would think the agent had seen it.
-      const { container } = renderBubble({ status: 'draft' })
-      expect(screen.getByText('Draft')).toBeInTheDocument()
-      expect(container.querySelector('.comment-draft')).toBeTruthy()
+      const { container } = renderBubble({ status: 'queued' })
+      expect(screen.getByText('Queued')).toBeInTheDocument()
+      expect(container.querySelector('.comment-queued')).toBeTruthy()
     })
 
     it('shows neither badge on a plain open comment', () => {
@@ -157,12 +157,12 @@ describe('CommentBubble', () => {
       expect(screen.queryByPlaceholderText('Leave a review comment...')).toBeNull()
     })
 
-    it('does not offer to save a reply as a draft', () => {
-      // Drafts are a comment-level concept; a "draft reply" has no server
+    it('does not offer to queue a reply', () => {
+      // Queueing is a comment-level concept; a "queued reply" has no server
       // representation, so the button must not appear on a reply form.
       renderBubble()
       fireEvent.click(screen.getByRole('button', { name: /Reply/ }))
-      expect(screen.queryByRole('button', { name: 'Save as draft' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Queue comment' })).toBeNull()
     })
   })
 })

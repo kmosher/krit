@@ -275,7 +275,7 @@ export function App() {
     activeFiles,
     editingFiles: inlineEditFiles,
   })
-  const { comments, addComment, removeComment, replyToComment, copyAllComments, postDrafts, draftCount } =
+  const { comments, addComment, removeComment, replyToComment, copyAllComments, postQueued, queuedCount } =
     useComments(reportError)
   const reviewState = useReviewState()
   const [activeFile, setActiveFile] = useState<string | null>(null)
@@ -855,8 +855,8 @@ export function App() {
         onRefreshModeChange={(refreshMode) => updateSettings({ refreshMode })}
         staleCount={staleFiles.size}
         onRefresh={handleRefreshAll}
-        draftCount={draftCount}
-        onPostDrafts={postDrafts}
+        queuedCount={queuedCount}
+        onPostQueued={postQueued}
       />
       <div className="app-body">
         <aside

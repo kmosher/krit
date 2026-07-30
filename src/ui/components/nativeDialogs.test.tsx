@@ -160,7 +160,7 @@ describe('no native dialog on any decision path', () => {
     expect(onSuggestModeChange).toHaveBeenLastCalledWith(false)
   })
 
-  it('Toolbar: finishing the review, which also publishes private drafts', async () => {
+  it('Toolbar: finishing the review, which also publishes queued comments', async () => {
     const onSubmitReview = vi.fn(async () => {})
     render(
       <Toolbar
@@ -179,7 +179,7 @@ describe('no native dialog on any decision path', () => {
         submittedAt={null}
         refreshMode="live-unless-active"
         staleCount={0}
-        draftCount={2}
+        queuedCount={2}
         onDiffStyleChange={vi.fn()}
         onDiffOptionsChange={vi.fn()}
         onDefaultTabSizeChange={vi.fn()}
@@ -188,7 +188,7 @@ describe('no native dialog on any decision path', () => {
         onSubmitReview={onSubmitReview}
         onRefreshModeChange={vi.fn()}
         onRefresh={vi.fn()}
-        onPostDrafts={vi.fn()}
+        onPostQueued={vi.fn()}
       />,
     )
     // Two decision points on this path now, and both must stay inline: the

@@ -32,6 +32,7 @@ import {
   type SelectionAnchor,
 } from '../utils/selectionMapping'
 import { computeSingleEdit } from '../utils/textEdits'
+import { usePendingDrafts } from '../hooks/usePendingDrafts'
 
 type DraftMetadata = {
   _pending: true
@@ -46,7 +47,7 @@ type DraftMetadata = {
   suggestionText: string
   // Set when this draft originated from a native text selection
   // (SelectionPill) rather than a gutter-drag — schema v3's character-level
-  // anchor, threaded through to onAddComment on submit/save-draft.
+  // anchor, threaded through to onAddComment on submit/queue.
   charAnchor?: { startColumn: number; endColumn: number; selectedText: string }
 }
 // A file-level annotation standing in for the file's diff rows: the rendered
@@ -246,7 +247,7 @@ interface Props {
     lineContent: string,
     body: string,
     suggestion?: { newLines: string[] },
-    asDraft?: boolean,
+    asQueued?: boolean,
     // Schema v3: set when the comment was created from a SelectionPill
     // (native text selection) rather than a gutter-drag draft.
     charAnchor?: { startColumn: number; endColumn: number; selectedText: string },
@@ -460,6 +461,11 @@ export const CodeViewWrapper = memo(
     const viewerRef = useRef<CodeViewHandle<Metadata> | null>(null)
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const [pending, setPending] = useState<Map<string, DraftMetadata>>(() => new Map())
+    const {
+      restored: restoredDrafts,
+      persist: persistDraft,
+      forget: forgetDraft,
+    } = usePendingDrafts()
     // Floating Comment/Delete pill for a native text selection inside the
     // code surface (Stage 6). null whenever there's no active selection to
     // show it for.
@@ -482,9 +488,30 @@ export const CodeViewWrapper = memo(
       onActiveDraftsChange?.(next)
     }, [pending, onActiveDraftsChange])
 
+    // Restore whatever was being typed when the page (or the TUI pane) last
+    // went away. Only ever runs into an empty map: a draft opened before the
+    // read lands is newer than the read, and stomping it would lose the very
+    // keystrokes this feature exists to keep.
+    useEffect(() => {
+      if (!restoredDrafts || restoredDrafts.length === 0) return
+      setPending((prev) => {
+        if (prev.size > 0) return prev
+        const next = new Map<string, DraftMetadata>()
+        for (const d of restoredDrafts) {
+          const draft: DraftMetadata = { ...d, _pending: true, side: d.side as AnnotationSide }
+          next.set(draftKey(draft), draft)
+        }
+        return next
+      })
+    }, [restoredDrafts])
+
     const removeDraft = (key: string) => {
       setPending((prev) => {
-        if (!prev.has(key)) return prev
+        const draft = prev.get(key)
+        if (!draft) return prev
+        // Submitted or discarded — either way it is no longer unsent text, so
+        // it must not come back on the next load.
+        forgetDraft(draft)
         const next = new Map(prev)
         next.delete(key)
         return next
@@ -506,6 +533,11 @@ export const CodeViewWrapper = memo(
       patch: Partial<Pick<DraftMetadata, 'body' | 'suggestMode' | 'suggestionText'>>,
     ) => {
       Object.assign(draft, patch)
+      // The only signal that anything changed: because the mutation above is
+      // deliberately invisible to React, there is no state transition an effect
+      // could watch. Debounced inside the hook, so this is one write per phrase
+      // typed, not per keystroke.
+      persistDraft(draft)
     }
 
     useImperativeHandle(
@@ -1110,7 +1142,7 @@ export const CodeViewWrapper = memo(
                   )
                   removeDraft(draftKey(p))
                 }}
-                onSaveDraft={(body, suggestion) => {
+                onQueue={(body, suggestion) => {
                   const lineContent = getRangeContent(
                     item.fileDiff,
                     p.side,
@@ -1429,7 +1461,14 @@ export const CodeViewWrapper = memo(
         // Pierre reanchors scroll when it lands.
         itemMetrics,
         themeType: 'system' as const,
-        theme: { dark: 'github-dark' as const, light: 'github-light' as const },
+        // No `theme`: Pierre's own default (pierre-dark/pierre-light) is what
+        // krit has always actually rendered, because the theme that reaches the
+        // *worker pool* is the one that paints, and `main.tsx` passes the pool
+        // no theme at all. Naming github-* here only ever changed the editor's
+        // tokenizer, so the two disagreed — and from 1.3.0-rc.2 that
+        // disagreement throws `Theme not found` and leaves an edit session with
+        // no editable element. Leaving both sides on the default keeps them
+        // honest; set a theme in both places or neither.
         enableGutterUtility: true,
         // Line selection is on (so drag-to-select-range works visually), but
         // we auto-clear the selection in onLineEnter when the user hovers a

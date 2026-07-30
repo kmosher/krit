@@ -34,9 +34,9 @@ interface ToolbarProps {
   staleCount: number
   /** Manual escape hatch: applies any deferred files, or does a full reload if none. */
   onRefresh: () => void
-  /** Draft comments (saved but not yet visible to any watcher/ws subscriber). */
-  draftCount: number
-  onPostDrafts: () => void
+  /** Queued comments (saved but not yet visible to any watcher/ws subscriber). */
+  queuedCount: number
+  onPostQueued: () => void
 }
 
 export function Toolbar({
@@ -64,8 +64,8 @@ export function Toolbar({
   onRefreshModeChange,
   staleCount,
   onRefresh,
-  draftCount,
-  onPostDrafts,
+  queuedCount,
+  onPostQueued,
 }: ToolbarProps) {
   const [copied, setCopied] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -85,9 +85,9 @@ export function Toolbar({
     setTimeout(() => setCopied(false), 2000)
   }
 
-  // Copy excludes drafts (see formatAllComments) — label the count actually
-  // copied, not the total including anything still draft-only.
-  const postableCommentCount = commentCount - draftCount
+  // Copy excludes queued comments (see formatAllComments) — label the count
+  // actually copied, not the total including anything still held back.
+  const postableCommentCount = commentCount - queuedCount
 
   // Either subscriber kind counts as "someone is listening": role:'cli'
   // (wait-for-submit over SSE) or role:'agent' (the /api/events-ws Monitor,
@@ -110,8 +110,8 @@ export function Toolbar({
     ? 'Review finished — the listening Claude session has been told to stop watching.'
     : !hasWatcher
       ? 'No agent or watcher is currently subscribed to events. Have Claude attach one, or use Copy comments to paste manually.'
-      : draftCount > 0
-        ? `End the review session — also posts your ${draftCount} remaining draft${draftCount === 1 ? '' : 's'}.`
+      : queuedCount > 0
+        ? `End the review session — also posts your ${queuedCount} remaining queued comment${queuedCount === 1 ? '' : 's'}.`
         : commentCount === 0
           ? 'End the review session with no comments — add any concluding notes first.'
           : 'End the review session — tells the listening Claude session you are done.'
@@ -339,20 +339,20 @@ export function Toolbar({
             </div>
           )}
         </div>
-        {draftCount > 0 && (
+        {queuedCount > 0 && (
           <button
-            className="btn btn-sm btn-draft-post"
-            onClick={onPostDrafts}
-            title={`Post ${draftCount} draft comment${draftCount === 1 ? '' : 's'} — makes them visible to the listening Claude session.`}
+            className="btn btn-sm btn-queued-post"
+            onClick={onPostQueued}
+            title={`Post ${queuedCount} queued comment${queuedCount === 1 ? '' : 's'} — makes them visible to the listening Claude session.`}
           >
-            Post drafts ({draftCount})
+            Post queued ({queuedCount})
           </button>
         )}
         <button
           className="btn btn-sm"
           onClick={handleCopy}
           disabled={postableCommentCount === 0}
-          title="Copy comments as XML to paste into Claude. Drafts are excluded until posted."
+          title="Copy comments as XML to paste into Claude. Queued comments are excluded until posted."
         >
           {copied ? 'Copied!' : `Copy (${postableCommentCount})`}
         </button>

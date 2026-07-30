@@ -150,15 +150,16 @@ fn cached_branch_name(state: &AppState) -> String {
 
 /// Re-anchors non-resolved additions-side comments on `path` after a
 /// working-tree change and broadcasts the movers as comment-updated. Runs
-/// once server-side so UI, CLI, and agent can't disagree. Drafts re-anchor
-/// but never broadcast. Sync on purpose: callable from the watcher thread.
+/// once server-side so UI, CLI, and agent can't disagree. Queued comments
+/// re-anchor but never broadcast. Sync on purpose: callable from the watcher
+/// thread.
 pub fn reanchor_and_broadcast(state: &AppState, path: &str) {
     let changed = {
         let mut store = lock(&state.store);
         reanchor_file_comments(path, &mut store, &state.repo_root)
     };
     for comment in changed {
-        if comment.status == "draft" {
+        if comment.status == "queued" {
             continue;
         }
         state.hub.broadcast(Event::CommentUpdated { comment });
@@ -818,6 +819,65 @@ async fn api_edits_undo(
     axum::Json(json!({"ok": true})).into_response()
 }
 
+// ---------- pending drafts (text still being typed) ----------
+//
+// Deliberately not broadcast. Every other mutation here fans out on SSE so the
+// other tab catches up, but a draft is one reviewer mid-sentence: echoing each
+// keystroke back would fight the form it came from, and there is no second
+// author to inform. Nor does any of this reach `/api/events-ws` — unsent text is
+// not the agent's business until the reviewer submits it. Hydrate on load,
+// write on change; that is the whole contract.
+
+async fn api_pending_get(State(state): State<AppState>) -> Response {
+    axum::Json(lock(&state.store).pending_all()).into_response()
+}
+
+async fn api_pending_put(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let draft: crate::types::PendingDraft = match serde_json::from_value(body) {
+        Ok(draft) => draft,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": format!("not a pending draft: {err}")})),
+            )
+                .into_response();
+        }
+    };
+    if !is_plain_repo_path(&draft.file_path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "filePath must be a plain repo-relative path"})),
+        )
+            .into_response();
+    }
+    lock(&state.store).upsert_pending(draft);
+    axum::Json(json!({"ok": true})).into_response()
+}
+
+async fn api_pending_delete(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let (Some(file_path), Some(side), Some(start_line), Some(end_line)) = (
+        body["filePath"].as_str(),
+        body["side"].as_str(),
+        body["startLine"].as_u64(),
+        body["endLine"].as_u64(),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "filePath, side, startLine and endLine are required"})),
+        )
+            .into_response();
+    };
+    let removed =
+        lock(&state.store).remove_pending(file_path, side, start_line as u32, end_line as u32);
+    axum::Json(json!({"ok": true, "removed": removed})).into_response()
+}
+
 // ---------- settings + viewed ----------
 
 /// The effective settings, carrying `settingsError` when the file on disk could
@@ -867,15 +927,15 @@ async fn api_comments_get(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let comments = lock(&state.store).get_all();
-    // Drafts are opt-in: only the browser UI passes includeDrafts=true.
-    // Everyone else gets the agent-visible view, matching the broadcast
-    // suppression — `krit comments` must not leak unposted drafts.
-    if params.get("includeDrafts").map(|v| v == "true") == Some(true) {
+    // Queued comments are opt-in: only the browser UI passes
+    // includeQueued=true. Everyone else gets the agent-visible view, matching
+    // the broadcast suppression — `krit comments` must not leak unposted work.
+    if params.get("includeQueued").map(|v| v == "true") == Some(true) {
         return axum::Json(comments).into_response();
     }
     let visible: Vec<ReviewComment> = comments
         .into_iter()
-        .filter(|c| c.status != "draft")
+        .filter(|c| c.status != "queued")
         .collect();
     axum::Json(visible).into_response()
 }
@@ -925,9 +985,9 @@ async fn api_comments_post(
             .collect();
         lines.map(|new_lines| Suggestion { new_lines })
     });
-    // Only the UI creates drafts; anything else in the field is ignored.
-    let status = if body["status"].as_str() == Some("draft") {
-        "draft"
+    // Only the UI queues comments; anything else in the field is ignored.
+    let status = if body["status"].as_str() == Some("queued") {
+        "queued"
     } else {
         "open"
     };
@@ -961,8 +1021,8 @@ async fn api_comments_post(
         selected_text: char_anchor.map(|(_, _, t)| t),
     };
     let created = lock(&state.store).add(comment);
-    // Drafts stay invisible to the agent until posted.
-    if created.status != "draft" {
+    // A queued comment stays invisible to the agent until posted.
+    if created.status != "queued" {
         state.hub.broadcast(Event::CommentAdded {
             comment: created.clone(),
         });
@@ -970,19 +1030,19 @@ async fn api_comments_post(
     (StatusCode::CREATED, axum::Json(created)).into_response()
 }
 
-/// Flips every draft to open in one batch, broadcasting comment-added for
-/// each — the moment they become visible. Shared by "Post drafts" and by
-/// /api/submit (Done reviewing must not strand drafts).
-fn post_drafts_and_broadcast(state: &AppState) -> usize {
+/// Flips every queued comment to open in one batch, broadcasting comment-added
+/// for each — the moment they become visible. Shared by "Post queued" and by
+/// /api/submit (Done reviewing must not strand queued comments).
+fn post_queued_and_broadcast(state: &AppState) -> usize {
     let posted: Vec<ReviewComment> = {
         let mut store = lock(&state.store);
-        let drafts: Vec<String> = store
+        let queued: Vec<String> = store
             .get_all()
             .into_iter()
-            .filter(|c| c.status == "draft")
+            .filter(|c| c.status == "queued")
             .map(|c| c.id)
             .collect();
-        drafts
+        queued
             .iter()
             .filter_map(|id| {
                 store.update(
@@ -1002,8 +1062,8 @@ fn post_drafts_and_broadcast(state: &AppState) -> usize {
     count
 }
 
-async fn api_drafts_post(State(state): State<AppState>) -> Response {
-    let posted = post_drafts_and_broadcast(&state);
+async fn api_queued_post(State(state): State<AppState>) -> Response {
+    let posted = post_queued_and_broadcast(&state);
     axum::Json(json!({"ok": true, "posted": posted})).into_response()
 }
 
@@ -1017,21 +1077,21 @@ async fn api_comment_put(
     // no filter anywhere — `krit comments open` and `resolved` both skip it
     // while the agent stream still shows it.
     if let Some(s) = &new_status
-        && !matches!(s.as_str(), "open" | "resolved" | "draft")
+        && !matches!(s.as_str(), "open" | "resolved" | "queued")
     {
         return (
             StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": "status must be 'open', 'resolved' or 'draft'"})),
+            axum::Json(json!({"error": "status must be 'open', 'resolved' or 'queued'"})),
         )
             .into_response();
     }
-    let (was_draft, updated) = {
+    let (was_queued, updated) = {
         let mut store = lock(&state.store);
-        // Only meaningful when a status change was requested (matching v1's
-        // wasDraft computation): None = no status in the payload.
-        let was_draft: Option<bool> = new_status
+        // Only meaningful when a status change was requested: None = no status
+        // in the payload.
+        let was_queued: Option<bool> = new_status
             .as_ref()
-            .map(|_| store.get(&id).map(|c| c.status == "draft") == Some(true));
+            .map(|_| store.get(&id).map(|c| c.status == "queued") == Some(true));
         let updated = store.update(
             &id,
             UpdateFields {
@@ -1040,7 +1100,7 @@ async fn api_comment_put(
                 ..Default::default()
             },
         );
-        (was_draft, updated)
+        (was_queued, updated)
     };
     let Some(updated) = updated else {
         return (
@@ -1049,9 +1109,9 @@ async fn api_comment_put(
         )
             .into_response();
     };
-    // A draft posted one-off through this route needs its catch-up
+    // A queued comment posted one-off through this route needs its catch-up
     // comment-added broadcast — it never got one at creation.
-    if was_draft == Some(true) && new_status.as_deref() != Some("draft") {
+    if was_queued == Some(true) && new_status.as_deref() != Some("queued") {
         state.hub.broadcast(Event::CommentAdded {
             comment: updated.clone(),
         });
@@ -1151,8 +1211,9 @@ fn parse_submit_summary(body: &str) -> Option<String> {
 }
 
 async fn api_submit_post(State(state): State<AppState>, body: String) -> Response {
-    // Done reviewing must not leave forgotten drafts stranded — post first.
-    post_drafts_and_broadcast(&state);
+    // Done reviewing must not leave forgotten queued comments stranded — post
+    // first.
+    post_queued_and_broadcast(&state);
     let summary = parse_submit_summary(&body);
     let ts = now_millis();
     state.hub.broadcast(Event::Submitted {
@@ -1557,7 +1618,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/comments",
             get(api_comments_get).post(api_comments_post),
         )
-        .route("/api/drafts/post", post(api_drafts_post))
+        .route("/api/queued/post", post(api_queued_post))
+        .route(
+            "/api/pending-drafts",
+            get(api_pending_get).put(api_pending_put),
+        )
+        .route("/api/pending-drafts/delete", post(api_pending_delete))
         .route(
             "/api/comments/{id}",
             put(api_comment_put).delete(api_comment_delete),
@@ -2066,6 +2132,58 @@ mod tests {
             ),
             200
         );
+    }
+
+    // ---------- pending drafts ----------
+
+    #[test]
+    fn pending_drafts_round_trip_and_reject_a_path_outside_the_repo() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let port = spawn_server(&rt, None, true);
+        let url = format!("http://127.0.0.1:{port}/api/pending-drafts");
+        let draft = json!({
+            "filePath": "src/a.rs",
+            "side": "additions",
+            "startLine": 10,
+            "endLine": 12,
+            "body": "half a thought",
+            "suggestMode": false,
+            "suggestionText": "",
+            "updatedAt": 1
+        });
+
+        ureq::put(&url).send_json(draft.clone()).expect("put lands");
+        let listed: Value = ureq::get(&url).call().unwrap().into_json().unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["body"], "half a thought");
+
+        // The same guard `file=` params get: a draft keyed to `../../etc` would
+        // put an attacker-chosen path into a store the UI reads back.
+        let escaped = ureq::put(&url)
+            .send_json(json!({
+                "filePath": "../../etc/passwd",
+                "side": "additions",
+                "startLine": 1, "endLine": 1,
+                "body": "x", "suggestMode": false, "suggestionText": "",
+                "updatedAt": 1
+            }))
+            .unwrap_err();
+        assert!(
+            matches!(escaped, ureq::Error::Status(400, _)),
+            "a path outside the repo must be refused: {escaped:?}"
+        );
+
+        let deleted: Value = ureq::post(&format!("{url}/delete"))
+            .send_json(json!({
+                "filePath": "src/a.rs", "side": "additions",
+                "startLine": 10, "endLine": 12
+            }))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(deleted["removed"], true);
+        let after: Value = ureq::get(&url).call().unwrap().into_json().unwrap();
+        assert!(after.as_array().unwrap().is_empty());
     }
 
     // ---------- diff scope ----------

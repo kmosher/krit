@@ -38,7 +38,7 @@ export interface PreviewPaneProps {
     lineContent: string,
     body: string,
     suggestion?: { newLines: string[] },
-    asDraft?: boolean,
+    asQueued?: boolean,
     charAnchor?: { startColumn: number; endColumn: number; selectedText: string },
   ) => void
   onDeleteComment: (id: string) => void
@@ -219,7 +219,7 @@ export function PreviewPane({
     sel: PendingSelection,
     body: string,
     suggestion: { newLines: string[] } | undefined,
-    asDraft: boolean,
+    asQueued: boolean,
   ) => {
     const { anchor } = sel
     onAddComment(
@@ -230,7 +230,7 @@ export function PreviewPane({
       lineContentFor(anchor.startLine, anchor.endLine),
       body,
       suggestion,
-      asDraft,
+      asQueued,
       {
         startColumn: anchor.startColumn,
         endColumn: anchor.endColumn,
@@ -282,7 +282,7 @@ export function PreviewPane({
               // says `**bold**` and the suggestion could not apply.
               originalLines={sliceSource(drafting.startOffset, drafting.endOffset)}
               onSubmit={(body, suggestion) => submitComment(drafting, body, suggestion, false)}
-              onSaveDraft={(body, suggestion) => submitComment(drafting, body, suggestion, true)}
+              onQueue={(body, suggestion) => submitComment(drafting, body, suggestion, true)}
               onCancel={() => setDrafting(null)}
             />
           </div>

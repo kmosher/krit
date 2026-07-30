@@ -51,7 +51,7 @@ export type KritEvent =
       deletedText?: string
       insertedText?: string
     }
-  // The reviewer clicked "Done reviewing"; drafts have already been posted.
+  // The reviewer clicked "Done reviewing"; queued comments are already posted.
   | { type: 'submitted'; timestamp: number; summary?: string }
   | { type: 'review-ended'; reason: string }
 
@@ -83,11 +83,12 @@ export interface ReviewComment {
   // on whether endLine > lineNumber.
   lineContent: string
   body: string
-  // 'draft' = saved but not yet visible to the agent — suppressed from every
-  // watcher/ws broadcast (comment-added, comment-updated) until "Post
-  // drafts" or "Done reviewing" flips it to 'open' in one batch. Server-side
-  // so a draft survives a tab reload, unlike a client-only queue.
-  status: 'open' | 'resolved' | 'draft'
+  // 'queued' = saved but not yet visible to the agent — suppressed from every
+  // watcher/ws broadcast (comment-added, comment-updated) until "Post queued"
+  // or "Done reviewing" flips it to 'open' in one batch. Server-side so it
+  // survives a tab reload, unlike a client-only queue. Stores written before
+  // the rename say 'draft'; the server migrates them on load.
+  status: 'open' | 'resolved' | 'queued'
   createdAt: number
   replies: CommentReply[]
   // GitHub-style staleness flag, independent of status: a live file edit
@@ -118,4 +119,31 @@ export interface ReviewComment {
   startColumn?: number
   endColumn?: number
   selectedText?: string
+}
+
+// Comment text the reviewer is still typing -- not a comment yet. Mirrors
+// `PendingDraft` in krit/src/types.rs.
+//
+// Distinct from a ReviewComment with status 'queued', which *is* a comment:
+// stored, listable, and merely withheld from the agent until posted. Both were
+// once called "draft"; 'queued' took over the submitted one so that "draft"
+// can mean only this.
+//
+// Identity is the anchor, not an id: one open form per file + side + line
+// range, matching how CodeViewWrapper's `pending` map is keyed. A second draft
+// in the same slot is the same draft.
+export interface PendingDraft {
+  filePath: string
+  side: 'deletions' | 'additions'
+  startLine: number
+  endLine: number
+  body: string
+  // Whether the suggestion editor is open and what is in it. Both belong to the
+  // draft: restoring the body alone would silently drop a typed rewrite.
+  suggestMode: boolean
+  suggestionText: string
+  startColumn?: number
+  endColumn?: number
+  selectedText?: string
+  updatedAt: number
 }

@@ -177,7 +177,7 @@ describe('submitReview', () => {
   })
 
   it('tears down only after the POST has been answered', async () => {
-    // Closing first would race the server: the drafts are posted and
+    // Closing first would race the server: the queued comments are posted and
     // `submitted` is broadcast by that request, and a shutdown triggered by
     // the disconnect must not overtake it.
     let resolvePost!: (v: unknown) => void

@@ -13,7 +13,7 @@ standalone first — the herdr half is packaging, not architecture.
 
 The server already owns the whole review model: diff assembly, the comment
 store, reanchoring across edits (`reanchor.rs`), inline edits with content-tag
-handshakes, drafts, submit gating, and the SSE fan-out. `src/ui/` is a client,
+handshakes, queueing, drafts, submit gating, and the SSE fan-out. `src/ui/` is a client,
 not the app. A TUI is a second client over `/api/diff` + `/api/comments` +
 `/api/events`, and nothing it needs lives in the browser.
 
@@ -47,7 +47,7 @@ they carry:
 | Hunk expansion | Already served: `fileContents` carries both sides per file |
 | File tree with change-type icons | Distinct ASCII sigils, not just color |
 | Character-range comments | Free from mouse coords; visual mode for keyboard |
-| Comment / reply / resolve / drafts | Plain API calls |
+| Comment / reply / resolve / queue | Plain API calls |
 | Annotation rows inline in the diff | Interleaved rows in the row model |
 | Live refresh (SSE) | Same stream — it carries everything |
 | Inline editing (CodeMirror) | Phase 4, and the least certain part of this doc |
@@ -208,7 +208,7 @@ setup/teardown get built, so it is most of the risk.
 **Phase 1 — commenting.** Visual-mode and click-drag selection down to the
 column, the composer (bracketed paste, keyboard disambiguation, the strip-stack
 question on discard), then `POST /api/comments`, replies, resolve/reopen,
-drafts, and `POST /api/submit`. At the end of this phase the TUI is a usable
+queueing, and `POST /api/submit`. At the end of this phase the TUI is a usable
 review client.
 
 **Phase 2 — parity polish.** Split view with the narrow-terminal fallback,
@@ -238,10 +238,12 @@ only if the honesty problem above can be solved in the UI.
 - **`api_file_content_get` has no size cap.** `read_side` caps both bytes and
   lines, but the file-content route streams whatever it finds. A TUI that opens
   files directly (phase 4, or a whole-worktree browser) will hit this first.
-- **Drafts do not survive a client restart.** Already a known gap for page
-  reloads; a TUI makes it worse, because closing a pane is a much lighter
-  gesture than reloading a browser tab. Draft persistence should probably land
-  before phase 3 puts the TUI in a pane people close reflexively.
+- ~~**Drafts do not survive a client restart.**~~ Closed: unsent comment text
+  now persists server-side through `/api/pending-drafts`, so the TUI gets it for
+  free — hydrate the composer from that route on start and write on change. The
+  route deliberately does not broadcast, so two clients on one slot is
+  last-writer-wins; for phase 1 that is fine (one reviewer), but a TUI and a
+  browser open on the same review will not see each other type.
 - **The SSE stream carries everything, deliberately.** Unlike
   `/api/events-ws`, `/api/events` does not filter `files-changed` or reanchor
   fallout (`server.rs`, `agent_visible`). That is correct for the TUI — it is a
