@@ -55,6 +55,21 @@ skill together when you do.
   - **The state file is keyed by worktree+branch**, so two test servers in one
     checkout share it, including per-file collapsed state, which changes the
     layout under the next run. Delete it between runs.
+  - `waitUntil: 'networkidle'` never fires: the comment poll and the SSE stream
+    keep a request in flight for the life of the page. Wait on
+    `domcontentloaded` and then on a selector.
+  - Raise `--idle-timeout`. The default 5s window exists to survive a refresh,
+    which is shorter than the gap between two Playwright runs — the server
+    exits between them and the next run's first `goto` reports a bare
+    connection failure.
+  - **A page load is not a mount of the whole app** — but Pierre still needs a
+    beat: annotations attach after the highlight worker pool settles, so a form
+    hydrated from `/api/pending-drafts` is not in the DOM the instant
+    `diffs-container` is.
+  - Pierre's hover `+` does not appear from `page.mouse.move` alone. When the
+    thing under test is reachable another way — seeding server state and letting
+    the UI restore it, say — take that route rather than making the run depend
+    on the hover affordance.
   - Done reviewing needs a listener: attach `krit wait-for-submit` (background
     it properly — it blocks) or an agent WS subscriber, or it renders as a
     disabled "No watcher". It does not need any comments.
@@ -148,20 +163,28 @@ skill together when you do.
   file** is untested. Both render into Pierre's shadow root, historically
   where the WebKit trouble was.
 
-- **"Draft" and "queued" are two different things, and the wire still says
-  `draft` for the wrong one.** A `ReviewComment` with `status: "draft"` *is* a
-  comment — stored, listable, withheld from the agent until posted — and the UI
-  calls that **queued** ("Queue comment", "Post queued"). A `PendingDraft` is
-  text the reviewer has not submitted at all, persisted through
-  `/api/pending-drafts` so it survives a reload or a closed TUI pane. Both used
-  to be called "draft". The user-facing strings are split; `status: "draft"`,
-  `draftCount` and `postDrafts` still carry the old name, so read those as
-  "queued" until someone renames the wire (which means moving the skill too).
+- **"Draft" and "queued" are two different things**, and both were once called
+  "draft". A comment with `status: "queued"` *is* a comment — stored, listable,
+  withheld from the agent until posted. A `PendingDraft` is text the reviewer
+  has not submitted at all, persisted through `/api/pending-drafts` so it
+  survives a reload or a closed TUI pane. "Draft" now means only the second.
+  Store files written before the rename say `"draft"` for the first;
+  `store::load` migrates them, and that migration is the only thing keeping a
+  queued comment from leaking — every suppression check is `== "queued"`, which
+  a stale `"draft"` would satisfy nowhere.
 - Pending drafts are the one mutation that **deliberately does not broadcast**.
   Echoing a reviewer's keystrokes back into the form they came from fights the
   form, and unsent text is not the agent's business — so there is no SSE event
   and nothing for `agent_visible` to filter. Hydrate on load, write on change.
   Two clients editing the same slot is therefore last-writer-wins, not merged.
+- **A reload is not an unmount**, so `usePendingDrafts` flushes its debounce on
+  `pagehide` as well as on effect cleanup. React cleanup runs when a component
+  leaves a live tree, not when the document is torn down — an unmount-only flush
+  silently loses the last <400ms of typing before exactly the reload the feature
+  exists to survive, and no unit test can see it because there is no document to
+  tear down. The unload write needs `keepalive: true` or it is cancelled with
+  the page. Not `visibilitychange`: an automated browser reports itself hidden
+  for its whole run (see the comment-poll note above), so hidden means nothing.
 - `updateDraft` in `CodeViewWrapper` mutates the draft object **in place** and
   never calls `setPending` — a state update there rebuilds the file's whole
   annotation DOM on every keystroke. That means there is no state transition an

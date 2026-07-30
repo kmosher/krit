@@ -14,7 +14,7 @@ function renderToolbar(over: Partial<Props> = {}) {
     onSubmitReview: vi.fn(async () => {}),
     onRefreshModeChange: vi.fn(),
     onRefresh: vi.fn(),
-    onPostDrafts: vi.fn(),
+    onPostQueued: vi.fn(),
   }
   const base: Props = {
     repoName: 'krit',
@@ -32,7 +32,7 @@ function renderToolbar(over: Partial<Props> = {}) {
     submittedAt: null,
     refreshMode: 'live-unless-active',
     staleCount: 0,
-    draftCount: 0,
+    queuedCount: 0,
     ...spies,
   }
   const utils = render(<Toolbar {...base} {...over} />)
@@ -180,14 +180,14 @@ describe('Toolbar — settings menu', () => {
 
 describe('Toolbar — copying comments', () => {
   it('counts only the comments Copy will actually produce', () => {
-    // formatAllComments excludes drafts. Labelling the button with the total
+    // formatAllComments excludes queued comments. Labelling the button with the total
     // would promise the reviewer text that never lands on the clipboard.
-    renderToolbar({ commentCount: 5, draftCount: 2 })
+    renderToolbar({ commentCount: 5, queuedCount: 2 })
     expect(screen.getByRole('button', { name: 'Copy (3)' })).toBeEnabled()
   })
 
-  it('disables Copy when every comment is still a draft', () => {
-    renderToolbar({ commentCount: 2, draftCount: 2 })
+  it('disables Copy when every comment is still queued', () => {
+    renderToolbar({ commentCount: 2, queuedCount: 2 })
     expect(screen.getByRole('button', { name: 'Copy (0)' })).toBeDisabled()
   })
 
@@ -199,16 +199,16 @@ describe('Toolbar — copying comments', () => {
   })
 })
 
-describe('Toolbar — drafts', () => {
+describe('Toolbar — queued comments', () => {
   it('offers "Post queued" only when queued comments exist', () => {
-    renderToolbar({ commentCount: 1, draftCount: 0 })
+    renderToolbar({ commentCount: 1, queuedCount: 0 })
     expect(screen.queryByRole('button', { name: /Post queued/ })).toBeNull()
   })
 
-  it('posts the drafts', () => {
-    const { onPostDrafts } = renderToolbar({ commentCount: 3, draftCount: 2 })
+  it('posts the queued comments', () => {
+    const { onPostQueued } = renderToolbar({ commentCount: 3, queuedCount: 2 })
     fireEvent.click(screen.getByRole('button', { name: 'Post queued (2)' }))
-    expect(onPostDrafts).toHaveBeenCalled()
+    expect(onPostQueued).toHaveBeenCalled()
   })
 })
 
@@ -343,10 +343,10 @@ describe('Toolbar — finishing the review', () => {
     expect(onSubmitReview).not.toHaveBeenCalled()
   })
 
-  it('warns in the tooltip that finishing also posts outstanding drafts', () => {
+  it('warns in the tooltip that finishing also posts outstanding queued comments', () => {
     // Drafts are private until this click; the reviewer deserves to know the
     // button publishes them.
-    renderToolbar({ commentCount: 3, draftCount: 1, watcherCount: 1 })
+    renderToolbar({ commentCount: 3, queuedCount: 1, watcherCount: 1 })
     expect(
       screen.getByTitle('End the review session — also posts your 1 remaining queued comment.'),
     ).toBeInTheDocument()

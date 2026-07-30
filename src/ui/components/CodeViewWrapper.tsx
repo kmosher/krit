@@ -39,7 +39,7 @@ type DraftMetadata = {
   suggestionText: string
   // Set when this draft originated from a native text selection
   // (SelectionPill) rather than a gutter-drag — schema v3's character-level
-  // anchor, threaded through to onAddComment on submit/save-draft.
+  // anchor, threaded through to onAddComment on submit/queue.
   charAnchor?: { startColumn: number; endColumn: number; selectedText: string }
 }
 type Metadata = ReviewComment | DraftMetadata
@@ -230,7 +230,7 @@ interface Props {
     lineContent: string,
     body: string,
     suggestion?: { newLines: string[] },
-    asDraft?: boolean,
+    asQueued?: boolean,
     // Schema v3: set when the comment was created from a SelectionPill
     // (native text selection) rather than a gutter-drag draft.
     charAnchor?: { startColumn: number; endColumn: number; selectedText: string },
@@ -1044,7 +1044,7 @@ export const CodeViewWrapper = memo(
                   )
                   removeDraft(draftKey(p))
                 }}
-                onSaveDraft={(body, suggestion) => {
+                onQueue={(body, suggestion) => {
                   const lineContent = getRangeContent(
                     item.fileDiff,
                     p.side,

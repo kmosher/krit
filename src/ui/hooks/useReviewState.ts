@@ -84,7 +84,7 @@ export function useReviewState(): ReviewState {
 
 /**
  * Done reviewing. The POST is awaited before anything is torn down, so the
- * server has already posted the drafts and broadcast `submitted` when this
+ * server has already posted the queued comments and broadcast `submitted` when this
  * tab's streams go; the disconnect that follows is what lets it shut down at
  * once if this was the last browser.
  */

@@ -93,7 +93,7 @@ describe('CommentTracker', () => {
         <CommentTracker
           comments={[
             makeComment({
-              status: 'draft',
+              status: 'queued',
               replies: [{ id: 'r', body: 'hm', createdAt: 1, author: 'agent' }],
             }),
           ]}
@@ -107,7 +107,7 @@ describe('CommentTracker', () => {
       render(<CommentTracker comments={[makeComment()]} />)
       expect(screen.getByText('1 open')).toBeInTheDocument()
       expect(screen.queryByText(/resolved/)).toBeNull()
-      expect(screen.queryByText(/draft/)).toBeNull()
+      expect(screen.queryByText(/queued/)).toBeNull()
     })
 
     it('marks a resolved row so it reads as done', () => {

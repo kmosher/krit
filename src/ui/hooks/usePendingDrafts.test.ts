@@ -47,19 +47,23 @@ describe('toWire / fromWire', () => {
 
 describe('usePendingDrafts', () => {
   let puts: PendingDraft[]
+  let keepalives: (boolean | undefined)[]
   let deletes: unknown[]
   let stored: PendingDraft[]
 
   beforeEach(() => {
     vi.useFakeTimers()
     puts = []
+    keepalives = []
     deletes = []
     stored = []
     vi.stubGlobal(
       'fetch',
-      vi.fn((url: string, init?: { method?: string; body?: string }) => {
-        if (init?.method === 'PUT') puts.push(JSON.parse(init.body ?? '{}'))
-        else if (String(url).endsWith('/delete')) deletes.push(JSON.parse(init?.body ?? '{}'))
+      vi.fn((url: string, init?: { method?: string; body?: string; keepalive?: boolean }) => {
+        if (init?.method === 'PUT') {
+          puts.push(JSON.parse(init.body ?? '{}'))
+          keepalives.push(init.keepalive)
+        } else if (String(url).endsWith('/delete')) deletes.push(JSON.parse(init?.body ?? '{}'))
         return Promise.resolve({ ok: true, json: () => Promise.resolve(stored) })
       }),
     )
@@ -148,7 +152,7 @@ describe('usePendingDrafts', () => {
     await waitFor(() => expect(result.current.restored).toEqual([]))
   })
 
-  it('flushes a queued write on unmount, which is what a reload is', async () => {
+  it('flushes a queued write when the component leaves the tree', async () => {
     const { result, unmount } = renderHook(() => usePendingDrafts())
     act(() => {
       result.current.persist({ ...draft, body: 'typed then closed' })
@@ -157,5 +161,33 @@ describe('usePendingDrafts', () => {
     unmount()
     expect(puts).toHaveLength(1)
     expect(puts[0].body).toBe('typed then closed')
+  })
+
+  it('flushes a queued write on pagehide, because a reload is not an unmount', async () => {
+    // Verified in Chromium, where the earlier unmount-only version lost the
+    // last keystrokes before a reload: tearing down the document does not run
+    // React cleanup, so the debounce timer just dies with the page. A reload is
+    // the case this whole feature exists for.
+    const { result } = renderHook(() => usePendingDrafts())
+    act(() => {
+      result.current.persist({ ...draft, body: 'typed then reloaded' })
+    })
+    expect(puts).toHaveLength(0)
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'))
+    })
+    expect(puts).toHaveLength(1)
+    expect(puts[0].body).toBe('typed then reloaded')
+    // Without keepalive the request is cancelled along with the document it was
+    // issued from, which is the whole failure mode this path is here to avoid.
+    expect(keepalives).toEqual([true])
+  })
+
+  it('does not re-send on pagehide when nothing is queued', async () => {
+    renderHook(() => usePendingDrafts())
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'))
+    })
+    expect(puts).toHaveLength(0)
   })
 })

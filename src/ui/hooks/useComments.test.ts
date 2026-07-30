@@ -34,7 +34,7 @@ function wrapper({ children }: { children: React.ReactNode }) {
 // A stand-in for the Rust server: it records every request and answers with
 // the shapes krit/src/server.rs actually returns — the created comment for
 // POST, the whole updated comment for PUT and for a reply, `{ok, posted}` for
-// the draft flush. Tests mutate `server` to stage what the next GET returns,
+// the queued flush. Tests mutate `server` to stage what the next GET returns,
 // which is how a reanchor (a server-side rewrite the client only learns about
 // on its next poll) is spelled here.
 beforeEach(() => {
@@ -70,9 +70,9 @@ beforeEach(() => {
         server = [...server, created]
         return Promise.resolve({ ok: true, json: () => Promise.resolve(created) })
       }
-      if (method === 'POST' && url === '/api/drafts/post') {
-        const posted = server.filter((c) => c.status === 'draft').length
-        server = server.map((c) => (c.status === 'draft' ? { ...c, status: 'open' as const } : c))
+      if (method === 'POST' && url === '/api/queued/post') {
+        const posted = server.filter((c) => c.status === 'queued').length
+        server = server.map((c) => (c.status === 'queued' ? { ...c, status: 'open' as const } : c))
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, posted }) })
       }
       if (method === 'POST') {
@@ -127,11 +127,11 @@ async function poll(result: { current: ReturnType<typeof useComments> }, expecte
 }
 
 describe('loading', () => {
-  it('asks for drafts, which no other client of this endpoint may see', async () => {
-    // The browser is the only caller allowed the draft view. Drop the flag and
-    // a reviewer's saved drafts vanish from their own screen mid-review.
+  it('asks for queued comments, which no other client of this endpoint may see', async () => {
+    // The browser is the only caller allowed that view. Drop the flag and a
+    // reviewer's queued comments vanish from their own screen mid-review.
     await mount([])
-    expect(calls[0]).toMatchObject({ url: '/api/comments?includeDrafts=true', method: 'GET' })
+    expect(calls[0]).toMatchObject({ url: '/api/comments?includeQueued=true', method: 'GET' })
   })
 
   it('keeps polling while the page is in the background', async () => {
@@ -178,16 +178,16 @@ describe('adding a comment', () => {
     })
   })
 
-  it('marks a comment draft only when the reviewer asked for a draft', async () => {
-    // status is what suppresses the agent broadcast; sending 'draft' by
+  it('queues a comment only when the reviewer asked to queue it', async () => {
+    // status is what suppresses the agent broadcast; sending 'queued' by
     // accident silently withholds a posted comment from the agent, and
     // omitting it leaks an in-progress one.
     const { result } = await mount()
     act(() => {
       result.current.addComment('src/a.rs', 'additions', 4, 4, 'x', 'later', undefined, true)
     })
-    await waitFor(() => expect(result.current.draftCount).toBe(1))
-    expect((calls.at(-1)!.body as { status?: string }).status).toBe('draft')
+    await waitFor(() => expect(result.current.queuedCount).toBe(1))
+    expect((calls.at(-1)!.body as { status?: string }).status).toBe('queued')
 
     act(() => {
       result.current.addComment('src/a.rs', 'additions', 5, 5, 'y', 'now')
@@ -358,26 +358,26 @@ describe('replying', () => {
   })
 })
 
-describe('posting drafts', () => {
-  it('flushes drafts in one request and refetches the flipped statuses', async () => {
+describe('posting queued comments', () => {
+  it('flushes the queue in one request and refetches the flipped statuses', async () => {
     // The status flip happens server-side and is not mirrored optimistically,
     // so without the invalidate the Draft badges linger for up to 3s after
     // "Done reviewing" — including on comments the agent already has.
-    const { result } = await mount([makeComment({ id: 'a', status: 'draft' }), makeComment({ id: 'b', status: 'draft' })])
-    expect(result.current.draftCount).toBe(2)
-    act(() => result.current.postDrafts())
-    await waitFor(() => expect(result.current.draftCount).toBe(0))
-    expect(calls.filter((c) => c.url === '/api/drafts/post')).toHaveLength(1)
+    const { result } = await mount([makeComment({ id: 'a', status: 'queued' }), makeComment({ id: 'b', status: 'queued' })])
+    expect(result.current.queuedCount).toBe(2)
+    act(() => result.current.postQueued())
+    await waitFor(() => expect(result.current.queuedCount).toBe(0))
+    expect(calls.filter((c) => c.url === '/api/queued/post')).toHaveLength(1)
     expect(result.current.comments.every((c) => c.status === 'open')).toBe(true)
   })
 
-  it('counts only drafts', async () => {
+  it('counts only queued comments', async () => {
     const { result } = await mount([
-      makeComment({ id: 'a', status: 'draft' }),
+      makeComment({ id: 'a', status: 'queued' }),
       makeComment({ id: 'b', status: 'open' }),
       makeComment({ id: 'c', status: 'resolved' }),
     ])
-    expect(result.current.draftCount).toBe(1)
+    expect(result.current.queuedCount).toBe(1)
   })
 })
 
@@ -495,11 +495,11 @@ describe('annotations', () => {
 })
 
 describe('formatAllComments', () => {
-  it('withholds drafts from the copied text', async () => {
-    // Copy is the manual path to the agent, and a draft is by definition not
-    // yet meant for it — leaking one here defeats the whole draft mechanism.
+  it('withholds queued comments from the copied text', async () => {
+    // Copy is the manual path to the agent, and a queued comment is by
+    // definition not yet meant for it — leaking one here defeats queueing.
     const { result } = await mount([
-      makeComment({ id: 'a', status: 'draft', body: 'secret' }),
+      makeComment({ id: 'a', status: 'queued', body: 'secret' }),
       makeComment({ id: 'b', body: 'public' }),
     ])
     const out = result.current.formatAllComments()
@@ -507,10 +507,10 @@ describe('formatAllComments', () => {
     expect(out).not.toContain('secret')
   })
 
-  it('produces nothing at all when everything is a draft', async () => {
+  it('produces nothing at all when everything is queued', async () => {
     // An empty string is what lets the caller skip the copy; an empty wrapper
     // element would hand the agent a review with no content in it.
-    const { result } = await mount([makeComment({ id: 'a', status: 'draft' })])
+    const { result } = await mount([makeComment({ id: 'a', status: 'queued' })])
     expect(result.current.formatAllComments()).toBe('')
   })
 
@@ -673,16 +673,16 @@ describe('a server that says no', () => {
     expect(result.current.comments[0].status).toBe('open')
   })
 
-  it('reports a refused draft flush', async () => {
-    const { result } = await mount([makeComment({ id: 'c1', status: 'draft' })])
+  it('reports a refused queue flush', async () => {
+    const { result } = await mount([makeComment({ id: 'c1', status: 'queued' })])
     refuse = { method: 'POST', status: 500 }
     await act(async () => {
-      result.current.postDrafts()
+      result.current.postQueued()
     })
     await waitFor(() => expect(reported).toHaveLength(1))
     // Nothing to assert about the cache — this mutation never wrote one
-    // optimistically. What it must not do is claim drafts were posted.
-    expect(result.current.draftCount).toBe(1)
+    // optimistically. What it must not do is claim the queue was posted.
+    expect(result.current.queuedCount).toBe(1)
   })
 
   it('reports a failed load once per outage, not once per poll', async () => {

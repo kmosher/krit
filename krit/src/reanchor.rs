@@ -56,7 +56,7 @@ fn find_block(file_lines: &[&str], block: &[&str], hint: u32, normalize: bool) -
 
 /// Remaps every non-resolved, additions-side comment on `file_path` to its
 /// new position after a working-tree change. Deletion-side comments are left
-/// alone (their content no longer exists by definition); drafts ARE
+/// alone (their content no longer exists by definition); queued comments ARE
 /// re-anchored but it's the caller's job not to broadcast them. Returns only
 /// the comments that actually changed.
 pub fn reanchor_file_comments(

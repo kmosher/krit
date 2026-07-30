@@ -105,7 +105,11 @@ export function usePendingDrafts() {
     }
   }, [])
 
-  const flush = useCallback((key: string) => {
+  // `keepalive` is for the page-unload path: the document is going away, so an
+  // ordinary fetch would be cancelled with it. It costs nothing on the normal
+  // debounce path, but is only set where it's needed to keep the two callers
+  // distinguishable.
+  const flush = useCallback((key: string, keepalive = false) => {
     const draft = latest.current.get(key)
     if (!draft) return
     timers.current.delete(key)
@@ -113,6 +117,7 @@ export function usePendingDrafts() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(toWire(draft, Date.now())),
+      keepalive,
     }).catch(() => {})
   }, [])
 
@@ -152,17 +157,35 @@ export function usePendingDrafts() {
     }).catch(() => {})
   }, [])
 
-  // Unmount is the one moment a pending debounce would be lost outright, and it
-  // is also a reload — exactly the case this feature exists for.
-  useEffect(() => {
-    const pendingTimers = timers.current
-    return () => {
-      for (const key of [...pendingTimers.keys()]) {
-        clearTimeout(pendingTimers.get(key)!)
-        flush(key)
+  const flushAll = useCallback(
+    (keepalive: boolean) => {
+      for (const key of [...timers.current.keys()]) {
+        clearTimeout(timers.current.get(key)!)
+        flush(key, keepalive)
       }
+    },
+    [flush],
+  )
+
+  // Two different ways the debounce window can end without the timer firing,
+  // and only one of them is an unmount.
+  //
+  // A reload or a closed tab does NOT unmount anything: React cleanup runs when
+  // a component leaves a live tree, not when the document is torn down. So the
+  // effect cleanup below covers an in-app unmount, and `pagehide` covers the
+  // navigation — which is the case this whole feature exists for, and the case
+  // that looked covered until a real browser said otherwise. `pagehide` rather
+  // than `visibilitychange`: an automated browser reports itself hidden for its
+  // entire run (see the note on the comment poll), so hidden is not a signal
+  // that anything is going away.
+  useEffect(() => {
+    const onPageHide = () => flushAll(true)
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      window.removeEventListener('pagehide', onPageHide)
+      flushAll(false)
     }
-  }, [flush])
+  }, [flushAll])
 
   return { restored, persist, forget }
 }

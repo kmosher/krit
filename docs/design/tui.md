@@ -13,7 +13,7 @@ standalone first — the herdr half is packaging, not architecture.
 
 The server already owns the whole review model: diff assembly, the comment
 store, reanchoring across edits (`reanchor.rs`), inline edits with content-tag
-handshakes, drafts, submit gating, and the SSE fan-out. `src/ui/` is a client,
+handshakes, queueing, drafts, submit gating, and the SSE fan-out. `src/ui/` is a client,
 not the app. A TUI is a second client over `/api/diff` + `/api/comments` +
 `/api/events`, and nothing it needs lives in the browser.
 
@@ -47,7 +47,7 @@ they carry:
 | Hunk expansion | Already served: `fileContents` carries both sides per file |
 | File tree with change-type icons | Distinct ASCII sigils, not just color |
 | Character-range comments | Free from mouse coords; visual mode for keyboard |
-| Comment / reply / resolve / drafts | Plain API calls |
+| Comment / reply / resolve / queue | Plain API calls |
 | Annotation rows inline in the diff | Interleaved rows in the row model |
 | Live refresh (SSE) | Same stream — it carries everything |
 | Inline editing (CodeMirror) | Phase 4, and the least certain part of this doc |
@@ -208,7 +208,7 @@ setup/teardown get built, so it is most of the risk.
 **Phase 1 — commenting.** Visual-mode and click-drag selection down to the
 column, the composer (bracketed paste, keyboard disambiguation, the strip-stack
 question on discard), then `POST /api/comments`, replies, resolve/reopen,
-drafts, and `POST /api/submit`. At the end of this phase the TUI is a usable
+queueing, and `POST /api/submit`. At the end of this phase the TUI is a usable
 review client.
 
 **Phase 2 — parity polish.** Split view with the narrow-terminal fallback,

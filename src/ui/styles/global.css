@@ -427,13 +427,13 @@ body {
     background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
 }
 
-/* "Post queued" button — shown only while draftCount > 0 */
-.btn-draft-post {
+/* "Post queued" button — shown only while queuedCount > 0 */
+.btn-queued-post {
     border-color: var(--primary);
     color: var(--primary);
 }
 
-.btn-draft-post:hover {
+.btn-queued-post:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
@@ -1144,11 +1144,11 @@ body {
 }
 
 /* Draft comments — saved but not yet posted (invisible to any watcher) */
-.comment-draft {
+.comment-queued {
     border-left: 2px solid var(--primary);
 }
 
-.comment-bubble-draft {
+.comment-bubble-queued {
     display: flex;
     align-items: center;
     gap: 3px;
@@ -1705,7 +1705,7 @@ body {
     white-space: nowrap;
 }
 
-.ct-count-draft {
+.ct-count-queued {
     color: var(--primary);
     font-style: italic;
 }
@@ -1816,7 +1816,7 @@ body {
     flex-shrink: 0;
 }
 
-.ct-status-draft {
+.ct-status-queued {
     color: var(--primary);
 }
 

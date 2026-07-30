@@ -58,10 +58,10 @@ async function readJson<T>(res: Response, what: string): Promise<T> {
 }
 
 async function fetchComments(): Promise<ReviewComment[]> {
-  // includeDrafts=true: the browser is the only caller allowed to see
-  // draft comments (rendered with a Draft badge). Every other caller of
-  // this endpoint — notably `krit comments` — gets the agent-visible view.
-  const res = await fetch('/api/comments?includeDrafts=true')
+  // includeQueued=true: the browser is the only caller allowed to see queued
+  // comments (rendered with a Queued badge). Every other caller of this
+  // endpoint — notably `krit comments` — gets the agent-visible view.
+  const res = await fetch('/api/comments?includeQueued=true')
   return readJson<ReviewComment[]>(res, 'Loading comments')
 }
 
@@ -122,7 +122,7 @@ export function useComments(onError?: (message: string) => void) {
       lineContent: string
       body: string
       suggestion?: { newLines: string[] }
-      status?: 'draft'
+      status?: 'queued'
       startColumn?: number
       endColumn?: number
       selectedText?: string
@@ -140,13 +140,13 @@ export function useComments(onError?: (message: string) => void) {
     onError: report,
   })
 
-  // Flips every draft to 'open' server-side in one batch (see
-  // postDraftsAndBroadcast in server.ts) — used by the toolbar's "Post
-  // drafts" button and implicitly by Submit ("Done reviewing").
-  const postDraftsMutation = useMutation({
+  // Flips every queued comment to 'open' server-side in one batch (see
+  // post_queued_and_broadcast in server.rs) — used by the toolbar's "Post
+  // queued" button and implicitly by Submit ("Done reviewing").
+  const postQueuedMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch('/api/drafts/post', { method: 'POST' })
-      return readJson<{ ok: true; posted: number }>(res, 'Posting drafts')
+      const res = await fetch('/api/queued/post', { method: 'POST' })
+      return readJson<{ ok: true; posted: number }>(res, 'Posting queued comments')
     },
     onError: report,
     onSuccess: () => {
@@ -218,7 +218,7 @@ export function useComments(onError?: (message: string) => void) {
       lineContent: string,
       body: string,
       suggestion?: { newLines: string[] },
-      asDraft?: boolean,
+      asQueued?: boolean,
       charAnchor?: { startColumn: number; endColumn: number; selectedText: string },
     ) => {
       addMutation.mutate({
@@ -229,7 +229,7 @@ export function useComments(onError?: (message: string) => void) {
         lineContent,
         body,
         suggestion,
-        ...(asDraft ? { status: 'draft' } : {}),
+        ...(asQueued ? { status: 'queued' } : {}),
         ...(charAnchor
           ? { startColumn: charAnchor.startColumn, endColumn: charAnchor.endColumn, selectedText: charAnchor.selectedText }
           : {}),
@@ -238,9 +238,9 @@ export function useComments(onError?: (message: string) => void) {
     [addMutation],
   )
 
-  const postDrafts = useCallback(() => {
-    postDraftsMutation.mutate()
-  }, [postDraftsMutation])
+  const postQueued = useCallback(() => {
+    postQueuedMutation.mutate()
+  }, [postQueuedMutation])
 
   const removeComment = useCallback(
     (id: string) => {
@@ -271,10 +271,10 @@ export function useComments(onError?: (message: string) => void) {
   )
 
   const formatAllComments = useCallback((): string => {
-    // Drafts are "not yet visible to the agent" everywhere, including this
-    // explicit copy action — matches the watcher/ws suppression, so a
-    // reviewer can't accidentally leak an in-progress draft.
-    const postable = comments.filter((c) => c.status !== 'draft')
+    // Queued comments are "not yet visible to the agent" everywhere, including
+    // this explicit copy action — matches the watcher/ws suppression, so a
+    // reviewer can't accidentally leak one they meant to hold back.
+    const postable = comments.filter((c) => c.status !== 'queued')
     if (postable.length === 0) return ''
 
     const grouped = new Map<string, ReviewComment[]>()
@@ -332,7 +332,7 @@ export function useComments(onError?: (message: string) => void) {
     await navigator.clipboard.writeText(text)
   }, [formatAllComments])
 
-  const draftCount = useMemo(() => comments.filter((c) => c.status === 'draft').length, [comments])
+  const queuedCount = useMemo(() => comments.filter((c) => c.status === 'queued').length, [comments])
 
   return {
     comments,
@@ -341,8 +341,8 @@ export function useComments(onError?: (message: string) => void) {
     editComment,
     resolveComment,
     replyToComment,
-    postDrafts,
-    draftCount,
+    postQueued,
+    queuedCount,
     getAnnotationsForFile,
     formatAllComments,
     copyAllComments,
