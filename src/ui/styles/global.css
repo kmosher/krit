@@ -2332,3 +2332,15 @@ body {
     width: 100%;
     box-sizing: border-box;
 }
+
+/* A table is its own horizontal scroll container, and `overflow-x` clips the
+   pseudo-element the stripe is drawn with. A border belongs to the element's
+   own box and is never clipped by its own overflow, so tables get the marker
+   that way instead. */
+.markdown-preview-body table[data-changed] {
+    border-left: 3px solid var(--success);
+}
+
+.markdown-preview-body table[data-changed]::before {
+    content: none;
+}
