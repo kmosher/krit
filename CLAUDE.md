@@ -111,6 +111,27 @@ skill together when you do.
   `requestAnimationFrame`, which is why `attachEditors` forces a synchronous
   render rather than waiting for a frame — when something updates for a human
   and not for an agent, suspect the tab's visibility before the feature.
+- **Pierre's custom renderers are light DOM, projected by `slot`.** `SlotPortals`
+  React-portals every `render*` callback's output into `renderedItem.element`
+  with a `slot="…"` attribute, and the shadow root's `<slot>` elements pull it
+  in — so `global.css` styles annotations and header prefixes normally, and
+  `document.getSelection()` inside one returns real light-DOM nodes with no
+  retargeting. The stale comment in `CommentForm` about being "portaled into
+  the shadow root" is what makes this look harder than it is.
+- **A file-level annotation (`lineNumber: 0`) is how the rendered preview
+  replaces a diff**, and three things have to line up or it silently renders
+  nothing:
+  - `collapsed: true` suppresses annotations along with the rows, so it cannot
+    be used to hide the diff. Hand CodeView a hunk-less copy of the fileDiff
+    instead (`emptyDiffFor`) — empty body, item still expanded.
+  - `AnnotationEventGuard` stops mouse/pointer events at the React root, which
+    also stops the document-level `mouseup` a text selection needs. The
+    preview pane is deliberately not wrapped in it; with no rendered rows
+    there is no line interaction left to guard.
+  - Pierre's virtualizer puts a `transform` on the row containers, which makes
+    them the containing block for `position: fixed`. Anything fixed inside an
+    annotation (the selection pill) must be portaled to `<body>` or it lands
+    at an offset.
 - **`remark-rehype` does preserve source positions** on the hast tree, despite
   a lot of advice to the contrary — including on inline nodes. That is what
   makes character-level anchoring on the Markdown preview exact rather than

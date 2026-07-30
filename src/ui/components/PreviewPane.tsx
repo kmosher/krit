@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReviewComment } from '../../types'
 import type { SelectionAnchor } from '../utils/selectionMapping'
 import type { PreviewFormat } from '../utils/previewFormat'
@@ -11,25 +12,24 @@ import {
 } from '../utils/previewAnchor'
 import { buildHtmlTextMap, locateSelection } from '../utils/htmlTextMap'
 import { asBridgeMessage, buildSandboxDocument } from '../utils/htmlSandbox'
+import { setFileHighlights } from '../utils/previewHighlights'
 import { MarkdownPreview } from './MarkdownPreview'
 import { SelectionPill } from './SelectionPill'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 
-// Reads a file as the document it is rather than as a diff, and takes comments
-// on it. A selection here produces the same schema-v3 anchor a selection over
-// the diff produces, so everything downstream — drafts, suggestions,
-// re-anchoring, the agent's view — is unchanged. See
+// The rendered document itself: the file read as what it is, with its comments
+// alongside. Mounted as a file-level annotation inside CodeView, in place of
+// the file's diff rows — see CodeViewWrapper's `_preview` metadata and
 // docs/design/rendered-preview.md.
 
-interface Props {
+export interface PreviewPaneProps {
   filePath: string
   source: string
   format: PreviewFormat
   /** Inclusive new-side line ranges this diff added or modified. */
   changedRanges: Array<[number, number]>
   comments: ReviewComment[]
-  onClose: () => void
   onAddComment: (
     filePath: string,
     side: 'deletions' | 'additions',
@@ -57,19 +57,16 @@ interface PendingSelection {
   y: number
 }
 
-const HIGHLIGHT_NAME = 'krit-comment'
-
-export function PreviewModal({
+export function PreviewPane({
   filePath,
   source,
   format,
   changedRanges,
   comments,
-  onClose,
   onAddComment,
   onDeleteComment,
   onReplyComment,
-}: Props) {
+}: PreviewPaneProps) {
   const lineStarts = useMemo(() => buildLineIndex(source), [source])
   const bodyRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef<HTMLIFrameElement>(null)
@@ -124,6 +121,8 @@ export function PreviewModal({
           return
         }
         const range = sel.getRangeAt(0)
+        // Several panes can be open at once, each listening on the document.
+        // Only the one the selection is actually inside may claim it.
         if (!root.contains(range.commonAncestorContainer)) {
           setPending(null)
           return
@@ -190,13 +189,12 @@ export function PreviewModal({
   // Paint existing comments' anchors with the CSS Custom Highlight API rather
   // than wrapping ranges in <mark>: React owns this DOM, and mutating it
   // underneath would be undone on the next render (and would shift the very
-  // offsets the highlight was computed from). Silently absent where the API
-  // is — the rail still lists every comment.
+  // offsets the highlight was computed from). Registered per file, because
+  // several panes can be open at once and the API is keyed globally.
   useEffect(() => {
     if (format !== 'markdown') return
     const root = bodyRef.current
-    const highlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights
-    if (!root || !highlights || typeof Highlight === 'undefined') return
+    if (!root) return
     const ranges: Range[] = []
     for (const c of comments) {
       if (c.startColumn == null || c.endColumn == null) continue
@@ -205,26 +203,17 @@ export function PreviewModal({
       const range = sourceRangeToDomRange(root, source, from, to)
       if (range) ranges.push(range)
     }
-    if (ranges.length) highlights.set(HIGHLIGHT_NAME, new Highlight(...ranges))
-    else highlights.delete(HIGHLIGHT_NAME)
-    return () => {
-      highlights.delete(HIGHLIGHT_NAME)
-    }
-  }, [format, comments, lineStarts, source])
+    setFileHighlights(filePath, ranges)
+    return () => setFileHighlights(filePath, [])
+  }, [format, comments, lineStarts, source, filePath])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      if (drafting) return // CommentForm owns Escape while a draft is open.
-      if (pending) {
-        setPending(null)
-        return
-      }
-      onClose()
+      if (e.key === 'Escape' && pending && !drafting) setPending(null)
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [drafting, pending, onClose])
+  }, [pending, drafting])
 
   const submitComment = (
     sel: PendingSelection,
@@ -255,87 +244,74 @@ export function PreviewModal({
     setPending(null)
   }
 
-  const anchored = comments.filter((c) => c.startColumn != null)
-  const wholeFile = comments.filter((c) => c.startColumn == null)
-
   return (
-    <div className="preview-modal-backdrop" onClick={onClose}>
-      <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="preview-modal-header">
-          <span className="preview-modal-path">{filePath}</span>
-          <span className="preview-modal-format">{format === 'markdown' ? 'Markdown' : 'HTML'}</span>
-          {comments.length > 0 && (
-            <span className="preview-modal-count">
-              {comments.length} comment{comments.length === 1 ? '' : 's'}
-            </span>
-          )}
-          <div style={{ flex: 1 }} />
-          <button className="btn btn-secondary" onClick={onClose}>
-            Back to diff
-          </button>
-        </div>
+    <div className="preview-pane">
+      <div className="preview-pane-content" ref={bodyRef}>
+        {format === 'markdown' ? (
+          <MarkdownPreview source={source} changedRanges={changedRanges} />
+        ) : (
+          <iframe
+            ref={frameRef}
+            className="preview-pane-frame"
+            title={`Preview of ${filePath}`}
+            // No allow-same-origin: with it, the sandbox would grant the
+            // artifact this page's origin back, and this page can write
+            // files. See htmlSandbox.ts.
+            sandbox="allow-scripts"
+            srcDoc={buildSandboxDocument(source)}
+            style={{ height: frameHeight }}
+          />
+        )}
+      </div>
 
-        <div className="preview-modal-split">
-          <div className="preview-modal-content" ref={bodyRef}>
-            {format === 'markdown' ? (
-              <MarkdownPreview source={source} changedRanges={changedRanges} />
-            ) : (
-              <iframe
-                ref={frameRef}
-                className="preview-modal-frame"
-                title={`Preview of ${filePath}`}
-                // No allow-same-origin: with it, the sandbox would grant the
-                // artifact this page's origin back, and this page can write
-                // files. See htmlSandbox.ts.
-                sandbox="allow-scripts"
-                srcDoc={buildSandboxDocument(source)}
-                style={{ height: frameHeight }}
-              />
-            )}
+      <aside className="preview-pane-rail">
+        {drafting && (
+          <div className="preview-rail-card preview-rail-draft">
+            <div className="preview-rail-quote" title={drafting.renderedText}>
+              “{truncate(drafting.renderedText, 140)}”
+            </div>
+            <div className="preview-rail-lines">
+              {drafting.anchor.startLine === drafting.anchor.endLine
+                ? `Line ${drafting.anchor.startLine}`
+                : `Lines ${drafting.anchor.startLine}–${drafting.anchor.endLine}`}
+            </div>
+            <CommentForm
+              filePath={filePath}
+              // The source behind the selection, not the rendered text —
+              // otherwise the reader would be editing `bold` where the file
+              // says `**bold**` and the suggestion could not apply.
+              originalLines={sliceSource(drafting.startOffset, drafting.endOffset)}
+              onSubmit={(body, suggestion) => submitComment(drafting, body, suggestion, false)}
+              onSaveDraft={(body, suggestion) => submitComment(drafting, body, suggestion, true)}
+              onCancel={() => setDrafting(null)}
+            />
           </div>
-
-          <aside className="preview-modal-rail">
-            {drafting && (
-              <div className="preview-rail-card preview-rail-draft">
-                <div className="preview-rail-quote" title={drafting.renderedText}>
-                  “{truncate(drafting.renderedText, 140)}”
-                </div>
-                <div className="preview-rail-lines">
-                  {drafting.anchor.startLine === drafting.anchor.endLine
-                    ? `Line ${drafting.anchor.startLine}`
-                    : `Lines ${drafting.anchor.startLine}–${drafting.anchor.endLine}`}
-                </div>
-                <CommentForm
-                  filePath={filePath}
-                  // The source behind the selection, not the rendered text —
-                  // otherwise the reader would be editing `bold` where the file
-                  // says `**bold**` and the suggestion could not apply.
-                  originalLines={sliceSource(drafting.startOffset, drafting.endOffset)}
-                  onSubmit={(body, suggestion) => submitComment(drafting, body, suggestion, false)}
-                  onSaveDraft={(body, suggestion) => submitComment(drafting, body, suggestion, true)}
-                  onCancel={() => setDrafting(null)}
-                />
+        )}
+        {comments.length === 0 && !drafting && (
+          <p className="preview-rail-empty">
+            Select any text to comment on it. Changed blocks are marked in the margin.
+          </p>
+        )}
+        {comments.map((c) => (
+          <div key={c.id} className="preview-rail-card">
+            {c.selectedText && (
+              <div className="preview-rail-quote" title={c.selectedText}>
+                “{truncate(c.selectedText, 140)}”
               </div>
             )}
-            {anchored.length === 0 && wholeFile.length === 0 && !drafting && (
-              <p className="preview-rail-empty">
-                Select any text to comment on it. Changed blocks are marked in the margin.
-              </p>
-            )}
-            {[...anchored, ...wholeFile].map((c) => (
-              <div key={c.id} className="preview-rail-card">
-                {c.selectedText && (
-                  <div className="preview-rail-quote" title={c.selectedText}>
-                    “{truncate(c.selectedText, 140)}”
-                  </div>
-                )}
-                <CommentBubble comment={c} onDelete={onDeleteComment} onReply={onReplyComment} />
-              </div>
-            ))}
-          </aside>
-        </div>
+            <CommentBubble comment={c} onDelete={onDeleteComment} onReply={onReplyComment} />
+          </div>
+        ))}
+      </aside>
 
-        {pending && !drafting && (
+      {/* Portaled to <body>: the pill is `position: fixed`, and Pierre's
+          virtualizer puts a `transform` on the row containers above this pane.
+          A transformed ancestor becomes the containing block for fixed
+          positioning, so left in place the pill lands at an offset from the
+          selection rather than on it. */}
+      {pending &&
+        !drafting &&
+        createPortal(
           <div ref={pillRef}>
             <SelectionPill
               x={pending.x}
@@ -345,9 +321,9 @@ export function PreviewModal({
                 setPending(null)
               }}
             />
-          </div>
+          </div>,
+          document.body,
         )}
-      </div>
     </div>
   )
 }

@@ -3,6 +3,7 @@ import type { FileDiffMetadata, DiffLineAnnotation, AnnotationSide } from '@pier
 import type { ReviewComment } from '../../types'
 import type { BinaryFileInfo } from '../hooks/useDiff'
 import type { SelectionAnchor } from '../utils/selectionMapping'
+import type { PreviewFormat } from '../utils/previewFormat'
 import { BinaryFileDiff } from './BinaryFileDiff'
 import { CodeViewWrapper, type CodeViewWrapperHandle } from './CodeViewWrapper'
 
@@ -34,6 +35,8 @@ interface DiffViewerProps {
   onEditFile?: (filePath: string) => void
   onPreviewFile?: (filePath: string) => void
   previewableFiles: Set<string>
+  previewFiles: Set<string>
+  previewData: Map<string, { source: string; format: PreviewFormat; changedRanges: Array<[number, number]> }>
   editingFiles: Set<string>
   onToggleEdit: (filePath: string) => void
   onEditComplete: (filePath: string, contents: string) => void
@@ -64,6 +67,8 @@ export const DiffViewer = memo(
       onEditFile,
       onPreviewFile,
       previewableFiles,
+      previewFiles,
+      previewData,
       editingFiles,
       onToggleEdit,
       onEditComplete,
@@ -179,6 +184,8 @@ export const DiffViewer = memo(
             onEditFile={onEditFile}
             onPreviewFile={onPreviewFile}
             previewableFiles={previewableFiles}
+            previewFiles={previewFiles}
+            previewData={previewData}
             editingFiles={editingFiles}
             onToggleEdit={onToggleEdit}
             onEditComplete={onEditComplete}

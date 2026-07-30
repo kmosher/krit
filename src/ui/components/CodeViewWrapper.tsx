@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo } from 'react'
+import { useState, useRef, useMemo, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, lazy, Suspense } from 'react'
 import { CodeView, EditProvider, useStableCallback, type CodeViewHandle } from '@pierre/diffs/react'
 import { Editor, type EditorOptions } from '@pierre/diffs/edit'
 import type {
@@ -15,6 +15,13 @@ import type { ReviewComment } from '../../types'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 import { SelectionPill } from './SelectionPill'
+// Split out: the markdown renderer and its plugins are ~100 kB gzipped, about
+// a quarter of the whole bundle, and a review that never opens a document
+// should not pay for it. Fetched on the first Preview click.
+const PreviewPane = lazy(() =>
+  import('./PreviewPane').then((m) => ({ default: m.PreviewPane })),
+)
+import type { PreviewFormat } from '../utils/previewFormat'
 import {
   filePathForRoot,
   mapRangeToAnchor,
@@ -42,7 +49,16 @@ type DraftMetadata = {
   // anchor, threaded through to onAddComment on submit/save-draft.
   charAnchor?: { startColumn: number; endColumn: number; selectedText: string }
 }
-type Metadata = ReviewComment | DraftMetadata
+// A file-level annotation standing in for the file's diff rows: the rendered
+// document, mounted where the diff would be. Pierre renders an annotation with
+// `lineNumber: 0` above the first hunk, which is the only anchor that means
+// "the file" rather than "a line in it".
+export interface PreviewMetadata {
+  _preview: true
+  filePath: string
+}
+
+type Metadata = ReviewComment | DraftMetadata | PreviewMetadata
 
 function truncateForLabel(text: string, max = 40): string {
   const oneLine = text.replace(/\s+/g, ' ').trim()
@@ -248,6 +264,14 @@ interface Props {
   // `previewFormatFor` recognises; the parent decides which those are.
   onPreviewFile?(filePath: string): void
   previewableFiles: Set<string>
+  // Files currently showing their rendered document instead of their diff.
+  // Like `editingFiles`, the parent owns the set; we turn it into a file-level
+  // annotation and a hidden diff body.
+  previewFiles: Set<string>
+  // Loaded content for the files in `previewFiles`, keyed by path. A file can
+  // be in the set for a frame before its content arrives; the pane simply
+  // doesn't render until it does.
+  previewData: Map<string, { source: string; format: PreviewFormat; changedRanges: Array<[number, number]> }>
   // Files currently in inline edit mode — the diff's addition side becomes a
   // live editor in place. Mirrors `viewedFiles`: the parent owns the set and
   // we push it into `item.edit`.
@@ -420,6 +444,8 @@ export const CodeViewWrapper = memo(
       onEditFile,
       onPreviewFile,
       previewableFiles,
+      previewFiles,
+      previewData,
       editingFiles,
       onToggleEdit,
       onEditComplete,
@@ -537,7 +563,16 @@ export const CodeViewWrapper = memo(
     )
 
     const initialItems = useMemo<CodeViewItem<Metadata>[]>(
-      () => buildItems(files, fileAnnotationsMap, pending, viewedFiles, fileStatsMap, editingFiles),
+      () =>
+        buildItems(
+          files,
+          fileAnnotationsMap,
+          pending,
+          viewedFiles,
+          fileStatsMap,
+          editingFiles,
+          previewFiles,
+        ),
       // buildItems also reads fileAnnotationsMap, pending, viewedFiles,
       // fileStatsMap and editingFiles, and the omission is the point: these are
       // the items CodeView mounts with, and every later change to any of them
@@ -630,7 +665,12 @@ export const CodeViewWrapper = memo(
       for (const file of files) {
         merged.set(
           file.name,
-          mergeAnnotations(fileAnnotationsMap.get(file.name) ?? [], pending, file.name),
+          mergeAnnotations(
+            fileAnnotationsMap.get(file.name) ?? [],
+            pending,
+            file.name,
+            previewFiles.has(file.name),
+          ),
         )
       }
       syncItems(
@@ -644,7 +684,31 @@ export const CodeViewWrapper = memo(
           lastAnnotationsRef.current.set(name, next)
         },
       )
-    }, [files, fileAnnotationsMap, pending])
+    }, [files, fileAnnotationsMap, pending, previewFiles])
+
+    // Toggling preview has to swap the body on an already-mounted item —
+    // buildItems only runs at first mount. Turning preview off puts the real
+    // diff back; it deliberately does not restore a *manual* collapse from
+    // before, because the reviewer's last explicit action was "show me this
+    // file", and re-collapsing it would look like the toggle failed.
+    const lastPreviewRef = useRef<Set<string>>(new Set())
+    useEffect(() => {
+      const prev = lastPreviewRef.current
+      syncItems(
+        viewerRef.current,
+        files,
+        (name) => prev.has(name) !== previewFiles.has(name),
+        (item, name) => {
+          const real = files.find((f) => f.name === name)
+          if (!real) return
+          item.fileDiff = previewFiles.has(name) ? emptyDiffFor(real) : real
+          // An emptied body cannot also be collapsed, or the annotation
+          // standing in for it disappears too.
+          if (previewFiles.has(name)) item.collapsed = false
+        },
+      )
+      lastPreviewRef.current = new Set(previewFiles)
+    }, [files, previewFiles])
 
     // Viewed-state changes drive two things: re-render the header (chevron +
     // checkbox + collapsed-state) and auto-collapse the file. We treat
@@ -972,6 +1036,33 @@ export const CodeViewWrapper = memo(
         item: CodeViewItem<Metadata>,
       ) => {
         if (item.type !== 'diff') return null
+        if ('_preview' in annotation.metadata) {
+          const data = previewData.get(annotation.metadata.filePath)
+          if (!data) return null
+          // Deliberately *not* wrapped in AnnotationEventGuard. That guard
+          // stops mouse and pointer events at the React root so Pierre's
+          // InteractionManager doesn't read a drag inside a comment form as a
+          // line selection — but it also stops the document-level `mouseup`
+          // the pane needs to see its own text selection. A previewed file has
+          // no rendered rows left (see emptyDiffFor), so there is no line
+          // interaction here to protect against.
+          return (
+            <Suspense fallback={<div className="preview-pane-loading" />}>
+              <PreviewPane
+                filePath={annotation.metadata.filePath}
+                source={data.source}
+                format={data.format}
+                changedRanges={data.changedRanges}
+                comments={(fileAnnotationsMap.get(annotation.metadata.filePath) ?? []).map(
+                  (a) => a.metadata,
+                )}
+                onAddComment={onAddComment}
+                onDeleteComment={onDeleteComment}
+                onReplyComment={onReplyComment}
+              />
+            </Suspense>
+          )
+        }
         if ('_pending' in annotation.metadata) {
           const p = annotation.metadata
           const rangeLabel = p.charAnchor
@@ -1459,6 +1550,7 @@ function buildItems(
   viewedFiles: Set<string>,
   fileStatsMap: Record<string, { additions: number; deletions: number }>,
   editingFiles: Set<string>,
+  previewFiles: Set<string>,
 ): CodeViewItem<Metadata>[] {
   return files.map((fileDiff) => {
     const stats = fileStatsMap[fileDiff.name]
@@ -1466,29 +1558,77 @@ function buildItems(
     // Initial collapse: viewed files (carryover from a prior session) and
     // very large diffs. Manual chevron toggle still overrides.
     const editing = editingFiles.has(fileDiff.name)
+    const previewing = previewFiles.has(fileDiff.name)
     const collapsed =
       !editing && (viewedFiles.has(fileDiff.name) || changeCount > AUTO_COLLAPSE_CHANGE_THRESHOLD)
     return {
       id: fileDiff.name,
       type: 'diff' as const,
-      fileDiff,
+      fileDiff: previewing ? emptyDiffFor(fileDiff) : fileDiff,
       collapsed,
       edit: editing,
       annotations: mergeAnnotations(
         fileAnnotationsMap.get(fileDiff.name) ?? [],
         pending,
         fileDiff.name,
+        previewing,
       ),
       version: 0,
     }
   })
 }
 
+// A previewed file's rows have to go, but the document that replaces them is
+// a file-level *annotation* — and `collapsed` suppresses annotations along
+// with the rows, so it cannot be used for this. Handing CodeView a hunk-less
+// copy of the diff empties the body while leaving the item expanded, which is
+// the only state where the annotation renders.
+function emptyDiffFor(fileDiff: FileDiffMetadata): FileDiffMetadata {
+  return {
+    ...fileDiff,
+    hunks: [],
+    splitLineCount: 0,
+    unifiedLineCount: 0,
+    additionLines: [],
+    deletionLines: [],
+    // Pierre keys its highlight cache on this; reusing the real diff's key
+    // would serve the emptied body from the same slot as the full one.
+    cacheKey: `${fileDiff.cacheKey ?? fileDiff.name}#preview`,
+  }
+}
+
+const previewMetadataCache = new Map<string, PreviewMetadata>()
+
+// `annotationsEqual` compares metadata by reference, so this must return the
+// same object for the same file every time — a fresh one would rebuild the
+// annotation DOM on every render, remounting the pane and dropping whatever
+// draft, selection or scroll position it held.
+function previewMetadataFor(filePath: string): PreviewMetadata {
+  let cached = previewMetadataCache.get(filePath)
+  if (!cached) {
+    cached = { _preview: true, filePath }
+    previewMetadataCache.set(filePath, cached)
+  }
+  return cached
+}
+
 function mergeAnnotations(
   persisted: DiffLineAnnotation<ReviewComment>[],
   pending: Map<string, DraftMetadata>,
   fileName: string,
+  previewing = false,
 ): DiffLineAnnotation<Metadata>[] {
+  if (previewing) {
+    // While a file is previewed its rows are hidden, so the per-line comment
+    // annotations have nowhere to attach. The pane lists them itself.
+    return [
+      {
+        side: 'additions' as const,
+        lineNumber: 0,
+        metadata: previewMetadataFor(fileName),
+      },
+    ]
+  }
   if (pending.size === 0) return persisted
   const drafts: DiffLineAnnotation<Metadata>[] = []
   for (const d of pending.values()) {

@@ -2,9 +2,10 @@
 
 > **Status: stages 1–5 implemented.** Markdown and HTML previews, selection →
 > comment, comment display, suggest-from-source, and the sandboxed HTML path
-> all landed. Stage 6 (whole-surface docs mode) and stage 7 (`.ipynb`, `.csv`)
-> are not built. Deviations from the plan below are recorded in "What changed
-> in the building" at the end.
+> all landed, and the preview replaces a file's diff **in place** rather than
+> opening a modal. Stage 6 (whole-surface docs mode) and stage 7 (`.ipynb`,
+> `.csv`) are not built. Where the build diverged from this plan — including
+> one claim below that turned out to be wrong — is recorded at the end.
 
 A growing share of what gets reviewed in krit is not code: design docs,
 READMEs, plans, and self-contained HTML artifacts, all written by an agent. A
@@ -200,9 +201,11 @@ sees slightly more source than they highlighted, which is the right failure.
 
 ## Where the preview renders
 
-Pierre's `CodeView` owns the scroller and only knows `file`/`diff` items, so a
-rendered document cannot be inlined between diff rows without upstream
-support. Two placements that need no Pierre changes:
+**This section's original claim was wrong and is corrected below.** It read:
+"CodeView owns the scroller and only knows `file`/`diff` items, so a rendered
+document cannot be inlined without upstream support." It can, using two
+documented mechanisms and no upstream changes — see "Inlining, as built". The
+two placements originally proposed were:
 
 - **Per-file modal**, exactly the pattern `FileEditorModal` already
   establishes for whole-file editing, reached from a new button beside `Edit`
@@ -213,8 +216,28 @@ support. Two placements that need no Pierre changes:
   a docs-heavy branch actually wants — read the documents, comment as you go —
   but it is a second full review surface to build and maintain.
 
-Ship the modal first; docs mode is the natural follow-on once the anchoring
-and annotation-rendering pieces are proven.
+### Inlining, as built
+
+The modal shipped first and was then replaced. A previewed file keeps its
+header and its place in the shared scroll, and its diff body is swapped for
+the rendered document:
+
+- The document is a **file-level annotation** — `lineNumber: 0`, which Pierre
+  documents as "above the first hunk". `renderAnnotation` already renders
+  arbitrary React, and that output is **light DOM** projected by `slot`, so
+  `global.css` applies with no injected stylesheet and no shadow piercing.
+- The rows are removed by handing CodeView a **hunk-less copy of the
+  fileDiff**, not by collapsing. `collapsed: true` suppresses annotations too,
+  which would take the document with the rows.
+
+Three smaller obstacles, each recorded in `CLAUDE.md` because each fails
+silently: `AnnotationEventGuard` swallows the `mouseup` a selection depends
+on; the virtualizer's `transform` captures `position: fixed`, so the selection
+pill must be portaled to `<body>`; and the pane inherits Pierre's monospace
+font unless it sets its own.
+
+Docs mode (stage 6) is still unbuilt and is now a smaller step: a toggle that
+puts every previewable file into preview at once.
 
 ## Displaying comments over rendered content
 

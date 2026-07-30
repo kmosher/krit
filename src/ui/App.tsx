@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect, lazy, Suspense } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { parsePatchFiles, parseDiffFromFile } from '@pierre/diffs'
 import type { FileDiffMetadata, FileContents } from '@pierre/diffs'
 import type { ReviewComment } from '../types'
@@ -28,12 +28,6 @@ import {
   type PreviewFormat,
 } from './utils/previewFormat'
 
-// Split out: the markdown renderer and its plugins are ~100 kB gzipped, which
-// is a quarter of the whole bundle, and a review that never opens a document
-// should never pay for it. Loaded on the first Preview click.
-const PreviewModal = lazy(() =>
-  import('./components/PreviewModal').then((m) => ({ default: m.PreviewModal })),
-)
 
 // Split a merged multi-file patch into one fragment per file, in patch
 // order. Matches the section-boundary rule useDiff's spliceFilePatches /
@@ -219,13 +213,13 @@ export function App() {
   // Loaded lazily on Edit click (small fetch) rather than carrying every
   // file's contents through React state.
   const [editingFile, setEditingFile] = useState<{ path: string; contents: string } | null>(null)
-  // Active rendered-document preview, loaded on the same terms as the editor:
-  // fetched fresh on click rather than held for every file.
-  const [previewFile, setPreviewFile] = useState<{
-    path: string
-    contents: string
-    format: PreviewFormat
-  } | null>(null)
+  // Files showing their rendered document in place of their diff, with the
+  // content loaded on the same terms as the editor's: fetched fresh on the
+  // click rather than held for every file. Several can be open at once —
+  // that is the point of inlining rather than opening one at a time.
+  const [previewFiles, setPreviewFiles] = useState<
+    Map<string, { contents: string; format: PreviewFormat }>
+  >(() => new Map())
   // Files with an open draft (comment/suggest form) — merged with
   // editingFile below into the "active" set that gates 'live-unless-active'.
   const [activeDraftFiles, setActiveDraftFiles] = useState<Set<string>>(() => new Set())
@@ -392,10 +386,22 @@ export function App() {
     [rememberTag, reportError],
   )
 
-  // Same fresh-from-disk read as handleEditFile, and for the same reason: what
-  // /api/diff bundled as 'new' can already be behind what the agent wrote.
-  const handlePreviewFile = useCallback(
+  // Toggle: a second click closes the preview and puts the diff back. Opening
+  // does the same fresh-from-disk read as handleEditFile, and for the same
+  // reason — what /api/diff bundled as 'new' can already be behind what the
+  // agent wrote.
+  const handleTogglePreview = useCallback(
     async (filePath: string) => {
+      let closing = false
+      setPreviewFiles((prev) => {
+        if (!prev.has(filePath)) return prev
+        closing = true
+        const next = new Map(prev)
+        next.delete(filePath)
+        return next
+      })
+      if (closing) return
+
       const format = previewFormatFor(filePath)
       if (!format) return
       const res = await fetch(`/api/file-content?path=${encodeURIComponent(filePath)}&version=new`)
@@ -403,7 +409,8 @@ export function App() {
         reportError(`Could not load ${filePath}: HTTP ${res.status}`)
         return
       }
-      setPreviewFile({ path: filePath, contents: await res.text(), format })
+      const contents = await res.text()
+      setPreviewFiles((prev) => new Map(prev).set(filePath, { contents, format }))
     },
     [reportError],
   )
@@ -752,19 +759,28 @@ export function App() {
     return set
   }, [files])
 
-  // Which of the previewed file's lines this diff touched, so the renderer can
-  // mark the blocks that changed. Scoped to the open file: parsing every
-  // fragment on every render would cost the whole patch for one document.
-  const previewChangedRanges = useMemo(() => {
-    if (!previewFile) return []
-    const fragment = splitFilePatches(patch ?? '').get(previewFile.path)
-    return fragment ? toLineRanges(changedNewLines(fragment)) : []
-  }, [previewFile, patch])
+  // What each open preview needs to render: its source, and which of its lines
+  // this diff touched. Only the open files' patch fragments are parsed —
+  // splitting the whole patch for one document would cost the whole patch.
+  const previewData = useMemo(() => {
+    const map = new Map<
+      string,
+      { source: string; format: PreviewFormat; changedRanges: Array<[number, number]> }
+    >()
+    if (previewFiles.size === 0) return map
+    const fragments = splitFilePatches(patch ?? '')
+    for (const [path, { contents, format }] of previewFiles) {
+      const fragment = fragments.get(path)
+      map.set(path, {
+        source: contents,
+        format,
+        changedRanges: fragment ? toLineRanges(changedNewLines(fragment)) : [],
+      })
+    }
+    return map
+  }, [previewFiles, patch])
 
-  const previewComments = useMemo(
-    () => (previewFile ? comments.filter((c) => c.filePath === previewFile.path) : []),
-    [previewFile, comments],
-  )
+  const previewPaths = useMemo(() => new Set(previewFiles.keys()), [previewFiles])
 
   const fileAnnotationsMap = useMemo(() => {
     const map = new Map<string, { side: ReviewComment['side']; lineNumber: number; metadata: ReviewComment }[]>()
@@ -907,8 +923,10 @@ export function App() {
             onDeleteRange={handleDeleteRange}
             onActiveFileChange={setActiveFile}
             onEditFile={handleEditFile}
-            onPreviewFile={handlePreviewFile}
+            onPreviewFile={handleTogglePreview}
             previewableFiles={previewableFiles}
+            previewFiles={previewPaths}
+            previewData={previewData}
             editingFiles={inlineEditFiles}
             onToggleEdit={handleToggleEdit}
             onEditComplete={handleInlineEditComplete}
@@ -920,21 +938,6 @@ export function App() {
           />
         </main>
       </div>
-      {previewFile && (
-        <Suspense fallback={<div className="preview-modal-backdrop preview-modal-loading" />}>
-          <PreviewModal
-            filePath={previewFile.path}
-            source={previewFile.contents}
-            format={previewFile.format}
-            changedRanges={previewChangedRanges}
-            comments={previewComments}
-            onClose={() => setPreviewFile(null)}
-            onAddComment={addComment}
-            onDeleteComment={removeComment}
-            onReplyComment={replyToComment}
-          />
-        </Suspense>
-      )}
       {editingFile && (
         <FileEditorModal
           filePath={editingFile.path}

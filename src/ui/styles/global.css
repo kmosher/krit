@@ -2060,86 +2060,14 @@ body {
     color: var(--text);
 }
 
-.preview-modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 32px;
-}
 
-.preview-modal {
-    width: 100%;
-    max-width: 1400px;
-    height: 100%;
-    max-height: 92vh;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
-}
 
-.preview-modal-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-}
 
-.preview-modal-path {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 13px;
-    font-weight: 600;
-}
 
-.preview-modal-format,
-.preview-modal-count {
-    font-size: 11px;
-    color: var(--text-secondary);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1px 8px;
-}
 
-.preview-modal-split {
-    flex: 1;
-    display: flex;
-    min-height: 0;
-}
 
-.preview-modal-content {
-    flex: 1;
-    overflow: auto;
-    padding: 28px 40px 96px;
-    min-width: 0;
-}
 
-.preview-modal-frame {
-    width: 100%;
-    border: 0;
-    display: block;
-    background: #fff;
-}
 
-.preview-modal-rail {
-    width: 380px;
-    flex-shrink: 0;
-    border-left: 1px solid var(--border);
-    background: var(--surface);
-    overflow: auto;
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
 
 .preview-rail-empty {
     font-size: 12px;
@@ -2185,6 +2113,12 @@ body {
 /* ---- Markdown document styling ---- */
 
 .markdown-preview-body {
+    /* Inlined into CodeView, this inherits Pierre's monospace code font from
+       the surrounding diff container. A document is prose; say so explicitly
+       rather than depending on what it is nested in. */
+    font-family:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica,
+        Arial, sans-serif;
     max-width: 46rem;
     margin: 0 auto;
     font-size: 15px;
@@ -2315,11 +2249,6 @@ body {
     background: var(--success);
 }
 
-/* Holds the backdrop while the preview chunk loads, so the click has a
-   visible effect on a cold cache instead of appearing to do nothing. */
-.preview-modal-loading {
-    background: rgba(0, 0, 0, 0.3);
-}
 
 /* The rail is much narrower than an annotation row in the diff, so the form's
    four actions have to be allowed to wrap rather than overflowing the card. */
@@ -2348,4 +2277,46 @@ body {
 
 .markdown-preview-body table[data-changed]::before {
     content: none;
+}
+
+
+/* ---- Rendered document, inlined in place of a file's diff ---- */
+
+.preview-pane {
+    display: flex;
+    align-items: flex-start;
+    gap: 0;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+}
+
+.preview-pane-content {
+    flex: 1;
+    min-width: 0;
+    padding: 24px 40px 32px;
+}
+
+.preview-pane-frame {
+    width: 100%;
+    border: 0;
+    display: block;
+    background: #fff;
+}
+
+.preview-pane-rail {
+    width: 340px;
+    flex-shrink: 0;
+    align-self: stretch;
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* Reserves a little height while the preview chunk loads, so the file does not
+   visibly collapse to nothing between click and render. */
+.preview-pane-loading {
+    min-height: 120px;
 }
