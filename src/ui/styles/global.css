@@ -2293,13 +2293,18 @@ body {
 }
 
 /* A block whose source lines this diff touched. The stripe sits in the left
-   gutter so it reads as a change bar without disturbing the text's measure. */
-.markdown-preview-body [data-changed] {
+   gutter so it reads as a change bar without disturbing the text's measure.
+   Only the document's top-level blocks are marked. `data-changed` is stamped
+   on every element overlapping a changed line, inline ones included, so
+   matching any deeper would draw a stripe 18px to the left of a `<strong>` or
+   a `<code>` — which is not a gutter, it is the middle of the sentence. A
+   nested block needs no stripe of its own either: the top-level block
+   containing it already carries one. */
+.markdown-preview-body > [data-changed] {
     position: relative;
 }
 
-.markdown-preview-body > [data-changed]::before,
-.markdown-preview-body > * > [data-changed]::before {
+.markdown-preview-body > [data-changed]::before {
     content: '';
     position: absolute;
     left: -18px;
