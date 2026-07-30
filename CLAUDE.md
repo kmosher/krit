@@ -60,7 +60,21 @@ skill together when you do.
     rather than burning a day on a repro.
   - **The state file is keyed by worktree+branch**, so two test servers in one
     checkout share it, including per-file collapsed state, which changes the
-    layout under the next run. Delete it between runs.
+    layout under the next run. Delete it between runs. It carries **comments**
+    too, so a server started for a "clean" run can come up holding an earlier
+    run's set — and a diff rendered for six anchors you forgot about looks
+    nothing like one rendered for the one anchor you just added.
+  - **Three ways to misread what rendered**, each of which yields a confident
+    wrong answer rather than an error. `shadowRoot.textContent` does not
+    contain annotations — they are slotted light DOM (see the `SlotPortals`
+    note below), so a comment can be on screen and absent from that string.
+    Rows and hunk separators are **virtualized**, so any count, or any "is this
+    still collapsed" check, is really a question about where the surface
+    happens to be scrolled. And a scroll loop is only as good as its scroller:
+    `.diff-viewer` is not it, and driving the wrong element silently measures
+    one screen N times. When the question is "what layout did this produce",
+    add a `console.log` to the code and read it, or take a screenshot — do not
+    interrogate the DOM from the outside.
   - `waitUntil: 'networkidle'` never fires: the comment poll and the SSE stream
     keep a request in flight for the life of the page. Wait on
     `domcontentloaded` and then on a selector.
