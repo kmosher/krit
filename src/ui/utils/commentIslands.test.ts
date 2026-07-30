@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { parseDiffFromFile, type FileDiffMetadata } from '@pierre/diffs'
-import { spliceCommentIslands } from './commentIslands'
+import { islandOwnsLine, spliceCommentIslands } from './commentIslands'
 
 // These run against real `parseDiffFromFile` output rather than hand-built
 // fixtures. The whole approach rests on how Pierre numbers hunks, and a fixture
@@ -40,6 +40,33 @@ function checkLayout(fileDiff: FileDiffMetadata) {
   expect(fileDiff.splitLineCount).toBe(split + trailing)
   expect(fileDiff.unifiedLineCount).toBe(unified + trailing)
 }
+
+describe('islandOwnsLine', () => {
+  // The reveal path defers to islanding on exactly these lines. If the two
+  // ever disagree, a reveal fires first, expands from the hunk edge, and the
+  // expansion outlives the island that was about to make it unnecessary.
+  it('claims a line stranded in a long gap', () => {
+    expect(islandOwnsLine(diffWithChangesAt(3, 298), 150)).toBe(true)
+  })
+
+  it('leaves a line already inside a hunk to the reveal path', () => {
+    expect(islandOwnsLine(diffWithChangesAt(3, 298), 4)).toBe(false)
+  })
+
+  it('leaves a short gap to the reveal path', () => {
+    expect(islandOwnsLine(diffWithChangesAt(100, 130), 115)).toBe(false)
+  })
+
+  it('agrees with the splice about which gaps it takes', () => {
+    // Same threshold, read two ways: anything islandOwnsLine claims must come
+    // back islanded, and anything it disclaims must leave the diff untouched.
+    const diff = diffWithChangesAt(3, 298)
+    for (const line of [4, 115, 150, 250, 350]) {
+      const owned = islandOwnsLine(diff, line)
+      expect(spliceCommentIslands(diff, [line]) !== diff).toBe(owned)
+    }
+  })
+})
 
 describe('spliceCommentIslands', () => {
   it('the layout contract holds for upstream output as written', () => {

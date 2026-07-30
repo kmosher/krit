@@ -205,6 +205,13 @@ skill together when you do.
   - The anchor set is read off the **un-islanded** diff. Read it back off the
     result and every anchor is inside a hunk, the islands drop, and the next
     pass strands them again.
+  - **Reveal and islanding must agree on who owns a line** (`islandOwnsLine`),
+    because a Pierre expansion is permanent on the instance. A comment arriving
+    mid-session updates the item's annotations before the islanded `fileDiff`
+    reaches it, so an unguarded reveal wins that race, expands from the hunk
+    edge, and nothing can take it back — the session then drifts steadily away
+    from the layout a reload produces, which is what makes this look like a
+    Pierre bug rather than ours.
   - An island needs the gap's old/new offset (`deletionStart`), or split view
     renders the wrong text in the left column. Unit tests cover the arithmetic;
     it is worth re-checking in a browser on a diff whose line numbers actually

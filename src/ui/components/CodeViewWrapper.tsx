@@ -35,6 +35,7 @@ import {
 } from '../utils/selectionMapping'
 import { computeSingleEdit } from '../utils/textEdits'
 import { linesToReveal } from '../utils/collapsedContext'
+import { islandOwnsLine } from '../utils/commentIslands'
 import { usePendingDrafts } from '../hooks/usePendingDrafts'
 
 type DraftMetadata = {
@@ -1496,6 +1497,10 @@ export const CodeViewWrapper = memo(
         let revealed = false
         if (reveal && passes < MAX_REVEAL_PASSES) {
           for (const line of linesToReveal(item.fileDiff, item.annotations ?? [])) {
+            // Leave the long gaps to islanding, which is about to replace this
+            // fileDiff — see islandOwnsLine. Expanding here would win the race
+            // and never let go.
+            if (islandOwnsLine(item.fileDiff, line)) continue
             if (reveal(line)) revealed = true
           }
         }

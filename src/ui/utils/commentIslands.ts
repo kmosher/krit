@@ -121,6 +121,26 @@ function islandsFor(gap: Gap, anchoredLines: readonly number[]): LineRange[] | n
 }
 
 /**
+ * Whether islanding, rather than the reveal path, is responsible for making
+ * this new-file line visible.
+ *
+ * The two mechanisms have to agree on who owns which line or they fight. A
+ * comment arriving mid-session updates the item's annotations before the
+ * islanded `fileDiff` reaches it, so the reveal in `handlePostRender` would
+ * see the line still stranded in the original gap and expand from the hunk
+ * edge — and a Pierre expansion is permanent on the instance, so the island
+ * that lands a moment later cannot undo it. The session then drifts away from
+ * the layout a reload produces. Deferring on the gaps islanding will take
+ * keeps that from ever starting.
+ */
+export function islandOwnsLine(fileDiff: FileDiffMetadata, line: number): boolean {
+  if (fileDiff.isPartial || fileDiff.hunks.length === 0) return false
+  return gapsOf(fileDiff).some(
+    (gap) => line >= gap.start && line <= gap.end && gap.end - gap.start + 1 > MIN_ISLANDED_GAP,
+  )
+}
+
+/**
  * A copy of `fileDiff` with a context-only hunk around each anchored new-file
  * line that would otherwise be stranded in a long collapsed region. Returns the
  * original object when nothing needs islanding, so callers can use identity to
