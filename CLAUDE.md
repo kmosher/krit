@@ -115,9 +115,19 @@ skill together when you do.
   `requestAnimationFrame`, which is why `attachEditors` forces a synchronous
   render rather than waiting for a frame — when something updates for a human
   and not for an agent, suspect the tab's visibility before the feature.
-- The launch message says "Asked the krit app to open" because `open::that`
-  Ok only means the OS accepted the URL; a 10s post-launch check reports if
-  no UI actually connected.
+- The launch message says "Asked the krit app to open" because the launcher
+  returning Ok only means the OS accepted the URL; a 10s post-launch check
+  reports if no UI actually connected.
+- **Launch `krit` itself with the sandbox off** (`dangerouslyDisableSandbox:
+  true`), as the krit skill says. The `krit://` deep link — and the browser
+  tab, in the other launcher mode — is opened by a *spawned* `open`, and the
+  Bash sandbox blocks that child even though `krit` runs fine. Nothing in the
+  settings can fix it from krit's side: the `open *` exclusion matches the
+  command *text* of a Bash call, so it never applies to a process krit forks.
+  The result is a server with no window. `spawn_deep_link` goes through
+  `/usr/bin/open` directly rather than `open::that` so the launcher's stderr
+  survives into the error — that is what tells a denial (`procNotFound`) apart
+  from a missing app, which an exit status alone cannot.
 
 ## Known gaps
 

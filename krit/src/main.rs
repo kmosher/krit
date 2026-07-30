@@ -555,6 +555,56 @@ fn window_title_from(repo: &str, branch: &str) -> Option<String> {
     }
 }
 
+/// Hands the deep link to the OS, reporting *why* it failed rather than only
+/// that it did. `open::that` collapses everything into an exit status, which is
+/// how a sandbox denial and a missing app arrive looking identical; going
+/// through the launcher directly keeps its stderr, which distinguishes them.
+#[cfg(target_os = "macos")]
+fn spawn_deep_link(link: &str) -> Result<(), String> {
+    match std::process::Command::new("/usr/bin/open")
+        .arg("--")
+        .arg(link)
+        .output()
+    {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = stderr.trim();
+            if stderr.is_empty() {
+                Err(format!("`open` exited with {}", out.status))
+            } else {
+                Err(format!("`open` exited with {}: {stderr}", out.status))
+            }
+        }
+        Err(err) => Err(format!("could not run `open`: {err}")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_deep_link(link: &str) -> Result<(), String> {
+    open::that(link).map_err(|err| err.to_string())
+}
+
+/// What to print when the deep link doesn't launch. The failure is worth this
+/// much text because of who hits it: the link is opened by a *child* process,
+/// so an agent-driven session trips it whenever its own sandbox blocks that
+/// child — `krit` itself runs fine, no window appears, and the old wording
+/// ("is it installed?") sent the reader after a healthy app install. Naming the
+/// spawned launcher, and the one flag that fixes it, is the difference between
+/// a dead end and a one-line fix.
+fn deep_link_failure_message(reason: &str) -> String {
+    let mut out = String::new();
+    out.push_str("Could not hand this review to the krit app.\n");
+    out.push_str(&format!("  reason: {reason}\n"));
+    out.push_str(
+        "  The krit:// link is opened by a spawned `open`, which a sandbox can\n\
+         \x20 block even when krit itself runs fine. Under Claude Code, re-run\n\
+         \x20 the krit command with dangerouslyDisableSandbox: true. Otherwise\n\
+         \x20 check that krit.app is installed and claims the krit:// scheme.\n",
+    );
+    out
+}
+
 fn launch_review_ui(url: &str) {
     let loaded = settings::load_settings();
     // The UI gets this as a strip; the launcher is the only place a `launcher`
@@ -573,16 +623,14 @@ fn launch_review_ui(url: &str) {
         if let Some(title) = review_window_title() {
             deep_link.push_str(&format!("&title={}", urlencode(&title)));
         }
-        match open::that(&deep_link) {
+        match spawn_deep_link(&deep_link) {
             // Ok only means the OS accepted the URL — the app may not be
             // running or may drop the deep link. Don't claim it opened; the
             // connect check in serve() reports whether a UI actually arrived.
             Ok(()) => {
                 println!("Asked the krit app to open this review.")
             }
-            Err(err) => eprintln!(
-                "Could not reach the krit app ({err}); is it installed? Falling back to the URL."
-            ),
+            Err(reason) => eprint!("{}", deep_link_failure_message(&reason)),
         }
         print_manual_url_hint(url);
         return;
@@ -613,6 +661,31 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- deep-link failure diagnosis -----------------------------------
+
+    #[test]
+    fn a_failed_deep_link_names_the_sandbox_and_the_flag_that_fixes_it() {
+        let msg = deep_link_failure_message("`open` exited with exit status: 1");
+        // The reason the launcher gave has to survive into the output — it is
+        // what separates a blocked child from a missing app.
+        assert!(msg.contains("`open` exited with exit status: 1"), "{msg}");
+        // An agent reading this needs the cause and the remedy, not a guess
+        // about the app install. Both halves are the point of the message.
+        assert!(msg.contains("sandbox"), "{msg}");
+        assert!(msg.contains("dangerouslyDisableSandbox: true"), "{msg}");
+        // The old wording sent readers to reinstall a healthy app.
+        assert!(!msg.contains("is it installed?"), "{msg}");
+    }
+
+    #[test]
+    fn the_deep_link_failure_still_points_at_the_app_when_the_sandbox_is_not_the_cause() {
+        // Sandbox first, but a genuinely missing app is the other real cause
+        // and must not be dropped in favour of it.
+        let msg = deep_link_failure_message("could not run `open`: No such file or directory");
+        assert!(msg.contains("krit.app"), "{msg}");
+        assert!(msg.contains("krit:// scheme"), "{msg}");
     }
 
     // --- argv dispatch -------------------------------------------------
