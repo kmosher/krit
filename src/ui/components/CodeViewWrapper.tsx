@@ -151,6 +151,11 @@ const WRAP_SAMPLE_LIMIT = 2000
 // Pierre's own defaults stand.
 const MEASURE_ATTEMPTS = 60
 
+// Frames to keep an open draft pinned in place after a diff update. Long enough
+// to outlast the highlight worker pool's repaints (each of which can move rows
+// above the draft again), short enough that it can't fight a later scroll.
+const ANCHOR_SETTLE_FRAMES = 30
+
 // Average visual rows per source line, in pixels — what to hand Pierre as
 // `lineHeight`. Under-reserving is the bug being fixed here (the layout grows
 // as rows are measured on approach, so the bottom recedes as you scroll toward
@@ -659,6 +664,64 @@ export const CodeViewWrapper = memo(
     // remount it wanted is owed and runs once the last session closes.
     const pendingStructuralRef = useRef(false)
     const [structuralRevision, setStructuralRevision] = useState(0)
+
+    // Keeping the reviewer's scroll position is not the same as keeping their
+    // *place*: an agent's write to any file above the viewport changes that
+    // file's height, and a scrollTop the update never touched then points
+    // somewhere else entirely — which, mid-sentence, walks the comment form off
+    // the screen. So anchor on the open draft instead of on a number: note
+    // where it sits before the update and put it back afterwards.
+    //
+    // Only while a draft is open. With nothing being typed into, scroll
+    // position is the ordinary thing to preserve and Pierre reanchors it
+    // itself.
+    const captureDraftAnchor = (): { key: string; top: number } | null => {
+      const container = scrollRef.current
+      const el = container?.querySelector<HTMLElement>('[data-draft-key]')
+      if (!container || !el) return null
+      const key = el.dataset.draftKey
+      if (!key) return null
+      return { key, top: el.getBoundingClientRect().top - container.getBoundingClientRect().top }
+    }
+
+    const anchorSettleRef = useRef<number | null>(null)
+    // A single post-update correction is not enough: the rows an update
+    // produces are painted by the highlight worker pool over the following
+    // frames, and each pass can move everything below it again. Correct on a
+    // short frame loop instead, and re-find the element by key each time —
+    // a remount rebuilds the form, so its node identity does not survive.
+    const holdDraftAnchor = (anchor: { key: string; top: number } | null) => {
+      if (!anchor) return
+      if (anchorSettleRef.current !== null) cancelAnimationFrame(anchorSettleRef.current)
+      let framesLeft = ANCHOR_SETTLE_FRAMES
+      let expected: number | null = null
+      const step = () => {
+        anchorSettleRef.current = null
+        const container = scrollRef.current
+        if (!container) return
+        // The reviewer scrolling outranks the anchor: if the position moved by
+        // anything other than our own correction, they took over. Stop.
+        if (expected !== null && Math.abs(container.scrollTop - expected) > 1) return
+        const el = container.querySelector<HTMLElement>(
+          `[data-draft-key="${CSS.escape(anchor.key)}"]`,
+        )
+        if (el) {
+          const now = el.getBoundingClientRect().top - container.getBoundingClientRect().top
+          const delta = now - anchor.top
+          if (Math.abs(delta) > 0.5) container.scrollTop += delta
+        }
+        expected = container.scrollTop
+        if (--framesLeft > 0) anchorSettleRef.current = requestAnimationFrame(step)
+      }
+      anchorSettleRef.current = requestAnimationFrame(step)
+    }
+    useEffect(
+      () => () => {
+        if (anchorSettleRef.current !== null) cancelAnimationFrame(anchorSettleRef.current)
+      },
+      [],
+    )
+
     useEffect(() => {
       const prevFiles = lastFileRef.current
       const nextFiles = new Map<string, FileDiffMetadata>()
@@ -669,6 +732,8 @@ export const CodeViewWrapper = memo(
         lastFileRef.current = nextFiles
         return
       }
+
+      const draftAnchor = captureDraftAnchor()
 
       const sameFileSet =
         prevFiles.size === nextFiles.size && [...prevFiles.keys()].every((name) => nextFiles.has(name))
@@ -694,6 +759,7 @@ export const CodeViewWrapper = memo(
         lastFileRef.current = nextFiles
         pendingScrollRestoreRef.current = scrollRef.current?.scrollTop ?? null
         setStructuralRevision((r) => r + 1)
+        holdDraftAnchor(draftAnchor)
         return
       }
 
@@ -707,6 +773,7 @@ export const CodeViewWrapper = memo(
           if (next) item.fileDiff = next
         },
       )
+      holdDraftAnchor(draftAnchor)
     }, [files])
 
     useLayoutEffect(() => {
@@ -1032,7 +1099,13 @@ export const CodeViewWrapper = memo(
         container.removeEventListener('mousedown', handleMouseDown)
         container.removeEventListener('mouseup', handleMouseUp)
       }
-    }, [])
+      // `structuralRevision` keys the CodeView, and `containerRef` is *its*
+      // element — so a file-set change (an agent's rewrite adding or dropping a
+      // file, then a refresh) hands scrollRef a brand new node. Bound once, the
+      // listeners stay on the detached one and the pill silently stops
+      // appearing for the rest of the session, with everything else still
+      // working. Rebind on every remount.
+    }, [structuralRevision])
 
     // Dismiss the pill on Escape or a click outside it. Clicking the pill's
     // own buttons is a mousedown too, so exclude anything inside pillRef —
@@ -1141,6 +1214,7 @@ export const CodeViewWrapper = memo(
               <CommentForm
                 filePath={item.fileDiff.name}
                 originalLines={originalLines}
+                draftKey={draftKey(p)}
                 initialBody={p.body}
                 initialSuggestMode={p.suggestMode}
                 initialSuggestionText={p.suggestionText}

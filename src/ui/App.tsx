@@ -201,6 +201,31 @@ export function undoToastLabel(queue: readonly { message: string }[]): string | 
   return queue.length === 1 ? queue[0].message : `${queue[0].message} (+${queue.length - 1} more)`
 }
 
+export type FileAnnotation = {
+  side: ReviewComment['side']
+  lineNumber: number
+  metadata: ReviewComment
+}
+
+// Group comments by file for CodeView, choosing the line each one hangs off.
+//
+// That line is the range's *last*, not its first: Pierre draws an annotation
+// below the line it names, so anchoring at the start would split the block the
+// comment is about. It also keeps the posted comment where the draft form was
+// while it was being written — `mergeAnnotations` anchors drafts at endLine.
+export function buildFileAnnotations(comments: ReviewComment[]): Map<string, FileAnnotation[]> {
+  const map = new Map<string, FileAnnotation[]>()
+  for (const c of comments) {
+    let list = map.get(c.filePath)
+    if (!list) {
+      list = []
+      map.set(c.filePath, list)
+    }
+    list.push({ side: c.side, lineNumber: c.endLine ?? c.lineNumber, metadata: c })
+  }
+  return map
+}
+
 export function editToggleAction(state: {
   editing: boolean
   stale: boolean
@@ -784,22 +809,7 @@ export function App() {
 
   const previewPaths = useMemo(() => new Set(previewFiles.keys()), [previewFiles])
 
-  const fileAnnotationsMap = useMemo(() => {
-    const map = new Map<string, { side: ReviewComment['side']; lineNumber: number; metadata: ReviewComment }[]>()
-    for (const c of comments) {
-      let list = map.get(c.filePath)
-      if (!list) {
-        list = []
-        map.set(c.filePath, list)
-      }
-      list.push({
-        side: c.side,
-        lineNumber: c.lineNumber,
-        metadata: c,
-      })
-    }
-    return map
-  }, [comments])
+  const fileAnnotationsMap = useMemo(() => buildFileAnnotations(comments), [comments])
 
   // A comment anchored in a long collapsed region renders nowhere, and opening
   // that region from its edge would render every line between the edge and the

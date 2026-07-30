@@ -7,8 +7,10 @@ import {
   withEntry,
   withoutEntry,
   undoToastLabel,
+  buildFileAnnotations,
 } from './App'
 import type { FileContentsMap } from './hooks/useDiff'
+import type { ReviewComment } from '../types'
 
 function fragment(path: string, additions = 1, deletions = 1): string {
   const lines = [
@@ -179,5 +181,43 @@ describe('undoToastLabel', () => {
     expect(
       undoToastLabel([{ message: 'Deleted "x"' }, { message: 'Deleted "y"' }, { message: 'Deleted "z"' }]),
     ).toBe('Deleted "x" (+2 more)')
+  })
+})
+
+describe('buildFileAnnotations', () => {
+  const comment = (over: Partial<ReviewComment>): ReviewComment =>
+    ({
+      id: 'c1',
+      filePath: 'src/a.rs',
+      side: 'additions',
+      lineNumber: 10,
+      lineContent: 'x',
+      body: 'hm',
+      status: 'open',
+      timestamp: 0,
+      ...over,
+    }) as ReviewComment
+
+  it('hangs a range comment off its last line, not its first', () => {
+    // Anchored at the start, the comment renders in the middle of the block it
+    // is about — Pierre draws annotations below the line they name.
+    const map = buildFileAnnotations([comment({ lineNumber: 10, endLine: 14 })])
+    expect(map.get('src/a.rs')?.[0].lineNumber).toBe(14)
+  })
+
+  it('falls back to lineNumber when endLine is absent', () => {
+    // endLine is optional on the wire for comment stores krit didn't write.
+    const map = buildFileAnnotations([comment({ lineNumber: 7, endLine: undefined })])
+    expect(map.get('src/a.rs')?.[0].lineNumber).toBe(7)
+  })
+
+  it('groups every comment on a file into one list', () => {
+    const map = buildFileAnnotations([
+      comment({ id: 'a' }),
+      comment({ id: 'b', lineNumber: 20, endLine: 20 }),
+      comment({ id: 'c', filePath: 'src/b.rs' }),
+    ])
+    expect(map.get('src/a.rs')).toHaveLength(2)
+    expect(map.get('src/b.rs')).toHaveLength(1)
   })
 })

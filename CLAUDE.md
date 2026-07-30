@@ -154,6 +154,22 @@ skill together when you do.
   `requestAnimationFrame`, which is why `attachEditors` forces a synchronous
   render rather than waiting for a frame — when something updates for a human
   and not for an agent, suspect the tab's visibility before the feature.
+- **`scrollRef.current` is CodeView's element, and CodeView is keyed by
+  `structuralRevision`** — so every listener or observer bound to it must have
+  `structuralRevision` in its deps. A change to the *file set* (an agent adding
+  or dropping a file) remounts the view and hands the ref a new node; anything
+  bound once keeps working against the detached one, with no error and nothing
+  else visibly wrong. That is how the selection pill died mid-session: drags
+  stopped producing a pill while hover, comments and scrolling all still worked.
+- **An open draft is anchored by element, not by scrollTop.** Restoring a
+  numeric scroll position across a diff update preserves the number and loses
+  the place: a write to any file above the viewport changes its height and
+  walks the comment form off the screen mid-sentence. `captureDraftAnchor` /
+  `holdDraftAnchor` note where the form sits and put it back, re-finding it by
+  `data-draft-key` (a remount rebuilds the node) over a bounded frame loop —
+  one correction is not enough, since the highlight worker pool repaints rows
+  above it for several frames afterwards. The loop yields the moment the
+  scroll position moves by anything other than its own correction.
 - **Pierre's custom renderers are light DOM, projected by `slot`.** `SlotPortals`
   React-portals every `render*` callback's output into `renderedItem.element`
   with a `slot="…"` attribute, and the shadow root's `<slot>` elements pull it

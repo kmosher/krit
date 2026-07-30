@@ -215,6 +215,36 @@ describe('CommentForm — suggest mode', () => {
     expect(onQueue).toHaveBeenCalledWith('', { newLines: ['b'] })
   })
 
+  it('cancels without asking when the file changed under an untouched rewrite', () => {
+    // `originalLines` is re-derived from the item's live fileDiff, so an agent
+    // writing to the file moves it out from under an open form. Measured
+    // against the moved value, a form nobody has typed in looks edited — and
+    // Cancel asks the reviewer to confirm discarding a rewrite they never
+    // wrote. Dirtiness is a fact about their keystrokes, not about the file.
+    const onCancel = vi.fn()
+    const { rerender } = render(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 1"
+        initialSuggestMode
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    rerender(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 99"
+        initialSuggestMode
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('seeds the rewrite from the selected lines', () => {
     // Suggesting starts from what is there — an empty editor would make the
     // reviewer retype the line before changing one character of it.

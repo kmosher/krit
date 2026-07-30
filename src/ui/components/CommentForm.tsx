@@ -29,6 +29,10 @@ interface CommentFormProps {
   initialBody?: string
   initialSuggestMode?: boolean
   initialSuggestionText?: string
+  // Identifies the draft this form is editing, stamped onto the root element so
+  // CodeViewWrapper can find the same form again after a remount and hold it
+  // still on screen (see `captureDraftAnchor`).
+  draftKey?: string
   onBodyChange?(body: string): void
   onSuggestModeChange?(suggestMode: boolean): void
   onSuggestionTextChange?(text: string): void
@@ -58,6 +62,7 @@ export function CommentForm({
   initialBody,
   initialSuggestMode,
   initialSuggestionText,
+  draftKey,
   onBodyChange,
   onSuggestModeChange,
   onSuggestionTextChange,
@@ -79,7 +84,20 @@ export function CommentForm({
       return next
     })
   }
+  // What the rewrite is measured against for "has the user changed anything",
+  // frozen at mount. `originalLines` is re-derived from the item's fileDiff on
+  // every render, so an agent writing to the file while a draft is open moves
+  // it — and comparing against the moved value asks "discard your suggested
+  // rewrite?" on the way out of a form nobody typed in.
+  const originalAtMountRef = useRef(originalLines)
+  // Whether the rewrite has actually been edited. A hydrated draft (reload, or
+  // a remount that rebuilt the form) has no keystroke to have seen, so it falls
+  // back to the comparison — there the two are known to agree at mount.
+  const [suggestionEdited, setSuggestionEdited] = useState(
+    () => (initialSuggestionText ?? originalLines) !== originalLines,
+  )
   const setSuggestionText = (v: string) => {
+    if (v !== suggestionText) setSuggestionEdited(true)
     setSuggestionTextState(v)
     onSuggestionTextChange?.(v)
   }
@@ -137,7 +155,8 @@ export function CommentForm({
   // Same staleness problem for the Escape handler's "is there a non-trivial
   // edit to lose" check.
   const suggestionDirtyRef = useRef(false)
-  suggestionDirtyRef.current = suggestionText !== originalLines && suggestionText.trim() !== ''
+  suggestionDirtyRef.current =
+    suggestionEdited && suggestionText !== originalAtMountRef.current && suggestionText.trim() !== ''
   // The question only makes sense while there is still a rewrite to lose, so
   // reverting the text or leaving suggest mode takes it back down rather than
   // leaving it on screen asking about something that no longer exists.
@@ -291,7 +310,11 @@ export function CommentForm({
   ) : null
 
   return (
-    <div className={`comment-form ${suggestMode ? 'comment-form-suggest' : ''}`} ref={formRef}>
+    <div
+      className={`comment-form ${suggestMode ? 'comment-form-suggest' : ''}`}
+      ref={formRef}
+      data-draft-key={draftKey}
+    >
       {/* In suggest mode the rewrite is the primary input — render it first
           and demote the body to a small "optional description" below. */}
       {suggestMode ? (
