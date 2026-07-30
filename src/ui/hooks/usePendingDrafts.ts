@@ -12,6 +12,7 @@ export interface DraftLike {
   body: string
   suggestMode: boolean
   suggestionText: string
+  suggestionEdited?: boolean
   charAnchor?: { startColumn: number; endColumn: number; selectedText: string }
 }
 
@@ -26,6 +27,7 @@ export function toWire(draft: DraftLike, updatedAt: number): PendingDraft {
     body: draft.body,
     suggestMode: draft.suggestMode,
     suggestionText: draft.suggestionText,
+    suggestionEdited: draft.suggestionEdited ?? false,
     ...(draft.charAnchor
       ? {
           startColumn: draft.charAnchor.startColumn,
@@ -50,6 +52,10 @@ export function fromWire(w: PendingDraft): DraftLike {
     body: w.body,
     suggestMode: w.suggestMode,
     suggestionText: w.suggestionText,
+    // Left undefined for a draft stored before the field existed, so the form
+    // falls back to comparing the text against the file rather than being told
+    // "not edited" about a rewrite that may well have been typed.
+    ...(w.suggestionEdited === undefined ? {} : { suggestionEdited: w.suggestionEdited }),
     ...(hasAnchor
       ? {
           charAnchor: {

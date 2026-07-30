@@ -11,6 +11,7 @@ const draft: DraftLike = {
   body: 'half a thought',
   suggestMode: false,
   suggestionText: '',
+  suggestionEdited: false,
 }
 
 describe('toWire / fromWire', () => {

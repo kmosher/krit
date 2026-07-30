@@ -94,6 +94,11 @@ pub struct PendingDraft {
     pub suggest_mode: bool,
     #[serde(default)]
     pub suggestion_text: String,
+    /// Whether `suggestion_text` was typed by the reviewer rather than seeded
+    /// from the file. It cannot be recovered by comparison after the fact: by
+    /// the time a draft is restored, the lines it was seeded from may be gone.
+    #[serde(default)]
+    pub suggestion_edited: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_column: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

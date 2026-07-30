@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { CommentForm } from './CommentForm'
-import { NO_LANG, modEnter } from '../test-utils'
+import { NO_LANG, modEnter, typeInCodeMirror } from '../test-utils'
 
 
 function renderForm(props: Partial<React.ComponentProps<typeof CommentForm>> = {}) {
@@ -213,6 +213,90 @@ describe('CommentForm — suggest mode', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Queue comment' }))
     expect(onQueue).toHaveBeenCalledWith('', { newLines: ['b'] })
+  })
+
+  it('still asks before dropping a rewrite the reviewer actually typed', () => {
+    // The other direction of the same check, and the more damaging one: an
+    // implementation that reports every rewrite as untouched passes the
+    // "don't ask" test below while silently discarding typed work on Cancel.
+    const onCancel = vi.fn()
+    const { container } = renderForm({
+      originalLines: 'const a = 1',
+      initialSuggestMode: true,
+    })
+    typeInCodeMirror(container, 'const a = 2')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent(/Discard your suggested rewrite/)
+  })
+
+  it('posts a typed rewrite even when the file moved to match it', () => {
+    // The inverse staleness bug: measured against the live `originalLines`, a
+    // rewrite the reviewer typed is dropped as "unchanged" the moment an agent
+    // happens to write the same text into the file.
+    const { onSubmit, container, rerender } = renderForm({
+      originalLines: 'const a = 1',
+      initialSuggestMode: true,
+    })
+    typeInCodeMirror(container, 'const a = 2')
+    rerender(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 2"
+        initialSuggestMode
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest rewrite' }))
+    expect(onSubmit).toHaveBeenCalledWith('', { newLines: ['const a = 2'] })
+  })
+
+  it('treats a restored draft nobody has typed in as unedited, whatever the file now says', () => {
+    // The contract `suggestionEdited` exists for. A remount or a reload rebuilds
+    // this form from the lifted draft, and by then its seeded text can differ
+    // from the file — so without the stored bit there is nothing left to tell a
+    // rewrite the reviewer typed from one the file moved out from under.
+    const { onCancel } = renderForm({
+      originalLines: 'const a = 99',
+      initialSuggestMode: true,
+      initialSuggestionText: 'const a = 1',
+      initialSuggestionEdited: false,
+    })
+    expect(screen.getByRole('button', { name: 'Suggest rewrite' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('cancels without asking when the file changed under an untouched rewrite', () => {
+    // `originalLines` is re-derived from the item's live fileDiff, so an agent
+    // writing to the file moves it out from under an open form. Measured
+    // against the moved value, a form nobody has typed in looks edited — and
+    // Cancel asks the reviewer to confirm discarding a rewrite they never
+    // wrote. Dirtiness is a fact about their keystrokes, not about the file.
+    const onCancel = vi.fn()
+    const { rerender } = render(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 1"
+        initialSuggestMode
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    rerender(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 99"
+        initialSuggestMode
+        onSubmit={vi.fn()}
+        onCancel={onCancel}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('seeds the rewrite from the selected lines', () => {

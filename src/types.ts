@@ -142,6 +142,10 @@ export interface PendingDraft {
   // draft: restoring the body alone would silently drop a typed rewrite.
   suggestMode: boolean
   suggestionText: string
+  // Whether suggestionText was typed by the reviewer rather than seeded from
+  // the file. Authoritative when present; absent (a store written before the
+  // field existed), the UI falls back to comparing text against file.
+  suggestionEdited?: boolean
   startColumn?: number
   endColumn?: number
   selectedText?: string

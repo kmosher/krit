@@ -29,6 +29,14 @@ interface CommentFormProps {
   initialBody?: string
   initialSuggestMode?: boolean
   initialSuggestionText?: string
+  // Whether the restored rewrite was typed by the reviewer rather than seeded
+  // from the file — see `suggestionChanged`. Supplied by callers that lift the
+  // draft; omitted, the form falls back to comparing text against file.
+  initialSuggestionEdited?: boolean
+  // Identifies the draft this form is editing, stamped onto the root element so
+  // CodeViewWrapper can find the same form again after a remount and hold it
+  // still on screen (see `captureDraftAnchor`).
+  draftKey?: string
   onBodyChange?(body: string): void
   onSuggestModeChange?(suggestMode: boolean): void
   onSuggestionTextChange?(text: string): void
@@ -58,6 +66,8 @@ export function CommentForm({
   initialBody,
   initialSuggestMode,
   initialSuggestionText,
+  initialSuggestionEdited,
+  draftKey,
   onBodyChange,
   onSuggestModeChange,
   onSuggestionTextChange,
@@ -79,7 +89,20 @@ export function CommentForm({
       return next
     })
   }
+  // The two inputs to `suggestionChanged` below, which is where the reasoning
+  // lives. The baseline is frozen at mount because `originalLines` is not:
+  // it is re-derived from the item's fileDiff every render.
+  const originalAtMountRef = useRef(originalLines)
+  // Absent — a draft stored before the flag existed, or a caller that doesn't
+  // lift state — this falls back to the comparison. That over-reports when the
+  // file has moved, and is still the right default: over-reporting asks a
+  // question the reviewer can dismiss, under-reporting drops a rewrite they
+  // wrote without telling them.
+  const [suggestionEdited, setSuggestionEdited] = useState(
+    () => initialSuggestionEdited ?? (initialSuggestionText ?? originalLines) !== originalLines,
+  )
   const setSuggestionText = (v: string) => {
+    if (v !== suggestionText) setSuggestionEdited(true)
     setSuggestionTextState(v)
     onSuggestionTextChange?.(v)
   }
@@ -134,10 +157,24 @@ export function CommentForm({
   // values instead of a stale snapshot.
   const submitRef = useRef<() => void>(() => {})
   const cancelRef = useRef<() => void>(onCancel)
+  // The one answer to "has the reviewer changed the rewrite", read by what to
+  // post, whether Submit is enabled, and whether Cancel has to ask first.
+  //
+  // It is measured against the mount-time baseline and a stored edit bit rather
+  // than against the file as it stands, because the file moves: an agent
+  // writing under an open form makes an untouched rewrite look edited — which
+  // posts a suggestion, built from pre-write content, that applied reverts the
+  // agent — and makes a typed one look unchanged if the file catches up to it,
+  // which drops it. Both directions are silent, which is why every path reads
+  // this and not its own comparison.
+  const suggestionChanged = suggestionEdited && suggestionText !== originalAtMountRef.current
   // Same staleness problem for the Escape handler's "is there a non-trivial
   // edit to lose" check.
   const suggestionDirtyRef = useRef(false)
-  suggestionDirtyRef.current = suggestionText !== originalLines && suggestionText.trim() !== ''
+  // Whether the whitespace-only rewrite counts is the only difference between
+  // these two: a rewrite emptied to spaces is not worth a discard prompt, but
+  // is still a change worth posting.
+  suggestionDirtyRef.current = suggestionChanged && suggestionText.trim() !== ''
   // The question only makes sense while there is still a rewrite to lose, so
   // reverting the text or leaving suggest mode takes it back down rather than
   // leaving it on screen asking about something that no longer exists.
@@ -157,7 +194,7 @@ export function CommentForm({
     if (suggestMode) {
       // Only send a suggestion payload if the user actually edited the rewrite —
       // an unchanged suggestion is just noise that renders as a no-op diff.
-      const changed = suggestionText !== originalLines
+      const changed = suggestionChanged
       if (!changed && !trimmedBody) return
       if (changed) {
         fn(trimmedBody, { newLines: suggestionText.split('\n') })
@@ -250,9 +287,7 @@ export function CommentForm({
   )
 
   const submitLabel = suggestMode ? 'Suggest rewrite' : 'Comment'
-  const submitDisabled = suggestMode
-    ? suggestionText === originalLines && !body.trim()
-    : !body.trim()
+  const submitDisabled = suggestMode ? !suggestionChanged && !body.trim() : !body.trim()
 
   const bodyField = (
     <textarea
@@ -291,7 +326,11 @@ export function CommentForm({
   ) : null
 
   return (
-    <div className={`comment-form ${suggestMode ? 'comment-form-suggest' : ''}`} ref={formRef}>
+    <div
+      className={`comment-form ${suggestMode ? 'comment-form-suggest' : ''}`}
+      ref={formRef}
+      data-draft-key={draftKey}
+    >
       {/* In suggest mode the rewrite is the primary input — render it first
           and demote the body to a small "optional description" below. */}
       {suggestMode ? (

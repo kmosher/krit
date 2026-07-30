@@ -590,6 +590,7 @@ mod tests {
             body: body.into(),
             suggest_mode: false,
             suggestion_text: String::new(),
+            suggestion_edited: false,
             start_column: None,
             end_column: None,
             selected_text: None,
