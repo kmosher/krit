@@ -3,24 +3,27 @@
 default:
     @just --list
 
-# Build and install krit (build.rs embeds a fresh UI automatically)
+# Build and install both binaries (build.rs embeds a fresh UI automatically)
 install:
     cargo install --path krit
+    cargo install --path krit-tui
     # Belt-and-suspenders re-sign: `cargo install` signs correctly, but any
     # binary later cp'd into place (e.g. an artifact copied to dodge cargo's
     # lock) loses its signature and macOS SIGKILLs it on launch (exit 137) on
     # Apple Silicon. A forced ad-hoc sign is idempotent and cheap. No-op off macOS.
     [ "$(uname)" = Darwin ] && codesign --force -s - "${CARGO_HOME:-$HOME/.cargo}/bin/krit" || true
+    [ "$(uname)" = Darwin ] && codesign --force -s - "${CARGO_HOME:-$HOME/.cargo}/bin/krit-tui" || true
 
 # Rust tests + TypeScript typecheck + UI unit tests (Vitest)
 test:
-    cd krit && cargo test
+    cargo test --workspace
     pnpm exec tsc --noEmit
     pnpm exec vitest run
 
 # Formatting, lints, and typecheck — what should be green before landing
 check:
-    cd krit && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+    cargo fmt --all --check
+    cargo clippy --workspace --all-targets -- -D warnings
     pnpm exec tsc --noEmit
 
 # Build the web UI bundle (what release binaries embed)
@@ -31,3 +34,7 @@ ui:
 # which serves dist/client from disk (rebuild with `just ui` to refresh)
 dev:
     pnpm exec vite
+
+# The terminal client, against whatever krit server this worktree has running
+tui:
+    cargo run -p krit-tui

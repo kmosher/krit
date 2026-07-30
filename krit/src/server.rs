@@ -18,6 +18,9 @@ use axum::http::{StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+// Shared with the TUI client, which builds its own file list from the same
+// patch string — see the note on the function.
+use krit_core::patch::diff_header_path;
 use rust_embed::RustEmbed;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -210,30 +213,6 @@ fn parse_file_paths(patch: &str) -> Vec<String> {
         }
     }
     paths
-}
-
-/// `diff --git a/<old> b/<new>` → `<new>`.
-///
-/// The header is ambiguous: a path may itself contain `" b/"` (`foo b/bar.rs`
-/// yields `diff --git a/foo b/bar.rs b/foo b/bar.rs`), so the first separator
-/// is the wrong one. Git writes the same path on both sides unless the file
-/// was renamed, so the split is found by length symmetry first — the only
-/// offset where the halves are identical is the real separator — and only a
-/// rename, where the halves genuinely differ, falls back to the first `" b/"`.
-///
-/// `src/ui/hooks/useDiff.ts` and `src/ui/App.tsx` mirror this; keep all three
-/// in step.
-fn diff_header_path(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("diff --git a/")?;
-    let split = rest.len().checked_sub(3)?;
-    if split % 2 == 0 {
-        let half = split / 2;
-        // `get` rather than indexing: `half` can land mid-character.
-        if rest.get(half..half + 3) == Some(" b/") && rest[..half] == rest[half + 3..] {
-            return Some(rest[half + 3..].to_string());
-        }
-    }
-    rest.split_once(" b/").map(|(_, new)| new.to_string())
 }
 
 /// One file's fragment out of a multi-file patch, for GET /api/diff?file=.
@@ -1765,30 +1744,18 @@ mod tests {
 
     #[test]
     fn a_path_containing_b_slash_is_keyed_by_its_whole_name() {
-        // `foo b/bar.rs` puts a second `" b/"` inside each side of the header.
-        // The first separator splits in the wrong place, and this key is what
-        // scoped refetch and comment anchoring look each other up by — a
-        // disagreement here silently detaches comments from the file.
+        // `foo b/bar.rs` puts a second `" b/"` inside each side of the header,
+        // so the first separator splits in the wrong place. `diff_header_path`
+        // and its cases are krit-core's; what this pins is that the routes
+        // built on it agree — this key is what scoped refetch and comment
+        // anchoring look each other up by, and a disagreement silently
+        // detaches comments from the file.
         let header = "diff --git a/foo b/bar.rs b/foo b/bar.rs";
-        assert_eq!(diff_header_path(header), Some("foo b/bar.rs".to_string()));
-
         let patch = format!("{header}\nindex 111..222 100644\n@@ -1 +1 @@\n-old\n+new");
         let frag = extract_file_patch(&patch, "foo b/bar.rs");
         assert!(frag.starts_with(header), "{frag}");
         assert!(frag.ends_with("+new"));
         assert_eq!(parse_file_paths(&patch), vec!["foo b/bar.rs"]);
-
-        // A rename has no symmetry to find, so the first separator is the only
-        // available reading — and the right one.
-        assert_eq!(
-            diff_header_path("diff --git a/old.rs b/new.rs"),
-            Some("new.rs".to_string())
-        );
-        // Non-ASCII names must not split mid-character.
-        assert_eq!(
-            diff_header_path("diff --git a/räksmörgås.md b/räksmörgås.md"),
-            Some("räksmörgås.md".to_string())
-        );
     }
 
     // ---------- multi-file /api/diff assembly ----------

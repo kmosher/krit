@@ -1,8 +1,8 @@
 # krit in the terminal
 
-> **Status: design only.** Nothing below is built. Phases 0–3 are the ones
-> worth committing to; 4 and 5 are sketched to show where the seams are, not
-> because they should be scheduled.
+> **Status: phase 0 is built** (`krit-tui/`); phases 1–3 are the ones worth
+> committing to next, and 4 and 5 are sketched to show where the seams are,
+> not because they should be scheduled.
 
 A second client for the same server, so a review can happen in the pane beside
 the agent instead of in a browser. The end state is a `krit-tui` binary that
@@ -109,6 +109,14 @@ teardown leaves the user with a shell that does not echo. `std::panic::set_hook`
 chained to a `Drop` guard, plus `SIGTSTP`/`SIGCONT` handling so `Ctrl+Z` and
 `fg` come back intact.
 
+Two things about suspend that only show up once it is wired: **Ctrl+Z is not a
+signal** (raw mode clears `ISIG`, so it arrives as a key and the `kill -TSTP`
+path is separate and also needed), and **`Terminal::clear()` is not free** —
+it snapshots the cursor first, which is a `ESC[6n` round-trip that blocks
+until the terminal answers. On resume that is a position about to be
+overwritten anyway, so the repaint is a `Clear(All)` plus a fresh `Terminal`;
+nothing in the resume path should be able to hang waiting for a reply.
+
 **Focus events, and the lesson not to repeat.** `EnableFocusChange` maps onto
 `refreshMode: live-unless-active`. But note what the web UI learned the hard
 way: the comment poll had to set `refetchIntervalInBackground` because an
@@ -199,11 +207,17 @@ ref under `refs/krit/`, and be honest in the UI about what the scope means.
 
 ## Phases
 
-**Phase 0 — read-only viewer.** Adopt a running server via the state file (or
-spawn one), `GET /api/diff`, render a unified diff with a file tree, navigate by
-file and hunk, subscribe to SSE for live updates. No comments, no editing. This
-is where the row model, width handling, virtualization, and terminal
-setup/teardown get built, so it is most of the risk.
+**Phase 0 — read-only viewer. Done.** Adopts a running server via the state
+file, `GET /api/diff`, renders a unified diff with a file list, navigates by
+line, page, file and hunk, folds files, and follows SSE for live updates. The
+row model, width handling, virtualization and terminal setup/teardown are the
+part that carried the risk, and they are the part that landed.
+
+Two things it does *not* do that the sketch above assumes: it does not spawn a
+server (no server means a diagnosis and exit 1, which is what every other krit
+client does), and the file pane is a flat list rather than a tree — grouping by
+directory is worth doing with the rest of the phase-2 polish, not before
+anything else works.
 
 **Phase 1 — commenting.** Visual-mode and click-drag selection down to the
 column, the composer (bracketed paste, keyboard disambiguation, the strip-stack

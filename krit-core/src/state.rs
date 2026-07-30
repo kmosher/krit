@@ -56,12 +56,12 @@ fn fnv1a64_hex12(input: &str) -> String {
 /// worktree. The `\0` separator can't appear in either part, so distinct
 /// (worktree, branch) pairs never collide into one key.
 fn review_key() -> String {
-    let root = crate::git::repo_root().unwrap_or_else(|| {
+    let root = crate::repo::repo_root().unwrap_or_else(|| {
         std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default()
     });
-    format!("{root}\0{}", crate::git::branch_name())
+    format!("{root}\0{}", crate::repo::branch_name())
 }
 
 pub fn default_state_path() -> PathBuf {
@@ -94,6 +94,62 @@ pub fn read_state(path: &Path) -> Option<KritState> {
     serde_json::from_str(&content).ok()
 }
 
+// Missing file, unreadable file, and unparseable file are three different
+// diagnoses (server never started / wrong KRIT_STATE_FILE vs permissions vs
+// a stale-or-hand-written file) — collapsing them into one generic error
+// turned each into a support thread. Always name the path checked.
+#[derive(Debug)]
+pub enum StateError {
+    Missing(PathBuf),
+    Unreadable(PathBuf, String),
+    Invalid(PathBuf, String),
+}
+
+impl StateError {
+    /// One line per element, in order. Every client that cannot find a server
+    /// says the same thing about why — the CLI verbs print these to stderr,
+    /// the TUI shows them on an empty screen.
+    pub fn lines(&self) -> Vec<String> {
+        match self {
+            StateError::Missing(path) => vec![
+                format!(
+                    "Error: no state file at {} — no running krit server found for this session.",
+                    path.display()
+                ),
+                "Start one with `krit` first, or set KRIT_STATE_FILE to a state-file path."
+                    .to_string(),
+            ],
+            StateError::Unreadable(path, err) => vec![format!(
+                "Error: cannot read state file {}: {err}",
+                path.display()
+            )],
+            StateError::Invalid(path, err) => vec![
+                format!(
+                    "Error: state file {} is not a valid krit state: {err}",
+                    path.display()
+                ),
+                "Expected fields: port, pid, cwd, host, url, startedAt. Is it stale or hand-written?"
+                    .to_string(),
+            ],
+        }
+    }
+}
+
+/// `read_state` with the diagnosis kept. The env-var lookup deliberately
+/// stays in the caller (`default_state_path`): a test can't change it without
+/// racing every other test.
+pub fn read_state_at(path: &Path) -> Result<KritState, StateError> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(StateError::Missing(path.to_path_buf()));
+        }
+        Err(err) => return Err(StateError::Unreadable(path.to_path_buf(), err.to_string())),
+    };
+    serde_json::from_str(&content)
+        .map_err(|err| StateError::Invalid(path.to_path_buf(), err.to_string()))
+}
+
 /// Remove the state file only if it still advertises this pid — a newer
 /// server may have overwritten it before this one's shutdown handler runs.
 pub fn remove_state_if_owned(pid: u32, path: &Path) {
@@ -122,6 +178,79 @@ pub fn comments_store_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("krit-state-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_missing_state_file_is_diagnosed_apart_from_a_corrupt_one() {
+        // The three diagnoses drive three different user actions (start a
+        // server / fix permissions / delete a stale file), so the variants
+        // must not collapse into one another.
+        let dir = tmpdir("missing");
+        let path = dir.join("nope.json");
+        let err = read_state_at(&path).err().unwrap();
+        assert!(matches!(err, StateError::Missing(_)));
+        let lines = err.lines();
+        assert!(
+            lines[0].contains(&path.display().to_string()),
+            "the path checked must be named: {lines:?}"
+        );
+        assert!(lines[1].contains("KRIT_STATE_FILE"));
+
+        std::fs::write(&path, "{not json").unwrap();
+        let err = read_state_at(&path).err().unwrap();
+        assert!(matches!(err, StateError::Invalid(..)));
+        assert!(err.lines()[0].contains("not a valid krit state"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_well_formed_json_file_that_is_not_a_state_file_is_invalid_not_missing() {
+        // A stale v1-shaped or hand-written file parses as JSON but lacks the
+        // fields; reporting it as "no server running" sends the user to start
+        // a second server on top of the one already there.
+        let dir = tmpdir("wrong-shape");
+        let path = dir.join("state.json");
+        std::fs::write(&path, r#"{"port":1234}"#).unwrap();
+        assert!(matches!(
+            read_state_at(&path).err().unwrap(),
+            StateError::Invalid(..)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_valid_state_file_round_trips() {
+        let dir = tmpdir("valid");
+        let path = dir.join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"port":5173,"pid":7,"cwd":"/w","host":"127.0.0.1","url":"http://127.0.0.1:5173","startedAt":9,"v":2}"#,
+        )
+        .unwrap();
+        let state = read_state_at(&path).expect("parses");
+        assert_eq!(state.port, 5173);
+        assert_eq!(state.url, "http://127.0.0.1:5173");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_in_place_of_the_state_file_reports_unreadable() {
+        // Not NotFound, so it must not claim there is no server — the path is
+        // occupied by something, which is a configuration mistake.
+        let dir = tmpdir("is-a-dir");
+        assert!(matches!(
+            read_state_at(&dir).err().unwrap(),
+            StateError::Unreadable(..)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn state_hash_is_stable() {
