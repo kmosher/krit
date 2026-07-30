@@ -207,12 +207,26 @@ export type FileAnnotation = {
   metadata: ReviewComment
 }
 
-// Group comments by file for CodeView, choosing the line each one hangs off.
+// The line a comment's annotation hangs off: the range's *last*, not its first.
+// Pierre draws an annotation below the line it names, so anchoring at the start
+// would split the block the comment is about, and it keeps the posted comment
+// where the draft form sat while it was being written (`mergeAnnotations`
+// anchors drafts at endLine).
 //
-// That line is the range's *last*, not its first: Pierre draws an annotation
-// below the line it names, so anchoring at the start would split the block the
-// comment is about. It also keeps the posted comment where the draft form was
-// while it was being written — `mergeAnnotations` anchors drafts at endLine.
+// Everything that has to agree on where a comment lives calls this — the
+// annotation, the islanding/reveal target derived from it, and the tracker's
+// jump. A caller that computes its own answer is a comment that renders in one
+// place and is navigated to in another.
+//
+// Clamped because `endLine` is optional on the wire and not validated: a store
+// krit didn't write, or a reanchor that moved one endpoint and not the other,
+// can put it below `lineNumber`, and an annotation on a line the file doesn't
+// have renders nothing at all.
+export function annotationLineFor(c: ReviewComment): number {
+  return Math.max(c.lineNumber, c.endLine ?? c.lineNumber)
+}
+
+// Group comments by file for CodeView, keyed by the line each one hangs off.
 export function buildFileAnnotations(comments: ReviewComment[]): Map<string, FileAnnotation[]> {
   const map = new Map<string, FileAnnotation[]>()
   for (const c of comments) {
@@ -221,7 +235,7 @@ export function buildFileAnnotations(comments: ReviewComment[]): Map<string, Fil
       list = []
       map.set(c.filePath, list)
     }
-    list.push({ side: c.side, lineNumber: c.endLine ?? c.lineNumber, metadata: c })
+    list.push({ side: c.side, lineNumber: annotationLineFor(c), metadata: c })
   }
   return map
 }
@@ -938,10 +952,15 @@ export function App() {
               onDelete={removeComment}
               onJump={(comment) => {
                 setActiveFile(comment.filePath)
+                // The same line the annotation hangs off, not the range's
+                // start: only the annotation's own line is guaranteed to be
+                // rendered — islanding and reveal both work from
+                // `fileAnnotationsMap` — so jumping to the start of a range
+                // that begins inside a collapsed region lands nowhere.
                 diffViewerRef.current?.scrollToLine(
                   comment.filePath,
                   comment.side,
-                  comment.lineNumber,
+                  annotationLineFor(comment),
                 )
               }}
             />

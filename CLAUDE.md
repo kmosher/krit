@@ -170,6 +170,23 @@ skill together when you do.
   one correction is not enough, since the highlight worker pool repaints rows
   above it for several frames afterwards. The loop yields the moment the
   scroll position moves by anything other than its own correction.
+  - **Match the key by scanning `dataset`, never with an attribute selector.**
+    `draftKey` joins with NUL and `CSS.escape` maps NUL to U+FFFD, so an
+    escaped key cannot match the attribute React set. The lookup then returns
+    null on every frame and the whole feature is a silent no-op — which is what
+    it did on the first cut, with every test still green.
+- **A draft's "the reviewer edited the rewrite" bit is stored, not derived**
+  (`suggestionEdited`, carried on the draft and across the wire). The obvious
+  implementation compares the editor text against the file's current lines, and
+  that comparison is wrong in both directions the moment an agent writes the
+  file under an open form: an untouched draft reports as edited (a discard
+  prompt for a rewrite nobody wrote, and worse, a *posted* suggestion carrying
+  pre-write content, which applied reverts the agent), and a typed one reports
+  as untouched if the file happens to catch up to it (silently dropped). One
+  derived value, `suggestionChanged`, answers it for every path — post, submit-
+  enabled, and discard — because a disagreement between those is invisible.
+  Absent on a draft stored before the field existed, it falls back to the
+  comparison: over-asking is recoverable, dropping typed work is not.
 - **Pierre's custom renderers are light DOM, projected by `slot`.** `SlotPortals`
   React-portals every `render*` callback's output into `renderedItem.element`
   with a `slot="…"` attribute, and the shadow root's `<slot>` elements pull it

@@ -49,6 +49,12 @@ type DraftMetadata = {
   body: string
   suggestMode: boolean
   suggestionText: string
+  // Whether the reviewer has typed in the rewrite. Carried on the draft (and
+  // persisted) rather than re-derived by comparing against the file: a remount
+  // rebuilds the form against whatever the file says *now*, so a comparison
+  // made then reports an untouched draft as edited whenever an agent wrote to
+  // the file in the meantime.
+  suggestionEdited?: boolean
   // Set when this draft originated from a native text selection
   // (SelectionPill) rather than a gutter-drag — schema v3's character-level
   // anchor, threaded through to onAddComment on submit/queue.
@@ -554,7 +560,9 @@ export const CodeViewWrapper = memo(
     // still seeds CommentForm with the freshest text via the initial* props.
     const updateDraft = (
       draft: DraftMetadata,
-      patch: Partial<Pick<DraftMetadata, 'body' | 'suggestMode' | 'suggestionText'>>,
+      patch: Partial<
+        Pick<DraftMetadata, 'body' | 'suggestMode' | 'suggestionText' | 'suggestionEdited'>
+      >,
     ) => {
       Object.assign(draft, patch)
       // The only signal that anything changed: because the mutation above is
@@ -675,12 +683,39 @@ export const CodeViewWrapper = memo(
     // Only while a draft is open. With nothing being typed into, scroll
     // position is the ordinary thing to preserve and Pierre reanchors it
     // itself.
+    // Only lifted drafts carry a `data-draft-key`, so only they are held. A
+    // reply form is unsaved work too, but it is not persisted and does not
+    // survive a remount either — anchoring it would preserve the position of
+    // something the next structural update destroys.
+    //
+    // Drafts are found by scanning `dataset`, never by building an attribute
+    // selector: `draftKey` joins its parts with NUL and `CSS.escape` turns NUL
+    // into U+FFFD, so an escaped key can never match the attribute React set —
+    // the lookup returns null every frame and the anchor silently does nothing.
+    const draftFormElements = (container: HTMLElement): HTMLElement[] =>
+      [...container.querySelectorAll<HTMLElement>('[data-draft-key]')]
+
+    // Which draft to hold still: the one being typed in. With two drafts open,
+    // pinning the topmost (document order) can scroll the focused one out of
+    // view — worse than the scrollTop behaviour this replaces. Focus is read
+    // through the shadow roots the forms are slotted into.
+    const focusedDraftForm = (forms: HTMLElement[]): HTMLElement | undefined => {
+      let active: Element | null = document.activeElement
+      while (active) {
+        const match = forms.find((f) => f.contains(active))
+        if (match) return match
+        active = active.shadowRoot?.activeElement ?? null
+      }
+      return undefined
+    }
+
     const captureDraftAnchor = (): { key: string; top: number } | null => {
       const container = scrollRef.current
-      const el = container?.querySelector<HTMLElement>('[data-draft-key]')
-      if (!container || !el) return null
-      const key = el.dataset.draftKey
-      if (!key) return null
+      if (!container) return null
+      const forms = draftFormElements(container)
+      const el = focusedDraftForm(forms) ?? forms[0]
+      const key = el?.dataset.draftKey
+      if (!el || !key) return null
       return { key, top: el.getBoundingClientRect().top - container.getBoundingClientRect().top }
     }
 
@@ -702,9 +737,7 @@ export const CodeViewWrapper = memo(
         // The reviewer scrolling outranks the anchor: if the position moved by
         // anything other than our own correction, they took over. Stop.
         if (expected !== null && Math.abs(container.scrollTop - expected) > 1) return
-        const el = container.querySelector<HTMLElement>(
-          `[data-draft-key="${CSS.escape(anchor.key)}"]`,
-        )
+        const el = draftFormElements(container).find((f) => f.dataset.draftKey === anchor.key)
         if (el) {
           const now = el.getBoundingClientRect().top - container.getBoundingClientRect().top
           const delta = now - anchor.top
@@ -785,6 +818,10 @@ export const CodeViewWrapper = memo(
 
     const lastAnnotationsRef = useRef<Map<string, DiffLineAnnotation<Metadata>[]>>(new Map())
     useEffect(() => {
+      // Annotations reflow the surface as surely as a diff update does: a
+      // comment arriving in a file above the open draft inserts a row and walks
+      // the form down. Same hold.
+      const draftAnchor = captureDraftAnchor()
       const merged = new Map<string, DiffLineAnnotation<Metadata>[]>()
       for (const file of files) {
         merged.set(
@@ -808,6 +845,7 @@ export const CodeViewWrapper = memo(
           lastAnnotationsRef.current.set(name, next)
         },
       )
+      holdDraftAnchor(draftAnchor)
     }, [files, fileAnnotationsMap, pending, previewFiles])
 
     // Toggling preview has to swap the body on an already-mounted item —
@@ -884,8 +922,13 @@ export const CodeViewWrapper = memo(
     useEffect(() => {
       if (editingFiles.size > 0 || !pendingStructuralRef.current) return
       pendingStructuralRef.current = false
+      const draftAnchor = captureDraftAnchor()
       pendingScrollRestoreRef.current = scrollRef.current?.scrollTop ?? null
       setStructuralRevision((r) => r + 1)
+      // A remount this path pays off has been accumulating changes for as long
+      // as the edit session was open, so it moves more layout than the ordinary
+      // one, not less.
+      holdDraftAnchor(draftAnchor)
     }, [editingFiles])
 
     // renderHeaderPrefix reads staleFiles and confirmSaveFiles through its
@@ -1016,6 +1059,7 @@ export const CodeViewWrapper = memo(
           // the user selects all and deletes — round-trips correctly instead
           // of being indistinguishable from "never touched."
           suggestionText: getRangeContent(context.item.fileDiff, side, startLine, endLine),
+          suggestionEdited: false,
         }
         const key = draftKey(draft)
         // No-op if the user already has a draft open on this exact range;
@@ -1141,6 +1185,7 @@ export const CodeViewWrapper = memo(
         body: '',
         suggestMode: false,
         suggestionText: anchor.selectedText,
+        suggestionEdited: false,
         charAnchor: {
           startColumn: anchor.startColumn,
           endColumn: anchor.endColumn,
@@ -1218,9 +1263,12 @@ export const CodeViewWrapper = memo(
                 initialBody={p.body}
                 initialSuggestMode={p.suggestMode}
                 initialSuggestionText={p.suggestionText}
+                initialSuggestionEdited={p.suggestionEdited}
                 onBodyChange={(body) => updateDraft(p, { body })}
                 onSuggestModeChange={(suggestMode) => updateDraft(p, { suggestMode })}
-                onSuggestionTextChange={(suggestionText) => updateDraft(p, { suggestionText })}
+                onSuggestionTextChange={(suggestionText) =>
+                  updateDraft(p, { suggestionText, suggestionEdited: true })
+                }
                 onSubmit={(body, suggestion) => {
                   const lineContent = getRangeContent(
                     item.fileDiff,

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { CommentForm } from './CommentForm'
-import { NO_LANG, modEnter } from '../test-utils'
+import { NO_LANG, modEnter, typeInCodeMirror } from '../test-utils'
 
 
 function renderForm(props: Partial<React.ComponentProps<typeof CommentForm>> = {}) {
@@ -213,6 +213,43 @@ describe('CommentForm — suggest mode', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Queue comment' }))
     expect(onQueue).toHaveBeenCalledWith('', { newLines: ['b'] })
+  })
+
+  it('still asks before dropping a rewrite the reviewer actually typed', () => {
+    // The other direction of the same check, and the more damaging one: an
+    // implementation that reports every rewrite as untouched passes the
+    // "don't ask" test below while silently discarding typed work on Cancel.
+    const onCancel = vi.fn()
+    const { container } = renderForm({
+      originalLines: 'const a = 1',
+      initialSuggestMode: true,
+    })
+    typeInCodeMirror(container, 'const a = 2')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent(/Discard your suggested rewrite/)
+  })
+
+  it('posts a typed rewrite even when the file moved to match it', () => {
+    // The inverse staleness bug: measured against the live `originalLines`, a
+    // rewrite the reviewer typed is dropped as "unchanged" the moment an agent
+    // happens to write the same text into the file.
+    const { onSubmit, container, rerender } = renderForm({
+      originalLines: 'const a = 1',
+      initialSuggestMode: true,
+    })
+    typeInCodeMirror(container, 'const a = 2')
+    rerender(
+      <CommentForm
+        filePath={NO_LANG}
+        originalLines="const a = 2"
+        initialSuggestMode
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest rewrite' }))
+    expect(onSubmit).toHaveBeenCalledWith('', { newLines: ['const a = 2'] })
   })
 
   it('cancels without asking when the file changed under an untouched rewrite', () => {

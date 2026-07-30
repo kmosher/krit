@@ -94,6 +94,14 @@ pub struct PendingDraft {
     pub suggest_mode: bool,
     #[serde(default)]
     pub suggestion_text: String,
+    /// Whether `suggestion_text` differs from the file because the reviewer
+    /// typed, rather than because the file moved under an open form. It cannot
+    /// be recovered by comparison after the fact — by the time a draft is
+    /// restored, the lines it was seeded from may be gone — and getting it
+    /// wrong in either direction is silent: a rewrite nobody wrote gets posted,
+    /// or a typed one is dropped as unchanged.
+    #[serde(default)]
+    pub suggestion_edited: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_column: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
