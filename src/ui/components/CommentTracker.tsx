@@ -16,10 +16,10 @@ interface CommentTrackerProps {
   onDelete?: (id: string) => void
 }
 
-type CommentStatus = 'draft' | 'open' | 'replied' | 'resolved'
+type CommentStatus = 'queued' | 'open' | 'replied' | 'resolved'
 
 function getCommentStatus(comment: ReviewComment): CommentStatus {
-  if (comment.status === 'draft') return 'draft'
+  if (comment.status === 'queued') return 'queued'
   if (comment.status === 'resolved') return 'resolved'
   if (comment.replies?.length > 0) return 'replied'
   return 'open'
@@ -27,9 +27,9 @@ function getCommentStatus(comment: ReviewComment): CommentStatus {
 
 function StatusBadge({ status }: { status: CommentStatus }) {
   switch (status) {
-    case 'draft':
+    case 'queued':
       return (
-        <span className="ct-status ct-status-draft" title="Queued — saved, not yet posted">
+        <span className="ct-status ct-status-queued" title="Queued — saved, not yet posted">
           <PenLine size={12} />
         </span>
       )
@@ -123,16 +123,16 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
 
   // Sort + all four status counts in one memoized pass, recomputed only
   // when `comments` actually changes identity (not on every render).
-  const { sorted, draftCount, openCount, repliedCount, resolvedCount } = useMemo(() => {
+  const { sorted, queuedCount, openCount, repliedCount, resolvedCount } = useMemo(() => {
     const sorted = [...comments].sort((a, b) => b.createdAt - a.createdAt)
-    let draftCount = 0
+    let queuedCount = 0
     let openCount = 0
     let repliedCount = 0
     let resolvedCount = 0
     for (const comment of sorted) {
       switch (getCommentStatus(comment)) {
-        case 'draft':
-          draftCount++
+        case 'queued':
+          queuedCount++
           break
         case 'open':
           openCount++
@@ -145,7 +145,7 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
           break
       }
     }
-    return { sorted, draftCount, openCount, repliedCount, resolvedCount }
+    return { sorted, queuedCount, openCount, repliedCount, resolvedCount }
   }, [comments])
 
   // `.ct` (the hook's scrollRef) is the scroll container for BOTH the
@@ -162,7 +162,7 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
     const observer = new ResizeObserver(() => setHeaderHeight(el.offsetHeight))
     observer.observe(el)
     return () => observer.disconnect()
-  }, [draftCount, openCount, repliedCount, resolvedCount])
+  }, [queuedCount, openCount, repliedCount, resolvedCount])
 
   const total = sorted.length
   const { scrollRef, onScroll, startIndex, endIndex, totalHeight, offsetY } = useVirtualRows({
@@ -182,7 +182,7 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
         <MessageSquare size={14} />
         <span className="ct-title">Comments</span>
         <span className="ct-counts">
-          {draftCount > 0 && <span className="ct-count ct-count-draft">{draftCount} queued</span>}
+          {queuedCount > 0 && <span className="ct-count ct-count-queued">{queuedCount} queued</span>}
           {openCount > 0 && <span className="ct-count ct-count-open">{openCount} open</span>}
           {repliedCount > 0 && <span className="ct-count ct-count-replied">{repliedCount} replied</span>}
           {resolvedCount > 0 && <span className="ct-count ct-count-resolved">{resolvedCount} resolved</span>}

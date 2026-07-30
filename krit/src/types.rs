@@ -39,8 +39,9 @@ pub struct ReviewComment {
     /// Single line: that line's text. Range: the lines joined with '\n'.
     pub line_content: String,
     pub body: String,
-    /// "open" | "resolved" | "draft". Drafts are suppressed from every
-    /// broadcast and agent-facing listing until posted.
+    /// "open" | "resolved" | "queued". Queued comments are suppressed from
+    /// every broadcast and agent-facing listing until posted. Stores written
+    /// before the rename say "draft"; `store::load` migrates them.
     pub status: String,
     pub created_at: u64,
     pub replies: Vec<CommentReply>,
@@ -68,11 +69,11 @@ impl ReviewComment {
 
 /// Comment text the reviewer is still typing — not a comment yet.
 ///
-/// Distinct from a `ReviewComment` with `status: "draft"`, which *is* a comment:
-/// submitted, stored, listable, and merely withheld from the agent until posted.
-/// A `PendingDraft` has never been submitted at all. The UI calls the former
-/// "queued" and the latter a draft, because both were once called "draft" and it
-/// was impossible to tell which anyone meant.
+/// Distinct from a `ReviewComment` with `status: "queued"`, which *is* a
+/// comment: submitted, stored, listable, and merely withheld from the agent
+/// until posted. A `PendingDraft` has never been submitted at all. Both were
+/// once called "draft"; "queued" took over the submitted one so that "draft"
+/// can mean only this.
 ///
 /// Identity is the anchor, not an id: one open form per file + side + line
 /// range, which is already how the UI's `pending` map is keyed. A second draft

@@ -88,8 +88,9 @@ The WebSocket endpoint `ws://<host>:<port>/api/events-ws` is the integration poi
 - **Conversation threads** — Reply from the browser; agents reply via `krit reply`. Replying to a resolved comment auto-reopens it.
 - **Live refresh** — A filesystem watcher re-diffs as the agent edits; comments re-anchor to their new positions
 - **Expandable context** — Expand unedited lines above, below, and between hunks; lazy-loaded per file
-- **Comment status tracker** — Sidebar widget with draft / open / replied / resolved counts and click-to-navigate
-- **Drafts** — Save comments invisibly to the agent until you post them (or finish the review)
+- **Comment status tracker** — Sidebar widget with queued / open / replied / resolved counts and click-to-navigate
+- **Queued comments** — Hold a comment back from the agent until you post it (or finish the review)
+- **Drafts** — Unsent comment text is saved server-side, so a reload or a closed pane doesn't lose it
 - **Copy comments** — One-click copy as structured XML for an offline agent
 - **Image preview** — Side-by-side comparison for added, modified, and deleted images
 - **Viewed tracking / Staged & Untracked toggles / custom `git diff` args / persistent settings**

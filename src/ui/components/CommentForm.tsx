@@ -14,14 +14,12 @@ interface CommentFormProps {
   // CodeMirror editor. Optional so reply forms (which don't suggest) can omit it.
   filePath?: string
   onSubmit: (body: string, suggestion?: { newLines: string[] }) => void
-  // "Queue comment" — posts the comment with status:'draft' instead of 'open'
+  // "Queue comment" — posts the comment with status:'queued' instead of 'open'
   // (server-side; see POST /api/comments), so it exists but stays invisible to
-  // the listening agent until released. The wire still says 'draft' for this;
-  // the *user-facing* word is "queued", because "draft" now means the
+  // the listening agent until released. Distinct from a *draft*, which is the
   // in-progress typing persisted through `pending` below — text not submitted
-  // at all. Those two were both called "draft" and it was a trap. Omitted for
-  // reply forms, which can only post.
-  onSaveDraft?: (body: string, suggestion?: { newLines: string[] }) => void
+  // at all. Omitted for reply forms, which can only post.
+  onQueue?: (body: string, suggestion?: { newLines: string[] }) => void
   onCancel: () => void
   // Lifted-state hooks for drafts that must survive a remount (see the
   // `pending` draft map in CodeViewWrapper). Omitted by callers that don't
@@ -55,7 +53,7 @@ export function CommentForm({
   originalLines = '',
   filePath,
   onSubmit,
-  onSaveDraft,
+  onQueue,
   onCancel,
   initialBody,
   initialSuggestMode,
@@ -151,9 +149,9 @@ export function CommentForm({
   const onCancelRef = useRef(onCancel)
   onCancelRef.current = onCancel
 
-  // Shared by both "Comment"/"Suggest rewrite" (dispatch=onSubmit) and "Save
-  // as draft" (dispatch=onSaveDraft) — same validation and suggestion-payload
-  // logic either way, just a different endpoint on the other end.
+  // Shared by both "Comment"/"Suggest rewrite" (dispatch=onSubmit) and "Queue
+  // comment" (dispatch=onQueue) — same validation and suggestion-payload
+  // logic either way, just a different status on the other end.
   const dispatch = (fn: (body: string, suggestion?: { newLines: string[] }) => void) => {
     const trimmedBody = body.trim()
     if (suggestMode) {
@@ -173,8 +171,8 @@ export function CommentForm({
     }
   }
   const handleSubmit = () => dispatch(onSubmit)
-  const handleSaveDraft = () => {
-    if (onSaveDraft) dispatch(onSaveDraft)
+  const handleQueue = () => {
+    if (onQueue) dispatch(onQueue)
   }
   submitRef.current = handleSubmit
 
@@ -342,11 +340,11 @@ export function CommentForm({
         <button className="btn btn-secondary" onClick={requestCancel}>
           Cancel
         </button>
-        {onSaveDraft && (
+        {onQueue && (
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={handleSaveDraft}
+            onClick={handleQueue}
             disabled={submitDisabled}
             title="Queue without posting — the comment is saved but stays invisible to the listening Claude session until you post it (or click Done reviewing)."
           >

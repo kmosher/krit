@@ -14,7 +14,7 @@ export function CommentBubble({ comment, onDelete, onReply }: CommentBubbleProps
   const [, setTick] = useState(0)
   const [replying, setReplying] = useState(false)
   const isResolved = comment.status === 'resolved'
-  const isDraft = comment.status === 'draft'
+  const isQueued = comment.status === 'queued'
 
   useEffect(() => {
     const timer = setInterval(() => setTick((t) => t + 1), 30000)
@@ -25,7 +25,7 @@ export function CommentBubble({ comment, onDelete, onReply }: CommentBubbleProps
   const isRange = endLine > comment.lineNumber
 
   return (
-    <div className={`comment-bubble ${isResolved ? 'comment-resolved' : ''} ${isDraft ? 'comment-draft' : ''}`} id={`comment-${comment.id}`}>
+    <div className={`comment-bubble ${isResolved ? 'comment-resolved' : ''} ${isQueued ? 'comment-queued' : ''}`} id={`comment-${comment.id}`}>
       <div className="comment-bubble-header">
         <UserCircle size={18} className="comment-bubble-avatar" />
         {isRange && (
@@ -34,13 +34,13 @@ export function CommentBubble({ comment, onDelete, onReply }: CommentBubbleProps
           </span>
         )}
         <span className="comment-bubble-time">{timeAgo(comment.createdAt)}</span>
-        {isDraft && (
+        {isQueued && (
           <span
-            className="comment-bubble-draft"
+            className="comment-bubble-queued"
             title="Saved but not posted — invisible to the listening Claude session until you post it (or click Done reviewing)."
           >
             <PenLine size={14} />
-            Draft
+            Queued
           </span>
         )}
         {isResolved && (

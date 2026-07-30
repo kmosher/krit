@@ -146,15 +146,15 @@ skill together when you do.
   file** is untested. Both render into Pierre's shadow root, historically
   where the WebKit trouble was.
 
-- **"Draft" and "queued" are two different things, and the wire still says
-  `draft` for the wrong one.** A `ReviewComment` with `status: "draft"` *is* a
-  comment — stored, listable, withheld from the agent until posted — and the UI
-  calls that **queued** ("Queue comment", "Post queued"). A `PendingDraft` is
-  text the reviewer has not submitted at all, persisted through
-  `/api/pending-drafts` so it survives a reload or a closed TUI pane. Both used
-  to be called "draft". The user-facing strings are split; `status: "draft"`,
-  `draftCount` and `postDrafts` still carry the old name, so read those as
-  "queued" until someone renames the wire (which means moving the skill too).
+- **"Draft" and "queued" are two different things**, and both were once called
+  "draft". A comment with `status: "queued"` *is* a comment — stored, listable,
+  withheld from the agent until posted. A `PendingDraft` is text the reviewer
+  has not submitted at all, persisted through `/api/pending-drafts` so it
+  survives a reload or a closed TUI pane. "Draft" now means only the second.
+  Store files written before the rename say `"draft"` for the first;
+  `store::load` migrates them, and that migration is the only thing keeping a
+  queued comment from leaking — every suppression check is `== "queued"`, which
+  a stale `"draft"` would satisfy nowhere.
 - Pending drafts are the one mutation that **deliberately does not broadcast**.
   Echoing a reviewer's keystrokes back into the form they came from fights the
   form, and unsent text is not the agent's business — so there is no SSE event

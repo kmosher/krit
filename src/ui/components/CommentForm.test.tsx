@@ -95,18 +95,18 @@ describe('CommentForm — plain comment', () => {
   })
 
   it('offers "Queue comment" only when the caller supports queueing', () => {
-    // Reply forms have no draft concept; showing the button there would post
+    // Reply forms have nothing to queue; showing the button there would post
     // a comment the reviewer expected to stay private.
     renderForm()
     expect(screen.queryByRole('button', { name: 'Queue comment' })).toBeNull()
   })
 
-  it('routes "Queue comment" to onSaveDraft, never to onSubmit', () => {
-    const onSaveDraft = vi.fn()
-    const { onSubmit } = renderForm({ onSaveDraft })
+  it('routes "Queue comment" to onQueue, never to onSubmit', () => {
+    const onQueue = vi.fn()
+    const { onSubmit } = renderForm({ onQueue })
     fireEvent.change(body(), { target: { value: 'private note' } })
     fireEvent.click(screen.getByRole('button', { name: 'Queue comment' }))
-    expect(onSaveDraft).toHaveBeenCalledWith('private note')
+    expect(onQueue).toHaveBeenCalledWith('private note')
     expect(onSubmit).not.toHaveBeenCalled()
   })
 })
@@ -204,15 +204,15 @@ describe('CommentForm — suggest mode', () => {
   })
 
   it('sends the same payload through "Queue comment"', () => {
-    const onSaveDraft = vi.fn()
+    const onQueue = vi.fn()
     renderForm({
       originalLines: 'a',
       initialSuggestMode: true,
       initialSuggestionText: 'b',
-      onSaveDraft,
+      onQueue,
     })
     fireEvent.click(screen.getByRole('button', { name: 'Queue comment' }))
-    expect(onSaveDraft).toHaveBeenCalledWith('', { newLines: ['b'] })
+    expect(onQueue).toHaveBeenCalledWith('', { newLines: ['b'] })
   })
 
   it('seeds the rewrite from the selected lines', () => {

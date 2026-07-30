@@ -9,8 +9,16 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Bumped when the on-disk record shape changes incompatibly. Files written
-/// before it existed are bare arrays and read as version 0.
-const SCHEMA_VERSION: u32 = 1;
+/// before it existed are bare arrays and read as version 0. v2 renamed the
+/// withheld-comment status from "draft" to "queued".
+const SCHEMA_VERSION: u32 = 2;
+
+/// The pre-v2 name for `status: "queued"`. Migrated on load rather than
+/// tolerated at the comparison sites: every "is this withheld" check is a
+/// string equality, so a surviving "draft" would satisfy none of them and the
+/// comment would leak to the agent on the next listing — the exact thing
+/// queueing exists to prevent.
+const LEGACY_QUEUED_STATUS: &str = "draft";
 
 #[derive(Default)]
 pub struct UpdateFields {
@@ -43,7 +51,12 @@ fn load(path: &Path) -> Vec<ReviewComment> {
         .into_iter()
         .filter_map(
             |record| match serde_json::from_value::<ReviewComment>(record) {
-                Ok(comment) => Some(comment),
+                Ok(mut comment) => {
+                    if comment.status == LEGACY_QUEUED_STATUS {
+                        comment.status = "queued".into();
+                    }
+                    Some(comment)
+                }
                 Err(err) => {
                     eprintln!(
                         "krit: dropping unreadable comment in {}: {err}",
@@ -540,6 +553,30 @@ mod tests {
         let all = reloaded.get_all();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, "b");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_pre_rename_draft_status_loads_as_queued() {
+        // Upgrading mid-review is the case that matters: leaving the old value
+        // in place would make a withheld comment match none of the `== "queued"`
+        // suppression checks, so `krit comments` would hand the agent something
+        // the reviewer never posted.
+        let path = store_path("legacy-draft-status");
+        let mut s = CommentStore::new(Some(path.clone()));
+        s.add(comment("a", "queued before the rename"));
+        s.add(comment("b", "already open"));
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut file: serde_json::Value = serde_json::from_str(&text).unwrap();
+        file["comments"][0]["status"] = serde_json::json!("draft");
+        std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+
+        let reloaded = CommentStore::new(Some(path.clone()));
+        let all = reloaded.get_all();
+        assert_eq!(all[0].status, "queued");
+        assert_eq!(all[1].status, "open", "other statuses are left alone");
 
         let _ = std::fs::remove_file(&path);
     }
