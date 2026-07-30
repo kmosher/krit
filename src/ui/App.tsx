@@ -21,6 +21,8 @@ import { FileEditorModal } from './components/FileEditorModal'
 import { UndoToast } from './components/UndoToast'
 import type { SelectionAnchor } from './utils/selectionMapping'
 import { diffHeaderPath } from './utils/diffHeader'
+import { linesToReveal } from './utils/collapsedContext'
+import { spliceCommentIslands } from './utils/commentIslands'
 import {
   changedNewLines,
   previewFormatFor,
@@ -799,6 +801,41 @@ export function App() {
     return map
   }, [comments])
 
+  // A comment anchored in a long collapsed region renders nowhere, and opening
+  // that region from its edge would render every line between the edge and the
+  // comment. Give each stranded anchor its own small island of context instead
+  // (commentIslands.ts); CodeViewWrapper's reveal path stays as the fallback
+  // for the gaps too short to be worth islanding.
+  //
+  // Derived from `files`, never from its own output: the anchor set is read off
+  // the un-islanded diff, where a stranded line is still in a gap. Reading it
+  // back off the result would find every anchor inside a hunk, drop the
+  // islands, and strand them again on the next pass.
+  const islandCacheRef = useRef<Map<string, { source: FileDiffMetadata; anchors: string; result: FileDiffMetadata }>>(
+    new Map(),
+  )
+  const islandedFiles = useMemo(() => {
+    const prevCache = islandCacheRef.current
+    const nextCache = new Map<string, { source: FileDiffMetadata; anchors: string; result: FileDiffMetadata }>()
+    const out = files.map((file) => {
+      const lines = linesToReveal(file, fileAnnotationsMap.get(file.name) ?? []).sort((a, b) => a - b)
+      const anchors = lines.join(',')
+      // Identity matters downstream: CodeViewWrapper swaps an item's fileDiff
+      // whenever this object changes, so an untouched file has to come back as
+      // the same object or every comment edit re-renders the whole review.
+      const cached = prevCache.get(file.name)
+      if (cached && cached.source === file && cached.anchors === anchors) {
+        nextCache.set(file.name, cached)
+        return cached.result
+      }
+      const result = spliceCommentIslands(file, lines)
+      nextCache.set(file.name, { source: file, anchors, result })
+      return result
+    })
+    islandCacheRef.current = nextCache
+    return out
+  }, [files, fileAnnotationsMap])
+
   const handleFileClick = useCallback((filePath: string) => {
     setActiveFile(filePath)
     diffViewerRef.current?.scrollToFile(filePath)
@@ -908,7 +945,7 @@ export function App() {
             // comment — instead of trying to patch them across the transition.
             key={`${settings.staged}:${settings.untracked}:${customMode}`}
             ref={diffViewerRef}
-            files={files}
+            files={islandedFiles}
             diffStyle={settings.diffStyle}
             defaultTabSize={settings.defaultTabSize}
             viewedFiles={viewedFiles}

@@ -181,14 +181,34 @@ skill together when you do.
   every anchored line as each file renders, which is why the reveal hangs off
   the render pass and not off an item write: virtualization rebuilds a file
   from scratch and the expansion state lives on the instance. Two consequences
-  worth knowing. Upstream expands *from a hunk boundary outward*, so reaching a
-  line in the middle of a 3000-line gap renders the whole first half of that
-  gap — there is no API for a window around a point, and a huge expansion is
-  still better than an invisible comment. And every reveal queues another
-  render pass, so the loop is bounded (`MAX_REVEAL_PASSES`); without that, an
-  expansion that failed to make its line renderable would hang the tab.
-  `revealLine` is keyed on new-file lines, so a deletion-side anchor goes
-  through `additionLineForAnchor` first.
+  worth knowing. Every reveal queues another render pass, so the loop is
+  bounded (`MAX_REVEAL_PASSES`); without that, an expansion that failed to make
+  its line renderable would hang the tab. And `revealLine` is keyed on new-file
+  lines, so a deletion-side anchor goes through `additionLineForAnchor` first.
+  Reveal is now only the fallback for short gaps — see the next note.
+- **A long gap gets an invented hunk, not an expansion** (`commentIslands.ts`,
+  spliced in `App.tsx` between `files` and what DiffViewer renders). Upstream
+  can only open a gap from its two edges — `HunkExpansionRegion` is
+  `{fromStart, fromEnd}` and there is no third window — so revealing a line
+  mid-gap renders everything between it and the nearer hunk. A *hunk's* lines
+  always render, so krit splits the gap instead: a context-only hunk around the
+  anchor, collapsed regions still on both sides. One comment in a 286-line gap
+  costs 31 rendered rows this way against ~243 for a reveal.
+  - It is safe to invent because it claims nothing: `additionLines` and
+    `deletionLines` are 0, so the island only re-labels lines the gap already
+    held. It consumes exactly what it removes from the next hunk's
+    `collapsedBefore`, which is why no later hunk's `splitLineStart` or
+    `unifiedLineStart` moves and the file's totals still hold. Nothing upstream
+    promises that, so `commentIslands.test.ts` asserts it against real
+    `parseDiffFromFile` output — and asserts it on upstream's own hunks first,
+    so a failure says which side moved.
+  - The anchor set is read off the **un-islanded** diff. Read it back off the
+    result and every anchor is inside a hunk, the islands drop, and the next
+    pass strands them again.
+  - An island needs the gap's old/new offset (`deletionStart`), or split view
+    renders the wrong text in the left column. Unit tests cover the arithmetic;
+    it is worth re-checking in a browser on a diff whose line numbers actually
+    diverge, since a zero offset hides the bug.
 - **`remark-rehype` does preserve source positions** on the hast tree, despite
   a lot of advice to the contrary — including on inline nodes. That is what
   makes character-level anchoring on the Markdown preview exact rather than
