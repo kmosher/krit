@@ -1,11 +1,17 @@
 # krit — agent notes
 
-`krit/` is the Rust server; `src/ui/` (React, Pierre CodeView) is the web
-UI it embeds; `src/types.ts` is the comment schema both share. `desktop/`
-is the Tauri app (krit.app) that claims the `krit://` scheme. The HTTP/WS
-API descends from v1 diffx (wong2's, later this repo's TS CLI — removed
-2026-07), which is why some shapes look the way they do; it is not a
-constraint. Change the wire freely, and move the server, the UI and the
+A cargo workspace plus a web UI. `krit/` is the Rust server; `src/ui/`
+(React, Pierre CodeView) is the web UI it embeds; `krit-tui/` is a second,
+terminal client (ratatui — read-only so far, see `docs/design/tui.md`);
+`krit-core/` holds what the server and its Rust clients must agree on
+exactly — the wire types, state-file discovery, repo identity, and
+`diff_header_path`. `src/types.ts` mirrors `krit-core::types` for the web UI
+and is the copy that can still drift. `desktop/` is the Tauri app (krit.app)
+that claims the `krit://` scheme.
+
+The HTTP/WS API descends from v1 diffx (wong2's, later this repo's TS CLI —
+removed 2026-07), which is why some shapes look the way they do; it is not a
+constraint. Change the wire freely, and move the server, both clients and the
 skill together when you do.
 
 ## Edit loops
@@ -76,6 +82,20 @@ skill together when you do.
   - Playwright needs `PLAYWRIGHT_BROWSERS_PATH` somewhere writable, and
     launching the browser needs the sandbox off (XPC fails "Connection
     Invalid" otherwise).
+- **Driving `krit-tui` needs a pty with a size, and the sandbox off.**
+  `openpty` fails "Operation not permitted" under the Bash sandbox. And a pty
+  inherits no window size, so `script`-style harnesses hand the app a 0×0
+  terminal and it faithfully draws nothing: fork the pty yourself and
+  `TIOCSWINSZ` it before reading a byte.
+  - **A captured chunk is a delta, not the screen.** ratatui emits only the
+    cells that changed, so reading the bytes that arrive after an event shows
+    an unchanged screen as an empty one — which reads exactly like the feature
+    being broken. Two checks were confidently wrong this way before the cause
+    was obvious. Force a full repaint before capturing (nudging the window size
+    makes `Terminal::draw` autoresize and repaint everything), or keep a real
+    emulator's screen state.
+  - Suspend has to be verified from outside: `ps -o state=` shows `T` while
+    stopped, and the app must have emitted `ESC[?1049l` *before* it stopped.
 - **The fs-watcher needs `com.apple.FSEvents` in the sandbox's
   `allowMachLookup`**: without it `FSEventStreamStart` fails silently, so
   `cargo test watcher` fails and a sandboxed `krit` never emits
@@ -105,6 +125,14 @@ skill together when you do.
   agents pay tokens per frame and shouldn't hear themselves work (`server.rs`,
   `agent_visible`). The UI's SSE stream (`/api/events`) carries everything.
   If a WS test "sees no events", check this before debugging the watcher.
+- **`krit-tui` subscribes as `role=ui`, not `role=cli`.** It is a human's
+  client, so it has to hold the server open the way a browser tab does; a `cli`
+  subscription would let the idle timeout fire with the review still on screen.
+  The visible consequence is that a running TUI counts in `clients.browsers`,
+  which is correct — it is a UI — but means "browsers: 1" no longer implies a
+  browser. The other half of the same choice: `/api/events` is unfiltered on
+  purpose, so the TUI debounces its refetches itself rather than asking the
+  server to coalesce.
 - **The comment poll sets `refetchIntervalInBackground: true`** (`useComments`),
   overriding react-query's default of pausing an interval while the page is
   unfocused. An automated browser reports itself hidden the whole time it is

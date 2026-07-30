@@ -26,6 +26,21 @@ krit
 
 This starts a local server on a random available port and opens the review UI — a browser tab by default, or the desktop app (below). The server waits for inline comments; click **Done reviewing** when finished (Ctrl+C to abort). That button opens a box for concluding notes and then ends the session — comments are optional, so a clean review is just notes, or nothing at all.
 
+### In the terminal
+
+`krit-tui` attaches to the krit server for the current worktree and branch and
+renders the same review in a terminal pane — useful next to the agent, or over
+SSH. Start `krit` first, then:
+
+```bash
+krit-tui
+```
+
+`j`/`k` move, `n`/`p` jump by hunk, `]`/`[` by file, `z` folds a file, `r`
+refetches, `?` lists the keys. It follows the same live event stream the
+browser does, so edits show up as they land. Reading only for now — comments
+are still the browser's job. Honors `NO_COLOR`.
+
 ### Desktop app
 
 `desktop/` is a thin [Tauri](https://v2.tauri.app/) shell (krit.app) that gives each review its own window under one dock icon instead of a browser tab. Build and wire it up:
@@ -109,10 +124,11 @@ Batch-style without an attached agent: click **Copy** in the toolbar and paste t
 
 ```bash
 just            # list targets
-just install    # cargo install --path krit (embeds a fresh UI build)
-just test       # Rust tests + TS typecheck
+just install    # both binaries (krit embeds a fresh UI build)
+just test       # Rust tests + TS typecheck + Vitest
 just check      # fmt + clippy + typecheck
 just dev        # vite dev server (UI) — pair with a debug-build krit server
+just tui        # the terminal client, against this worktree's krit server
 ```
 
 ## License
