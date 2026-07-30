@@ -9,11 +9,14 @@ mod pathsafe;
 mod reanchor;
 mod server;
 mod settings;
-mod state;
 mod store;
 mod subcommands;
-mod types;
 mod watcher;
+
+// Re-exported at the crate root so `crate::types::…` and `crate::state::…`
+// keep resolving: these two modules are shared with the TUI client and now
+// live in krit-core, but nothing about the server's view of them changed.
+pub use krit_core::{state, types};
 
 use state::{
     KritState, comments_store_path, default_state_path, remove_state_if_owned, write_state,

@@ -34,10 +34,10 @@ fn git_output(args: &[&str]) -> Result<Vec<u8>, String> {
 }
 
 /// Same as `git_output`, pinned to `root` rather than the process's
-/// inherited cwd — the diff calls below already carry `root` as a parameter
-/// (for the untracked/content-read paths), so there's no reason to rely on
-/// the ambient cwd matching it, the way the rest of this file's git_string
-/// callers still do.
+/// inherited cwd. Every git call in this file now names its root — the last
+/// cwd-relative ones were the repo-identity helpers, and they left for
+/// krit-core precisely because "which review is this" *is* a question about
+/// the ambient cwd.
 fn git_output_at(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     match Command::new("git").args(args).current_dir(root).output() {
         Ok(out) if out.status.success() => Ok(out.stdout),
@@ -46,35 +46,12 @@ fn git_output_at(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn git_stdout(args: &[&str]) -> Option<Vec<u8>> {
-    git_output(args).ok()
-}
-
-fn git_string(args: &[&str]) -> Option<String> {
-    git_stdout(args).map(|b| String::from_utf8_lossy(&b).into_owned())
-}
-
-pub fn is_git_repo() -> bool {
-    git_string(&["rev-parse", "--is-inside-work-tree"]).is_some()
-}
-
-pub fn repo_root() -> Option<String> {
-    git_string(&["rev-parse", "--show-toplevel"]).map(|s| s.trim().to_string())
-}
-
-pub fn repo_name() -> String {
-    repo_root()
-        .as_deref()
-        .and_then(|r| Path::new(r).file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-pub fn branch_name() -> String {
-    git_string(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
+// Which repo and branch we are in moved to krit-core, because a client has to
+// derive the same per-review state-file path the server wrote. They are
+// re-exported rather than relocated at the call sites: this is still where a
+// reader looks for "everything git", and the split is about who links the
+// code, not about where it belongs.
+pub use krit_core::repo::{branch_name, is_git_repo, repo_name, repo_root};
 
 pub fn custom_git_diff(args: &[String]) -> Result<String, String> {
     let mut cmd_args: Vec<&str> = QUOTE_PATH_OFF.to_vec();
