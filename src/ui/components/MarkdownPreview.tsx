@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { isValidElement, useMemo } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
@@ -98,7 +98,7 @@ interface Props {
  * already set — so a label selected in the picture anchors inside the fence,
  * and a `mapOffset`ed notebook cell needs no special case.
  */
-function MermaidFence({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
+function MermaidFence({ node, children }: { node?: HastNode; children?: React.ReactNode }) {
   const stamp = String(node?.properties?.dataSrc ?? '')
   const dash = stamp.indexOf('-')
   const start = dash > 0 ? Number(stamp.slice(0, dash)) : NaN
@@ -109,6 +109,9 @@ function MermaidFence({ node, children }: { node?: { properties?: Record<string,
     <DiagramPreview
       source={text}
       span={{ start, end }}
+      // The plugin stamped both halves on this node; taking only the offsets
+      // would leave a diagram the diff actually changed looking untouched.
+      changed={node?.properties?.dataChanged === 'true'}
       render={renderMermaid}
       label="Mermaid"
       className="diagram-preview-fenced"
@@ -116,20 +119,37 @@ function MermaidFence({ node, children }: { node?: { properties?: Record<string,
   )
 }
 
+interface HastNode {
+  properties?: Record<string, unknown>
+}
+
+/**
+ * The text of a fence's children. Recurses through elements rather than
+ * stopping at them: a plugin that wraps the code node would otherwise reduce
+ * the diagram source to the empty string, and Mermaid would draw nothing with
+ * no indication why.
+ */
 function flattenText(children: React.ReactNode): string {
   if (typeof children === 'string') return children
+  if (typeof children === 'number') return String(children)
   if (Array.isArray(children)) return children.map(flattenText).join('')
+  if (isValidElement<{ children?: React.ReactNode }>(children)) {
+    return flattenText(children.props.children)
+  }
   return ''
 }
 
 // `code` rather than `pre`: only the inner element carries the language class,
 // and only it is stamped with the fence's span.
 const COMPONENTS = {
-  code(props: { className?: string; node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
-    if (/(^|\s)language-mermaid(\s|$)/.test(props.className ?? '')) {
-      return <MermaidFence node={props.node} children={props.children} />
+  // `node` is react-markdown's hast handle, not a DOM attribute — spreading it
+  // onto the element writes `node="[object Object]"` on every inline code span
+  // in the document.
+  code({ node, ...rest }: { className?: string; node?: HastNode; children?: React.ReactNode }) {
+    if (/(^|\s)language-mermaid(\s|$)/.test(rest.className ?? '')) {
+      return <MermaidFence node={node}>{rest.children}</MermaidFence>
     }
-    return <code {...props} />
+    return <code {...rest} />
   },
 }
 

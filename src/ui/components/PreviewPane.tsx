@@ -1,9 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type RefObject,
+} from 'react'
 import { createPortal } from 'react-dom'
 import type { ReviewComment } from '../../types'
 import type { SelectionAnchor } from '../utils/selectionMapping'
 import { rendersInPage, type PreviewFormat } from '../utils/previewFormat'
-import { delimiterFor } from '../utils/csvPreview'
+import { delimiterFor } from '../utils/csvParse'
 import {
   buildLineIndex,
   lineColToOffset,
@@ -62,6 +70,65 @@ interface PendingSelection {
   renderedText: string
   x: number
   y: number
+}
+
+/**
+ * One renderer per format, keyed by the format itself so the type checker —
+ * not a reader — is what notices a format with nowhere to render. This was a
+ * ternary chain whose final `else` was the HTML iframe, which meant a new
+ * format silently rendered its source through `srcDoc` as though it were an
+ * artifact.
+ */
+const RENDERERS: Record<PreviewFormat, (ctx: RenderContext) => ReactElement> = {
+  markdown: ({ source, changedRanges }) => (
+    <MarkdownPreview source={source} changedRanges={changedRanges} />
+  ),
+  notebook: ({ source, changedRanges }) => (
+    <NotebookPreview source={source} changedRanges={changedRanges} />
+  ),
+  csv: ({ source, filePath, changedRanges }) => (
+    <CsvPreview source={source} delimiter={delimiterFor(filePath)} changedRanges={changedRanges} />
+  ),
+  svg: ({ source, changedRanges }) => <SvgPreview source={source} changedRanges={changedRanges} />,
+  mermaid: ({ source, changedRanges }) => (
+    <DiagramPreview
+      source={source}
+      span={{ start: 0, end: source.length }}
+      changed={changedRanges.length > 0}
+      render={renderMermaid}
+      label="Mermaid"
+    />
+  ),
+  dot: ({ source, changedRanges }) => (
+    <DiagramPreview
+      source={source}
+      span={{ start: 0, end: source.length }}
+      changed={changedRanges.length > 0}
+      render={renderGraphviz}
+      label="Graphviz"
+    />
+  ),
+  html: ({ source, filePath, frameRef, frameHeight }) => (
+    <iframe
+      ref={frameRef}
+      className="preview-pane-frame"
+      title={`Preview of ${filePath}`}
+      // No allow-same-origin: with it, the sandbox would grant the artifact
+      // this page's origin back, and this page can write files. See
+      // htmlSandbox.ts.
+      sandbox="allow-scripts"
+      srcDoc={buildSandboxDocument(source)}
+      style={{ height: frameHeight }}
+    />
+  ),
+}
+
+interface RenderContext {
+  source: string
+  filePath: string
+  changedRanges: Array<[number, number]>
+  frameRef: RefObject<HTMLIFrameElement | null>
+  frameHeight: number
 }
 
 export function PreviewPane({
@@ -153,11 +220,11 @@ export function PreviewPane({
   // --- HTML: the artifact runs in an opaque origin, so its selection can only
   // arrive by postMessage from the injected bridge.
   const textMap = useMemo(
-    () => (format === 'html' ? buildHtmlTextMap(source) : null),
+    () => (rendersInPage(format) ? null : buildHtmlTextMap(source)),
     [format, source],
   )
   useEffect(() => {
-    if (format !== 'html' || !textMap) return
+    if (rendersInPage(format) || !textMap) return
     const onMessage = (e: MessageEvent) => {
       if (e.source !== frameRef.current?.contentWindow) return
       const msg = asBridgeMessage(e.data)
@@ -257,39 +324,13 @@ export function PreviewPane({
   return (
     <div className="preview-pane">
       <div className="preview-pane-content" ref={bodyRef}>
-        {format === 'markdown' ? (
-          <MarkdownPreview source={source} changedRanges={changedRanges} />
-        ) : format === 'notebook' ? (
-          <NotebookPreview source={source} changedRanges={changedRanges} />
-        ) : format === 'csv' ? (
-          <CsvPreview
-            source={source}
-            delimiter={delimiterFor(filePath)}
-            changedRanges={changedRanges}
-          />
-        ) : format === 'svg' ? (
-          <SvgPreview source={source} changedRanges={changedRanges} />
-        ) : format === 'mermaid' || format === 'dot' ? (
-          <DiagramPreview
-            source={source}
-            span={{ start: 0, end: source.length }}
-            changed={changedRanges.length > 0}
-            render={format === 'mermaid' ? renderMermaid : renderGraphviz}
-            label={format === 'mermaid' ? 'Mermaid' : 'Graphviz'}
-          />
-        ) : (
-          <iframe
-            ref={frameRef}
-            className="preview-pane-frame"
-            title={`Preview of ${filePath}`}
-            // No allow-same-origin: with it, the sandbox would grant the
-            // artifact this page's origin back, and this page can write
-            // files. See htmlSandbox.ts.
-            sandbox="allow-scripts"
-            srcDoc={buildSandboxDocument(source)}
-            style={{ height: frameHeight }}
-          />
-        )}
+        {RENDERERS[format]({
+          source,
+          filePath,
+          changedRanges,
+          frameRef,
+          frameHeight,
+        })}
       </div>
 
       <aside className="preview-pane-rail">

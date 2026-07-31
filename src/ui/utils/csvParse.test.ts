@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { delimiterFor, parseDelimited } from './csvPreview'
+import { delimiterFor, parseDelimited } from './csvParse'
 
 const texts = (source: string, delimiter = ',') =>
   parseDelimited(source, delimiter).map((r) => r.cells.map((c) => c.text))
@@ -51,6 +51,34 @@ describe('parseDelimited', () => {
       ['a', 'b'],
       ['c', 'd'],
     ])
+  })
+
+  // The CRLF case above passes with the terminator consumed twice; this one
+  // does not. A quoted last field is what Excel and most database exports
+  // write, and the doubled terminator gave every such row an empty trailing
+  // cell plus a CR in the last one — a whole junk column, misaligned against
+  // the header, on the most ordinary CSV there is.
+  it('strips the CR after a quoted field, and opens no cell for it', () => {
+    expect(texts('"a","b"\r\n"c","d"\r\n')).toEqual([
+      ['a', 'b'],
+      ['c', 'd'],
+    ])
+  })
+
+  it('keeps text written after a closing quote in the same cell', () => {
+    expect(texts('"ab"xy,z')).toEqual([['abxy', 'z']])
+  })
+
+  it('treats a blank line as a separator, not a row of one empty field', () => {
+    expect(texts('a,b\n\nc,d\n')).toEqual([
+      ['a', 'b'],
+      ['c', 'd'],
+    ])
+  })
+
+  it('still numbers rows by their real lines when a blank line is skipped', () => {
+    const rows = parseDelimited('a,b\n\nc,d\n', ',')
+    expect(rows.map((r) => r.startLine)).toEqual([1, 3])
   })
 
   it('yields no rows for an empty file', () => {

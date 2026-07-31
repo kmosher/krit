@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { parseNotebook, toFileOffset, type NotebookCell } from '../utils/notebookPreview'
+import { parseNotebook, toFileOffset, type NotebookCell } from '../utils/notebookParse'
 import { rangesIntersect } from '../utils/previewFormat'
 import { MarkdownPreview } from './MarkdownPreview'
 
@@ -82,11 +82,15 @@ function Cell({ cell, changed }: { cell: NotebookCell; changed: boolean }) {
 }
 
 /**
- * A code (or raw) cell, one stamped span per line. Per line rather than per
- * cell because the locate-by-value rule in `previewAnchor.ts` searches an
- * element's source slice for the text node's exact value: a line is a run that
- * really does occur verbatim inside its own JSON string literal, while a whole
- * cell's text — with real newlines where the file has `\n",\n "` — does not.
+ * A code (or raw) cell, stamped twice over: the cell's whole span on the
+ * `<pre>`, and each line's own span on the row inside it.
+ *
+ * The per-line spans are what make an exact anchor possible. The locate-by-
+ * value rule in `previewAnchor.ts` searches an element's source slice for the
+ * text node's exact value, and a line is a run that really does occur verbatim
+ * inside its own JSON string literal — a whole cell's text, with real newlines
+ * where the file has `\n",\n "`, does not. The cell span is what a selection
+ * crossing two lines snaps outward to.
  */
 function CellSource({ cell, changed }: { cell: NotebookCell; changed: boolean }) {
   const lines = useMemo(() => {

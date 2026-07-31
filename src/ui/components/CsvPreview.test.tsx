@@ -1,39 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { render } from '@testing-library/react'
 import { CsvPreview } from './CsvPreview'
-import { buildLineIndex, lineColToOffset, previewRangeToAnchor } from '../utils/previewAnchor'
+import { anchorForSelection, textNode } from '../utils/previewTestHelpers'
 
 const SOURCE = 'name,note\nada,"first, and best"\ngrace,compiler\n'
 
-function cellText(container: HTMLElement, text: string): Text {
-  const walk = (n: Node): Text | null => {
-    if (n.nodeType === 3 && n.nodeValue === text) return n as Text
-    for (let c = n.firstChild; c; c = c.nextSibling) {
-      const hit = walk(c)
-      if (hit) return hit
-    }
-    return null
-  }
-  const found = walk(container)
-  if (!found) throw new Error(`no cell reading ${JSON.stringify(text)}`)
-  return found
-}
-
 function anchorOf(container: HTMLElement, text: string, from: number, to: number) {
   const root = container.querySelector('.csv-preview-body')!
-  const node = cellText(container, text)
-  const range = document.createRange()
-  range.setStart(node, from)
-  range.setEnd(node, to)
-  const anchor = previewRangeToAnchor(range, root, SOURCE, buildLineIndex(SOURCE))!
-  const starts = buildLineIndex(SOURCE)
-  return {
-    anchor,
-    slice: SOURCE.slice(
-      lineColToOffset(starts, anchor.startLine, anchor.startColumn),
-      lineColToOffset(starts, anchor.endLine, anchor.endColumn),
-    ),
-  }
+  return anchorForSelection(root, textNode(container, text), from, to, SOURCE)
 }
 
 describe('CsvPreview', () => {
@@ -72,7 +46,7 @@ describe('CsvPreview', () => {
     }
   })
 
-  it('says so rather than rendering an empty table', () => {
+  it('says the file is empty rather than rendering an empty table', () => {
     const { container } = render(<CsvPreview source="" delimiter="," changedRanges={[]} />)
     expect(container.querySelector('.csv-preview-empty')).not.toBeNull()
   })

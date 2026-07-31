@@ -57,4 +57,14 @@ describe('parseXml', () => {
   it('allows trailing whitespace after the root, because files end in one', () => {
     expect(parseXml('<svg/>\n')).not.toBeNull()
   })
+
+  it('leaves an out-of-range numeric entity alone instead of throwing', () => {
+    // `String.fromCodePoint` throws above U+10FFFF, and this runs inside a
+    // render — an unguarded one takes the page down rather than reporting a
+    // file it cannot read.
+    expect(() => parseXml('<svg><text>&#xFFFFFFF;</text></svg>')).not.toThrow()
+    const root = parseXml('<svg><text>&#xFFFFFFF;</text></svg>')!
+    const text = (root.children[0] as { children: Array<{ value: string }> }).children[0]
+    expect(text.value).toBe('&#xFFFFFFF;')
+  })
 })
