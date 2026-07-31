@@ -9,11 +9,9 @@ interface CommentBubbleProps {
   comment: ReviewComment
   onDelete: (id: string) => void
   onReply: (id: string, body: string) => void
-  // Rewrite a queued comment's text. Only queued comments offer it: a posted
-  // comment has already reached the agent, and the update route broadcasts
-  // nothing for a body change, so editing one would leave the reviewer and the
-  // agent reading different text with nothing to say so. Optional, for the
-  // surfaces that render comments read-only.
+  // Rewrite a queued comment's text. Only queued comments offer it (see
+  // CLAUDE.md, "Only a queued comment is editable"). Optional, for the surfaces
+  // that render comments read-only.
   onEdit?: (id: string, body: string) => Promise<void> | void
 }
 
@@ -21,10 +19,8 @@ export function CommentBubble({ comment, onDelete, onReply, onEdit }: CommentBub
   const [, setTick] = useState(0)
   const [replying, setReplying] = useState(false)
   const [editing, setEditing] = useState(false)
-  // Belt and braces for the same hazard the `key` at the call site addresses:
-  // this component is reused across comments wherever a caller forgets it, and
-  // an open editor carried onto another comment saves one comment's text under
-  // another comment's id. Reset rather than trust every future call site.
+  // Reset rather than trust every call site to key this by comment id — see
+  // the `key` at the annotation call site for why reuse happens at all.
   const lastIdRef = useRef(comment.id)
   if (lastIdRef.current !== comment.id) {
     lastIdRef.current = comment.id

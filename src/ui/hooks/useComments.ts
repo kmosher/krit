@@ -208,9 +208,7 @@ export function useComments(onError?: (message: string) => void) {
       body?: string
       status?: ReviewComment['status']
       // Refuses the write server-side unless the comment is still in this
-      // state — see api_comment_put. The editor sends 'queued' so a save that
-      // lost the race against "Post queued" fails loudly instead of rewriting
-      // a comment the agent has already read.
+      // state — see api_comment_put's expectStatus.
       expectStatus?: ReviewComment['status']
     }) => {
       const res = await fetch(`/api/comments/${id}`, {

@@ -1064,17 +1064,15 @@ async fn api_comment_put(
         )
             .into_response();
     }
-    // Optional optimistic concurrency, used by the browser's queued-comment
-    // editor. A body edit is only safe while the comment is still queued: once
-    // it is posted, this route changes the stored text and broadcasts nothing,
-    // so a save that lands a moment too late would leave the reviewer and the
-    // agent reading different comments with nothing anywhere to say so. The
-    // reviewer can lose that race by clicking "Post queued" (or Done reviewing)
-    // while a save is in flight. Refusing here is what makes it a visible
-    // failure instead of a silent divergence.
     let expect_status = payload["expectStatus"].as_str();
     let (was_queued, updated) = {
         let mut store = lock(&state.store);
+        // Optional optimistic concurrency, sent by the browser's queued-comment
+        // editor. A body edit is only safe while the comment is still queued —
+        // afterwards this route rewrites the stored text and broadcasts nothing
+        // (see CLAUDE.md, "Only a queued comment is editable"). Refusing makes a
+        // save that lost the race a visible failure rather than a silent
+        // divergence. Callers that send no expectation are unaffected.
         if let Some(expected) = expect_status {
             let current = store.get(&id).map(|c| c.status.clone());
             match current {
@@ -2357,10 +2355,8 @@ mod tests {
     #[test]
     fn expect_status_refuses_an_edit_that_lost_the_race_to_posting() {
         // The reviewer can click "Post queued" (or Done reviewing) while a save
-        // is in flight. This route broadcasts nothing for a body change, so
-        // letting the late write land would leave the agent holding the text it
-        // was posted with and the reviewer looking at something else, with
-        // nothing anywhere to say the two disagree.
+        // is in flight; letting the late write land is the silent divergence
+        // this expectation exists to prevent.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (root, port) = spawn_edit_server(&rt, "edit-raced");
         let id = post_queued_comment(port, "first thoughts");

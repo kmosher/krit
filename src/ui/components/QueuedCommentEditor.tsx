@@ -36,10 +36,11 @@ export function QueuedCommentEditor({ initialBody, onSave, onCancel }: QueuedCom
 
   const edited = body !== initialBody
 
-  // The single exit, so no path drops an edit without asking — the rule
-  // CommentForm's requestCancel and FileEditorModal's requestClose follow. An
-  // inline strip rather than confirm(), which would freeze the page for
-  // anything driving the browser.
+  // The only exit that may discard work: every other close path either goes
+  // through here or is answering the question it asks — the rule CommentForm's
+  // requestCancel and FileEditorModal's requestClose follow. An inline strip
+  // rather than confirm(), which would freeze the page for anything driving
+  // the browser.
   const requestCancel = () => {
     if (edited) {
       setConfirmingDiscard(true)

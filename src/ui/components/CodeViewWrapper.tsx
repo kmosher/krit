@@ -157,17 +157,30 @@ const WRAP_SAMPLE_LIMIT = 2000
 // Pierre's own defaults stand.
 const MEASURE_ATTEMPTS = 60
 
-// How long to keep an open draft pinned in place after a diff update: tick
-// interval, a cap on ticks, and how many consecutive still ticks count as
-// settled. A hidden page clamps timers to about a second, so the cap is what
-// keeps the loop from outliving the update that started it.
+// How long to keep an open draft pinned in place after a diff update. The loop
+// ends on whichever comes first: the draft holding still for ANCHOR_SETTLED_TICKS
+// running, or either cap. Both caps are needed — a hidden page clamps timers to
+// about a second, so a tick count alone would stretch across most of a minute,
+// still snapping the reviewer's scroll back long after the update.
 const ANCHOR_TICK_MS = 32
-const ANCHOR_SETTLE_TICKS = 40
-const ANCHOR_STABLE_TICKS = 3
-// The wall-clock half of the same budget, for the hidden page whose timers are
-// clamped to ~1s and would otherwise stretch those 40 ticks across 40 seconds.
-const ANCHOR_SETTLE_MS = 2000
+const ANCHOR_MAX_TICKS = 40
+const ANCHOR_MAX_MS = 2000
+const ANCHOR_SETTLED_TICKS = 3
+// Off-screen recoveries per hold. Bounded because each one scrolls the surface,
+// and so provokes the render that can lose the form again.
 const ANCHOR_RECOVERIES = 4
+
+// Where an open draft sat before an update, and enough about the draft to put
+// it back. `itemId`/`side`/`lineNumber` are absent only when the draft behind
+// the form could not be found (see captureDraftAnchor), which costs the
+// off-screen recovery, not the hold.
+type DraftAnchor = {
+  key: string
+  top: number
+  itemId?: string
+  side?: AnnotationSide
+  lineNumber?: number
+}
 
 // Input that means the reviewer is moving the surface themselves, at which
 // point holding the draft still would be fighting them.
@@ -744,15 +757,6 @@ export const CodeViewWrapper = memo(
       return { key, itemId: draft.itemId, side: draft.side, lineNumber: draft.endLine, top }
     }
 
-    type DraftAnchor = {
-      key: string
-      top: number
-      // Absent only when the draft behind the form could not be found, which
-      // costs the recovery path (see captureDraftAnchor), not the hold.
-      itemId?: string
-      side?: AnnotationSide
-      lineNumber?: number
-    }
     const anchorHoldRef = useRef<{
       observer: ResizeObserver
       timer: number
@@ -774,23 +778,6 @@ export const CodeViewWrapper = memo(
         hold.boundTo?.removeEventListener(type, hold.release)
       }
     })
-    // Keeping the reviewer's scroll position is not the same as keeping their
-    // *place*: an agent's write to any file above the viewport changes that
-    // file's height, and a scrollTop the update never touched then points
-    // somewhere else entirely — which, mid-sentence, walks the comment form off
-    // the screen. So put the draft back where it was rather than the number.
-    //
-    // Only while a draft is open: with nothing being typed into, scroll
-    // position is the ordinary thing to preserve and Pierre reanchors it
-    // itself. And only a lifted draft, since only those carry a
-    // `data-draft-key` — a reply form does not survive a remount either way,
-    // so holding its position would preserve something about to be destroyed.
-    //
-    // A single post-update correction is not enough: the rows an update
-    // produces are painted by the highlight worker pool over the following
-    // frames, and each pass can move everything below it again. Correct on a
-    // short frame loop instead, and re-find the element by key each time —
-    // a remount rebuilds the form, so its node identity does not survive.
     // (Re)attach the observer and the release listeners to whichever element is
     // CodeView's container *now*. The structural path starts a hold before the
     // remount, so the node bound at that moment is detached a tick later —
@@ -816,25 +803,36 @@ export const CodeViewWrapper = memo(
       hold.boundTo = container
     })
 
+    // Keeping the reviewer's scroll position is not the same as keeping their
+    // *place*: an agent's write to any file above the viewport changes that
+    // file's height, and a scrollTop the update never touched then points
+    // somewhere else entirely — which, mid-sentence, walks the comment form off
+    // the screen. So put the draft back where it was rather than the number.
+    //
+    // Only while a draft is open: with nothing being typed into, scroll
+    // position is the ordinary thing to preserve and Pierre reanchors it
+    // itself. And only a lifted draft, since only those carry a
+    // `data-draft-key` — a reply form does not survive a remount either way,
+    // so holding its position would preserve something about to be destroyed.
+    //
+    // Correcting once is not enough — an update's rows are painted over the
+    // following moments (the highlight worker pool, Pierre's own relayout and
+    // its own scroll reanchoring), and each pass can move everything above the
+    // draft again, so it keeps putting the draft back until the surface stops
+    // moving, re-finding the element by key each time (a remount rebuilds it).
+    //
+    // Driven by a ResizeObserver plus a timer, and deliberately NOT by
+    // requestAnimationFrame: a page reports itself hidden the whole time
+    // anything drives it programmatically, and a hidden page's rAF callbacks
+    // never run, so an rAF-driven hold does nothing at all in exactly the
+    // sessions krit exists for — with nothing to see but a draft that scrolled
+    // away.
     const holdDraftAnchor = (anchor: DraftAnchor | null) => {
       if (!anchor) return
       stopAnchorHold()
-      // Correcting once is not enough — an update's rows are painted over the
-      // following moments (the highlight worker pool, Pierre's own relayout and
-      // its own scroll reanchoring), and each pass can move everything above the
-      // draft again. So keep putting it back until the surface stops moving.
-      //
-      // Driven by a ResizeObserver plus a timer, and deliberately NOT by
-      // requestAnimationFrame: a page reports itself hidden the whole time
-      // anything drives it programmatically, and a hidden page's rAF callbacks
-      // never run. Built on rAF this loop was a no-op in exactly the sessions
-      // krit exists for, with nothing to see but a draft that scrolled away.
-      let ticks = ANCHOR_SETTLE_TICKS
+      let ticks = ANCHOR_MAX_TICKS
       let stable = 0
       const startedAt = Date.now()
-      // Bounded, because each recovery scrolls the surface and so provokes the
-      // render that can lose the form again — unbounded, two of those chase
-      // each other for as long as the loop lives.
       let recoveries = ANCHOR_RECOVERIES
       const correct = () => {
         bindAnchorHold()
@@ -866,13 +864,8 @@ export const CodeViewWrapper = memo(
             align: 'center',
           })
         }
-        // Stop once the draft has held still for a few ticks running, or when
-        // either budget runs out. Both budgets are needed: a hidden page clamps
-        // timers to about a second, so counting ticks alone would keep snapping
-        // the reviewer's scroll back for the better part of a minute on a
-        // surface that never settles.
         const spent = Date.now() - startedAt
-        if (--ticks <= 0 || spent >= ANCHOR_SETTLE_MS || stable >= ANCHOR_STABLE_TICKS) {
+        if (--ticks <= 0 || spent >= ANCHOR_MAX_MS || stable >= ANCHOR_SETTLED_TICKS) {
           stopAnchorHold()
         }
       }

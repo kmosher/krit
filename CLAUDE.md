@@ -182,9 +182,9 @@ skill together when you do.
   `holdDraftAnchor` note where the form sits and put it back, re-finding it by
   `data-draft-key` (a remount rebuilds the node) over a bounded loop of ticks —
   one correction is not enough, since the worker pool, Pierre's relayout and
-  Pierre's own scroll reanchoring each move things again afterwards. Four
-  properties of that loop are load-bearing, and every one of them fails
-  silently — a green suite and a clean build say nothing about any of them:
+  Pierre's own scroll reanchoring each move things again afterwards. Every
+  property of that loop below is load-bearing, and each fails silently — a green
+  suite and a clean build say nothing about any of them:
   - **Nothing in this loop may hang off `requestAnimationFrame`.** A page
     reports itself hidden the whole time anything drives it programmatically,
     and a hidden page's rAF callbacks never run — so an rAF-driven hold is a
@@ -313,7 +313,7 @@ skill together when you do.
 - **Done reviewing closes krit.app's window, and cannot close a browser tab.**
   `window.close()` only works on a window a script opened, and a tab launched
   from a terminal has no opener — Chrome ignores the call. So the button says
-  "Done ✓ — close this tab" when the window is staying, and `closeReviewWindow`
+  "Done ✓ — close this window" when the window is staying, and `closeReviewWindow`
   returns which happened rather than pretending. krit.app closes for real
   through Tauri's own API (`withGlobalTauri`, plus `core:window:allow-close`
   scoped to the localhost URLs the app frames). Do not reach for the
