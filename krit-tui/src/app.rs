@@ -126,6 +126,8 @@ pub enum Action {
     /// Side-by-side, or unified. A preference: on a pane too narrow to carry
     /// two code columns it is remembered and not obeyed.
     ToggleSplit,
+    /// Tick the file under the cursor off, or un-tick it.
+    ToggleViewed,
     /// Open or fold the unchanged run under the cursor by a few lines. Does
     /// nothing anywhere else, which is why the keys are announced on the row
     /// itself rather than in the footer — they are only live where they mean
@@ -289,6 +291,14 @@ pub struct App {
     /// same predicate, spelled `watcherCount > 0 || agentCount > 0`.
     pub listeners: usize,
     pub should_quit: bool,
+    /// Files the reviewer has ticked off, by path — the same set the browser's
+    /// checkbox writes, through the same route. A viewed file keeps its header
+    /// and loses its body, which is what the browser does with it too.
+    ///
+    /// Not merged into `collapsed`: that is this session's folding, and this is
+    /// durable state the server owns. Un-ticking a file has to give back
+    /// whatever the reviewer had folded, not flatten the two together.
+    pub viewed: HashSet<String>,
     /// First file drawn in the list. Owned rather than derived from the cursor,
     /// for the same reason the diff's `offset` is: a position recomputed from
     /// the cursor every frame cannot be moved by a wheel, because the next
@@ -354,6 +364,7 @@ impl Default for App {
             tab_size: 4,
             listeners: 0,
             should_quit: false,
+            viewed: HashSet::new(),
             files_offset: 0,
             file_text: HashMap::new(),
             file_text_refusal: HashMap::new(),
@@ -555,11 +566,27 @@ impl App {
         true
     }
 
+    /// Replace the ticked-off set, keeping the cursor where it is.
+    ///
+    /// A tick removes a file's body, so the rows below it move by however many
+    /// lines that file had — the same shift `set_comments` handles, and the
+    /// same answer: re-find the cursor by row identity rather than by index.
+    pub fn set_viewed(&mut self, viewed: HashSet<String>) {
+        let at = self.rows.get(self.cursor).copied();
+        self.viewed = viewed;
+        self.rebuild();
+        if let Some(row) = at.and_then(|r| self.rows.iter().position(|x| *x == r)) {
+            self.cursor = row;
+        }
+        self.offset = self.offset.min(self.rows.len().saturating_sub(1));
+    }
+
     pub fn rebuild(&mut self) {
         self.comment_rows = layout(&self.comments, &self.files, self.wrap_width);
         self.rows = build_rows(
             &self.files,
             &self.collapsed,
+            &self.viewed,
             &self.comment_rows,
             &self.gaps,
             &self.expanded,
@@ -877,6 +904,7 @@ impl App {
             | Action::Reply
             | Action::ToggleResolved
             | Action::PostQueued
+            | Action::ToggleViewed
             | Action::Submit => {}
         }
 
@@ -1436,9 +1464,13 @@ fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
         (KeyCode::Char('m'), false) => Action::ToggleMouse,
         // `V` too, because in vim the two differ by whether the selection is
         // line-wise — and here it always is.
-        (KeyCode::Char('v'), false) | (KeyCode::Char('V'), false) => Action::ToggleVisual,
+        (KeyCode::Char('v'), false) => Action::ToggleVisual,
         (KeyCode::Char('?'), false) => Action::ToggleHelp,
         (KeyCode::Char('s'), false) => Action::ToggleSplit,
+        // `v` alone is the visual mode — it is already line-wise, so `V` was a
+        // synonym rather than a second granularity, and this is the key the
+        // browser's checkbox is labelled with.
+        (KeyCode::Char('V'), false) => Action::ToggleViewed,
         // Same physical key shifted and unshifted, so they mean the same thing;
         // binding them differently is how a reviewer expands twice by accident.
         (KeyCode::Char('+'), false) | (KeyCode::Char('='), false) => {

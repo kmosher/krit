@@ -248,6 +248,10 @@ pub enum Note {
     RenamedFrom,
     Binary,
     Collapsed,
+    /// Ticked off. Its own note rather than reusing `Collapsed`, because the
+    /// two hide the body for different reasons and only one of them survives
+    /// the session.
+    Viewed,
     /// The executable bit changed. Its own note because such a file has no
     /// hunks at all — without it the header reads `+0 −0` and the reviewer has
     /// no way to tell why the file is in the review.
@@ -284,7 +288,9 @@ impl Row {
 /// Flatten files into rows.
 ///
 /// - `collapsed` holds paths whose bodies are hidden — the header still
-///   renders, so a collapsed file is navigable rather than gone.
+///   renders, so a collapsed file is navigable rather than gone. `viewed` does
+///   the same for a different reason: it is the reviewer's durable tick, shared
+///   with the browser, and it wins because a ticked-off file is done either way.
 /// - `gaps` is the unchanged runs between hunks, by path, and `expanded` how
 ///   much of each one the reviewer has opened. A path missing from `gaps` draws
 ///   no `⋯` row, which is what a file whose text never arrived looks like.
@@ -294,6 +300,7 @@ impl Row {
 pub fn build_rows(
     files: &[FileDiff],
     collapsed: &HashSet<String>,
+    viewed: &HashSet<String>,
     comments: &CommentRows,
     gaps: &HashMap<String, Vec<GapRange>>,
     expanded: &HashMap<(String, usize), Opened>,
@@ -327,6 +334,13 @@ pub fn build_rows(
                 file: fi,
                 note: Note::Mode,
             });
+        }
+        if viewed.contains(&file.path) {
+            rows.push(Row::Meta {
+                file: fi,
+                note: Note::Viewed,
+            });
+            continue;
         }
         if collapsed.contains(&file.path) {
             rows.push(Row::Meta {
@@ -614,6 +628,7 @@ mod tests {
         let rows = build_rows(
             &files,
             &HashSet::new(),
+            &HashSet::new(),
             &CommentRows::default(),
             &HashMap::new(),
             &HashMap::new(),
@@ -692,6 +707,7 @@ mod tests {
         let rows = build_rows(
             &files,
             &HashSet::new(),
+            &HashSet::new(),
             &comments,
             &HashMap::new(),
             &HashMap::new(),
@@ -722,6 +738,7 @@ mod tests {
         let rows = build_rows(
             &files,
             &HashSet::new(),
+            &HashSet::new(),
             &comments,
             &HashMap::new(),
             &HashMap::new(),
@@ -745,6 +762,7 @@ mod tests {
         let rows = build_rows(
             &files,
             &collapsed,
+            &HashSet::new(),
             &comments,
             &HashMap::new(),
             &HashMap::new(),
@@ -756,12 +774,89 @@ mod tests {
     }
 
     #[test]
+    fn a_viewed_file_keeps_its_header_and_loses_its_body() {
+        // What the browser does with its checkbox — the file is done, but it
+        // has to stay navigable so it can be un-ticked.
+        let files = parse_patch(TWO_FILES, &[]);
+        let viewed: HashSet<String> = ["a.rs".to_string()].into_iter().collect();
+        let rows = build_rows(
+            &files,
+            &HashSet::new(),
+            &viewed,
+            &CommentRows::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+        );
+        assert_eq!(rows[0], Row::File { file: 0 });
+        assert_eq!(
+            rows[1],
+            Row::Meta {
+                file: 0,
+                note: Note::Viewed
+            }
+        );
+        assert!(
+            !rows.iter().any(|r| matches!(r, Row::Code { file: 0, .. })),
+            "no body for a ticked-off file"
+        );
+        assert!(
+            rows.iter().any(|r| matches!(r, Row::Code { file: 1, .. })),
+            "and the untouched file is untouched"
+        );
+    }
+
+    #[test]
+    fn viewed_and_collapsed_are_separate_reasons_to_hide_a_body() {
+        // A tick is durable and shared with the browser; folding is this
+        // session's. Merging them would mean un-ticking a file silently
+        // unfolded it, or that folding one leaked to the other client.
+        let files = parse_patch(TWO_FILES, &[]);
+        let one: HashSet<String> = ["a.rs".to_string()].into_iter().collect();
+        let note_for = |collapsed: &HashSet<String>, viewed: &HashSet<String>| {
+            build_rows(
+                &files,
+                collapsed,
+                viewed,
+                &CommentRows::default(),
+                &HashMap::new(),
+                &HashMap::new(),
+                false,
+            )[1]
+        };
+        assert_eq!(
+            note_for(&HashSet::new(), &one),
+            Row::Meta {
+                file: 0,
+                note: Note::Viewed
+            }
+        );
+        assert_eq!(
+            note_for(&one, &HashSet::new()),
+            Row::Meta {
+                file: 0,
+                note: Note::Collapsed
+            }
+        );
+        // Both at once reports the tick, since that is the one the reviewer has
+        // to undo to get the body back.
+        assert_eq!(
+            note_for(&one, &one),
+            Row::Meta {
+                file: 0,
+                note: Note::Viewed
+            }
+        );
+    }
+
+    #[test]
     fn a_collapsed_file_keeps_its_header_so_it_stays_navigable() {
         let files = parse_patch(TWO_FILES, &[]);
         let collapsed: HashSet<String> = ["a.rs".to_string()].into_iter().collect();
         let rows = build_rows(
             &files,
             &collapsed,
+            &HashSet::new(),
             &CommentRows::default(),
             &HashMap::new(),
             &HashMap::new(),
@@ -966,6 +1061,7 @@ mod tests {
         let rows = build_rows(
             &files,
             &HashSet::new(),
+            &HashSet::new(),
             &CommentRows::default(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1050,6 +1146,7 @@ mod tests {
             let rows = build_rows(
                 &files,
                 &HashSet::new(),
+                &HashSet::new(),
                 &CommentRows::default(),
                 &gaps,
                 &expanded,
@@ -1089,6 +1186,7 @@ mod tests {
         let expanded: HashMap<(String, usize), Opened> = [(("a.rs".to_string(), 0), (2, 3))].into();
         let rows = build_rows(
             &files,
+            &HashSet::new(),
             &HashSet::new(),
             &CommentRows::default(),
             &gaps,

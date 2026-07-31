@@ -281,11 +281,12 @@ a TUI and a browser open on the same review would not see each other type.
 
 **Phase 2 — parity polish.** In progress. **Done:** hunk expansion (the gaps
 between hunks open a few lines at a time from both edges — `+` / `-`, `z` for
-all of it — out of the `fileContents` every diff response already carries), and
+all of it — out of the `fileContents` every diff response already carries),
 split view with the narrow-terminal fallback (`s`, honouring the shared
 `diffStyle` setting, falling back to unified when the diff *pane* is under 90
-columns). Still to do: syntax highlighting, viewed state via `/api/viewed`, the
-stale-file indicators, refresh modes, the degraded-color paths.
+columns), and viewed state (`V`, the same `/api/viewed` the browser's checkbox
+writes). Still to do: syntax highlighting, the stale-file indicators, refresh
+modes, the degraded-color paths.
 
 **Phase 3 — herdr plugin.** `herdr-plugin.toml` with a `split` pane and
 toggle/open/close actions, a `[[build]]` step, `--env KRIT_STATE_FILE`
@@ -319,6 +320,13 @@ only if the honesty problem above can be solved in the UI.
   which is what had made an agent's entire half of the conversation invisible in
   the terminal. This was also the prerequisite `CLAUDE.md` named for making open
   comments editable; that is now one change away rather than two.
+- **`PUT /api/viewed` broadcasts nothing, and the browser does not poll it.**
+  `useViewed` is a plain `useQuery` with no `refetchInterval` — unlike
+  `useComments` — so a file ticked off in one client stays unticked in the other
+  until that one refetches. The TUI asks after its own writes, which covers its
+  half; nothing covers the other direction short of a reload. A `viewed-changed`
+  event would close it for both, and is the same one-variant change the
+  comment routes already took.
 - **`DELETE /api/comments/{id}` still broadcasts nothing.** A comment deleted in
   the browser stays on the TUI's screen, and `R` or `X` on it 404s. The TUI
   refetches on a refused write, so it corrects itself on the first attempt to

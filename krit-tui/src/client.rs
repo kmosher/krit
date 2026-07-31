@@ -218,6 +218,7 @@ pub enum Incoming {
     /// on screen and puts the message in the strip.
     Diff(Box<Result<DiffPayload, String>>),
     Comments(Box<Result<Vec<ReviewComment>, String>>),
+    Viewed(Box<Result<Vec<String>, String>>),
     /// A write the reviewer asked for, finished — posting a comment, a reply,
     /// a status change. `Ok` carries what to say about it; the refetch that
     /// makes it visible is driven by the server's own broadcast, not by this.
@@ -239,6 +240,7 @@ pub enum Incoming {
 pub enum Fetch {
     Diff,
     Comments,
+    Viewed,
 }
 
 /// How we got a server, because it changes what the reviewer should be told:
@@ -632,6 +634,22 @@ pub fn fetch_diff(base: &str, settings: Settings) -> Result<DiffPayload, String>
 /// `includeQueued=true` for the same reason the browser sends it: a queued
 /// comment is the reviewer's unposted work, and this is a reviewer's client.
 /// The parameter exists to keep *agent-facing* listings from leaking it.
+/// Which files the reviewer has ticked off, as a set of paths.
+///
+/// Shared with the browser through the same route, but **not** through any
+/// event: `PUT /api/viewed` broadcasts nothing and the browser's `useViewed`
+/// has no poll either, so neither client learns of the other's ticks until it
+/// refetches. This one asks after its own writes, which covers its own half.
+pub fn fetch_viewed(base: &str) -> Result<Vec<String>, String> {
+    let url = format!("{base}/api/viewed");
+    match agent(REQUEST_TIMEOUT).get(&url).call() {
+        Ok(res) => res
+            .into_json::<Vec<String>>()
+            .map_err(|e| format!("krit sent a viewed list this client can't read: {e}")),
+        Err(err) => Err(format!("cannot read the viewed list: {err}")),
+    }
+}
+
 pub fn fetch_comments(base: &str) -> Result<Vec<ReviewComment>, String> {
     let url = format!("{base}/api/comments?includeQueued=true");
     match agent(REQUEST_TIMEOUT).get(&url).call() {
@@ -655,10 +673,12 @@ pub fn spawn_fetcher(base: String, settings: Settings, tx: Sender<Incoming>) -> 
         while let Ok(first) = request_rx.recv() {
             let mut diff = first == Fetch::Diff;
             let mut comments = first == Fetch::Comments;
+            let mut viewed = first == Fetch::Viewed;
             // Collapse anything that piled up behind this one.
             while let Ok(more) = request_rx.try_recv() {
                 diff |= more == Fetch::Diff;
                 comments |= more == Fetch::Comments;
+                viewed |= more == Fetch::Viewed;
             }
             if diff {
                 let result = fetch_diff(&base, settings);
@@ -669,6 +689,12 @@ pub fn spawn_fetcher(base: String, settings: Settings, tx: Sender<Incoming>) -> 
             if comments {
                 let result = fetch_comments(&base);
                 if tx.send(Incoming::Comments(Box::new(result))).is_err() {
+                    return;
+                }
+            }
+            if viewed {
+                let result = fetch_viewed(&base);
+                if tx.send(Incoming::Viewed(Box::new(result))).is_err() {
                     return;
                 }
             }
@@ -702,6 +728,10 @@ pub enum Write {
     PostQueued,
     Submit {
         summary: Option<String>,
+    },
+    Viewed {
+        path: String,
+        viewed: bool,
     },
 }
 
@@ -749,6 +779,10 @@ impl Write {
             Write::Submit { summary } => {
                 (format!("{base}/api/submit"), json!({ "summary": summary }))
             }
+            Write::Viewed { path, viewed } => (
+                format!("{base}/api/viewed"),
+                json!({ "filePath": path, "viewed": viewed }),
+            ),
         }
     }
 
@@ -767,6 +801,8 @@ impl Write {
                 n => format!("{n} queued comments posted."),
             },
             Write::Submit { .. } => "Review submitted.".to_string(),
+            Write::Viewed { viewed: true, .. } => "Marked viewed.".to_string(),
+            Write::Viewed { .. } => "Marked not viewed.".to_string(),
         }
     }
 }
@@ -792,7 +828,7 @@ fn send(base: &str, write: &Write) -> Result<String, String> {
     // as a POST: the status route is a PUT, and two of these are not
     // interchangeable.
     let request = match write {
-        Write::Status { .. } => agent(REQUEST_TIMEOUT).put(&url),
+        Write::Status { .. } | Write::Viewed { .. } => agent(REQUEST_TIMEOUT).put(&url),
         _ => agent(REQUEST_TIMEOUT).post(&url),
     };
     let response = request.send_json(payload);

@@ -408,12 +408,19 @@ fn file_pane<'a>(app: &App, theme: &Theme, area: Rect) -> (Paragraph<'a>, Rect, 
         if app.collapsed.contains(&file.path) {
             style = style.add_modifier(Modifier::DIM);
         }
+        // A glyph, not a color: the tick has to survive NO_COLOR like every
+        // other state. It replaces the leading space rather than taking a
+        // column, so ticking a file does not reflow the list.
+        let done = app.viewed.contains(&file.path);
+        if done {
+            style = style.add_modifier(Modifier::DIM);
+        }
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{} ", file.kind.sigil()),
+                format!("{}{} ", if done { "✓" } else { " " }, file.kind.sigil()),
                 theme.fg(kind_color(file.kind)).patch(style),
             ),
-            Span::styled(fit_columns(&name, room), style),
+            Span::styled(fit_columns(&name, room.saturating_sub(1)), style),
             Span::styled(format!(" {stats}"), theme.dim().patch(style)),
         ]));
     }
@@ -534,6 +541,7 @@ fn render_row<'a>(
                     format!("   renamed from {}", f.old_path.as_deref().unwrap_or("?"))
                 }
                 Note::Binary => "   binary file — not shown".to_string(),
+                Note::Viewed => "   viewed — V to bring it back".to_string(),
                 Note::Mode => match &f.mode {
                     Some((from, to)) => format!("   mode {from} → {to}"),
                     None => "   mode changed".to_string(),
@@ -790,6 +798,7 @@ fn help<'a>() -> (Paragraph<'a>, u16, u16) {
         Line::from("  tab               move between panes"),
         Line::from("  f                 show / hide the file list"),
         Line::from("  s                 split / unified (needs a wide pane)"),
+        Line::from("  V                 tick this file off as viewed"),
         Line::from("  m                 release the mouse to the terminal"),
         Line::from("  wheel, click      scroll / put the cursor there"),
         Line::from(""),

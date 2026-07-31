@@ -83,6 +83,7 @@ const FORCED_REDRAW: Duration = Duration::from_secs(1);
 struct Refetch {
     diff: bool,
     comments: bool,
+    viewed: bool,
     due: Option<Instant>,
     /// When the current burst started. A trailing-edge debounce alone can be
     /// starved forever by a stream that never goes quiet, and the failure is
@@ -96,6 +97,7 @@ impl Refetch {
         match kind {
             Fetch::Diff => self.diff = true,
             Fetch::Comments => self.comments = true,
+            Fetch::Viewed => self.viewed = true,
         }
         self.due = Some(now + QUIET);
         self.since.get_or_insert(now);
@@ -122,6 +124,9 @@ impl Refetch {
         }
         if std::mem::take(&mut self.comments) {
             kinds.push(Fetch::Comments);
+        }
+        if std::mem::take(&mut self.viewed) {
+            kinds.push(Fetch::Viewed);
         }
         self.due = None;
         self.since = None;
@@ -305,6 +310,19 @@ fn act(app: &mut App, action: Action, viewport: usize, w: &mut Wiring) -> Result
                 client::spawn_write(w.server.to_string(), Write::PostQueued, None, w.tx.clone());
             }
         }
+        Action::ToggleViewed => match app.current_file() {
+            Some(index) => {
+                let path = app.files[index].path.clone();
+                let viewed = !app.viewed.contains(&path);
+                client::spawn_write(
+                    w.server.to_string(),
+                    Write::Viewed { path, viewed },
+                    None,
+                    w.tx.clone(),
+                );
+            }
+            None => app.status = Status::Note("Put the cursor on a file to tick it off.".into()),
+        },
         Action::Submit => {
             // The same gate the browser's button has, for the same reason: a
             // `submitted` nobody is subscribed to is a review handed to no one.
@@ -443,6 +461,13 @@ fn run(diff_args: &[String]) -> Result<(), String> {
     // out loud — but it is still a readable review.
     match client::fetch_comments(&server) {
         Ok(comments) => app.set_comments(comments, 1),
+        Err(message) => app.status = Status::Error(message),
+    }
+    // Same trade: a reviewer who ticked files off in the browser should not
+    // find them all back, and a list that could not be read is still a
+    // readable review.
+    match client::fetch_viewed(&server) {
+        Ok(paths) => app.set_viewed(paths.into_iter().collect()),
         Err(message) => app.status = Status::Error(message),
     }
     // A range only means something to the server that was started with it.
@@ -618,6 +643,16 @@ fn run(diff_args: &[String]) -> Result<(), String> {
                             }
                         }
                     },
+                    Incoming::Viewed(result) => match *result {
+                        Ok(paths) => app.set_viewed(paths.into_iter().collect()),
+                        // The list on screen is stale rather than gone, same as
+                        // the diff and the comments: say so and keep drawing.
+                        Err(message) => {
+                            if !matches!(app.status, Status::Ended(_)) {
+                                app.status = Status::Error(message);
+                            }
+                        }
+                    },
                     Incoming::Comments(result) => match *result {
                         Ok(comments) => app.set_comments(comments, viewport),
                         // Same trade as the diff: the list on screen is stale
@@ -642,6 +677,10 @@ fn run(diff_args: &[String]) -> Result<(), String> {
                             // it is posted, so listening alone would show
                             // queueing as a key that does nothing.
                             refetch.want(Fetch::Comments, Instant::now());
+                            // And the viewed list, for the same reason: `PUT
+                            // /api/viewed` broadcasts nothing either, so a tick
+                            // would be a key that appears to do nothing.
+                            refetch.want(Fetch::Viewed, Instant::now());
                         }
                         // The form stays up with the text in it: at this point
                         // it exists nowhere else, and a strip the reviewer can
