@@ -17,6 +17,7 @@ import type { ReviewComment } from '../../types'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
 import { SelectionPill } from './SelectionPill'
+import { RenderErrorBoundary } from './RenderErrorBoundary'
 // Split out: the markdown renderer and its plugins are ~100 kB gzipped, about
 // a quarter of the whole bundle, and a review that never opens a document
 // should not pay for it. Fetched on the first Preview click.
@@ -1360,19 +1361,27 @@ export const CodeViewWrapper = memo(
           // interaction here to protect against.
           return (
             <Suspense fallback={<div className="preview-pane-loading" />}>
-              <PreviewPane
-                filePath={annotation.metadata.filePath}
-                source={data.source}
-                format={data.format}
-                changedRanges={data.changedRanges}
-                comments={(fileAnnotationsMap.get(annotation.metadata.filePath) ?? []).map(
-                  (a) => a.metadata,
-                )}
-                onAddComment={onAddComment}
-                onDeleteComment={onDeleteComment}
-                onReplyComment={onReplyComment}
-                onEditComment={onEditComment}
-              />
+              {/* Per file, so a renderer that throws on one file costs that
+                  one pane: the reviewer can close the preview and read the
+                  diff, and every other file is untouched. */}
+              <RenderErrorBoundary
+                label={`The preview of ${annotation.metadata.filePath}`}
+                resetKey={data.source}
+              >
+                <PreviewPane
+                  filePath={annotation.metadata.filePath}
+                  source={data.source}
+                  format={data.format}
+                  changedRanges={data.changedRanges}
+                  comments={(fileAnnotationsMap.get(annotation.metadata.filePath) ?? []).map(
+                    (a) => a.metadata,
+                  )}
+                  onAddComment={onAddComment}
+                  onDeleteComment={onDeleteComment}
+                  onReplyComment={onReplyComment}
+                  onEditComment={onEditComment}
+                />
+              </RenderErrorBoundary>
             </Suspense>
           )
         }

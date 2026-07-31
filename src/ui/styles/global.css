@@ -2587,6 +2587,30 @@ body {
     color: var(--danger);
 }
 
+/* Stands in for the rows of a file whose lines are too long to lay out — see
+   longLines.ts. */
+.too-wide-notice {
+    margin: 8px 12px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* A contained render failure — see RenderErrorBoundary. Styled like the other
+   error strips rather than like a modal: whatever else broke, the review
+   around it is still usable. */
+.render-error {
+    margin: 12px;
+    padding: 12px;
+    border: 1px solid var(--danger);
+    border-radius: 6px;
+    color: var(--danger);
+    font-size: 13px;
+}
+
 .svg-preview-removed {
     margin: 0;
     font-size: 12px;

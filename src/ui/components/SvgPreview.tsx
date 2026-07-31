@@ -16,6 +16,7 @@ interface Props {
 export function SvgPreview({ source, changedRanges }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const [removed, setRemoved] = useState<string[]>([])
+  const [truncated, setTruncated] = useState(false)
   const parsed = useMemo(() => {
     const tree = parseXml(source)
     return isSvgRoot(tree) ? tree : null
@@ -31,6 +32,7 @@ export function SvgPreview({ source, changedRanges }: Props) {
     const built = buildSvgDom(parsed, host.ownerDocument)
     host.replaceChildren()
     setRemoved([...new Set(built.removed)].sort())
+    setTruncated(built.truncated)
     if (!built.root) return
     if (changedRanges.length > 0) markChanged(built.root, buildLineIndex(source), changedRanges)
     host.appendChild(built.root)
@@ -52,6 +54,12 @@ export function SvgPreview({ source, changedRanges }: Props) {
       {/* Worth saying out loud: a reviewer looking at a picture with no note
           has no way to tell a diagram that renders this way from one whose
           `<image>` or `<foreignObject>` silently did not come through. */}
+      {truncated && (
+        <p className="svg-preview-removed">
+          This file nests deeper than krit will follow, so the innermost part of the picture is not
+          drawn.
+        </p>
+      )}
       {removed.length > 0 && (
         <p className="svg-preview-removed">
           Not rendered, because it could run, fetch, or restyle this page:{' '}

@@ -143,3 +143,27 @@ function spanOf(el: Element): [number, number] {
   const [start, end] = el.getAttribute('data-src')!.split('-')
   return [Number(start), Number(end)]
 }
+
+describe('nesting depth', () => {
+  const nested = (n: number) =>
+    `<svg xmlns="http://www.w3.org/2000/svg">${'<g>'.repeat(n)}<rect/>${'</g>'.repeat(n)}</svg>`
+
+  // Recursion, here and in SvgPreview's markChanged pass over the result. Left
+  // unbounded this throws RangeError from inside an effect, which React answers
+  // by unmounting the whole root — the review, not the picture.
+  it('cuts nesting past the cap instead of exhausting the stack', () => {
+    const built = build(nested(20_000))
+    expect(built.truncated).toBe(true)
+    expect(built.root).not.toBeNull()
+    // What survived is walkable: the markChanged pass recurses over exactly
+    // this tree, so a cap the DOM outgrows would only move the crash.
+    expect(built.root!.querySelectorAll('g').length).toBeLessThan(20_000)
+  })
+
+  it('leaves an ordinary picture alone', () => {
+    const built = build(nested(20))
+    expect(built.truncated).toBe(false)
+    expect(built.root!.querySelectorAll('g').length).toBe(20)
+    expect(built.root!.querySelector('rect')).not.toBeNull()
+  })
+})

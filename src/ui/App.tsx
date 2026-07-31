@@ -11,6 +11,7 @@ import { useSettings } from './hooks/useSettings'
 import { useViewed } from './hooks/useViewed'
 import { Toolbar } from './components/Toolbar'
 import { DiffViewer } from './components/DiffViewer'
+import { RenderErrorBoundary } from './components/RenderErrorBoundary'
 import type { CodeViewWrapperHandle } from './components/CodeViewWrapper'
 import { FileTree } from './components/FileTree'
 import { CommentTracker } from './components/CommentTracker'
@@ -25,6 +26,7 @@ import type { SelectionAnchor } from './utils/selectionMapping'
 import { diffHeaderPath } from './utils/diffHeader'
 import { linesToReveal } from './utils/collapsedContext'
 import { spliceCommentIslands } from './utils/commentIslands'
+import { isTooWideToRender } from './utils/longLines'
 import {
   changedNewLines,
   previewFormatFor,
@@ -863,6 +865,26 @@ export function App() {
     return out
   }, [files, fileAnnotationsMap])
 
+  // A file with a very long line is withheld from the surface entirely — see
+  // longLines.ts for why, and why nothing short of removing the item works.
+  // The split is done here rather than inside CodeViewWrapper so the names are
+  // available to say out loud: a file that vanished from the diff with no
+  // explanation is the same failure this is fixing, just quieter.
+  const tooWideFiles = useMemo(
+    () => islandedFiles.filter(isTooWideToRender).map((f) => f.name),
+    [islandedFiles],
+  )
+  // Returns `islandedFiles` itself in the ordinary case: CodeViewWrapper tells
+  // what changed by reference, so a filter that always allocates would look
+  // like a new file set on every render.
+  const renderedFiles = useMemo(
+    () =>
+      tooWideFiles.length === 0
+        ? islandedFiles
+        : islandedFiles.filter((f) => !isTooWideToRender(f)),
+    [islandedFiles, tooWideFiles],
+  )
+
   const handleFileClick = useCallback((filePath: string) => {
     setActiveFile(filePath)
     diffViewerRef.current?.scrollToFile(filePath)
@@ -983,42 +1005,57 @@ export function App() {
           )}
         </aside>
         <main className="main">
-          <DiffViewer
-            // Remount the whole CodeView surface when the diff identity changes
-            // (staged/untracked toggle, custom-mode arg change). Cleanly drops
-            // viewer state — scroll position, virtualization layout, draft
-            // comment — instead of trying to patch them across the transition.
-            key={`${settings.staged}:${settings.untracked}:${customMode}`}
-            ref={diffViewerRef}
-            files={islandedFiles}
-            diffStyle={settings.diffStyle}
-            defaultTabSize={settings.defaultTabSize}
-            viewedFiles={viewedFiles}
-            binaryFiles={binaryFileMap}
-            commentCounts={commentCounts}
-            fileStatsMap={fileStatsMap}
-            onViewedChange={handleViewedChange}
-            fileAnnotationsMap={fileAnnotationsMap}
-            onAddComment={addComment}
-            onDeleteComment={removeComment}
-            onReplyComment={replyToComment}
-            onEditComment={editComment}
-            onDeleteRange={handleDeleteRange}
-            onActiveFileChange={setActiveFile}
-            onEditFile={handleEditFile}
-            onPreviewFile={handleTogglePreview}
-            previewableFiles={previewableFiles}
-            previewFiles={previewPaths}
-            previewData={previewData}
-            editingFiles={inlineEditFiles}
-            onToggleEdit={handleToggleEdit}
-            onEditComplete={handleInlineEditComplete}
-            staleFiles={staleFiles}
-            onApplyStale={handleApplyStale}
-            confirmSaveFiles={confirmSaveFiles}
-            onCancelSaveConfirm={clearConfirmSave}
-            onActiveDraftsChange={setActiveDraftFiles}
-          />
+          {/* The last resort, for a throw the per-preview boundary is below.
+              It cannot save the surface, but it keeps the sidebar, the comment
+              rail and the toolbar — so the reviewer can still see which files
+              are in the review and post from the rail, rather than facing a
+              blank page. Reset on the diff's identity, since a refetch is what
+              would carry the fix. */}
+          {tooWideFiles.length > 0 && (
+            <div className="too-wide-notice">
+              Not shown here, because a line long enough to wrap thousands of times displaces every
+              other file on the surface: <strong>{tooWideFiles.join(', ')}</strong>. Read it with{' '}
+              <code>git diff</code>, or in the terminal client.
+            </div>
+          )}
+          <RenderErrorBoundary label="The diff" resetKey={renderedFiles}>
+            <DiffViewer
+              // Remount the whole CodeView surface when the diff identity changes
+              // (staged/untracked toggle, custom-mode arg change). Cleanly drops
+              // viewer state — scroll position, virtualization layout, draft
+              // comment — instead of trying to patch them across the transition.
+              key={`${settings.staged}:${settings.untracked}:${customMode}`}
+              ref={diffViewerRef}
+              files={renderedFiles}
+              diffStyle={settings.diffStyle}
+              defaultTabSize={settings.defaultTabSize}
+              viewedFiles={viewedFiles}
+              binaryFiles={binaryFileMap}
+              commentCounts={commentCounts}
+              fileStatsMap={fileStatsMap}
+              onViewedChange={handleViewedChange}
+              fileAnnotationsMap={fileAnnotationsMap}
+              onAddComment={addComment}
+              onDeleteComment={removeComment}
+              onReplyComment={replyToComment}
+              onEditComment={editComment}
+              onDeleteRange={handleDeleteRange}
+              onActiveFileChange={setActiveFile}
+              onEditFile={handleEditFile}
+              onPreviewFile={handleTogglePreview}
+              previewableFiles={previewableFiles}
+              previewFiles={previewPaths}
+              previewData={previewData}
+              editingFiles={inlineEditFiles}
+              onToggleEdit={handleToggleEdit}
+              onEditComplete={handleInlineEditComplete}
+              staleFiles={staleFiles}
+              onApplyStale={handleApplyStale}
+              confirmSaveFiles={confirmSaveFiles}
+              onCancelSaveConfirm={clearConfirmSave}
+              onActiveDraftsChange={setActiveDraftFiles}
+            />
+          </RenderErrorBoundary>
         </main>
       </div>
       {editingFile && (

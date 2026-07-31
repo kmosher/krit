@@ -54,6 +54,10 @@ export interface BuildResult {
   root: SVGElement | null
   /** Names dropped by the allowlist, for telling the reader what was removed. */
   removed: string[]
+  /** Whether nesting past `MAX_DEPTH` was cut. Reported separately from
+   *  `removed` because it is not a judgement about any element — the same tag
+   *  elsewhere in the file renders fine. */
+  truncated: boolean
 }
 
 export interface BuildOptions {
@@ -85,18 +89,40 @@ export interface BuildOptions {
   allowStylesheets?: boolean
 }
 
+/**
+ * How deep the rebuild will follow nesting before it stops descending.
+ *
+ * This walk is recursive, and so is the `markChanged` pass over what it
+ * returns, so without a limit a deeply nested file exhausts the JS stack — a
+ * `RangeError` from inside an effect, which React answers by unmounting
+ * everything above it. That is far past the point where the picture is worth
+ * looking at either way: real SVG, hand-written or generated, nests in the
+ * tens. The cap is what turns "the review disappeared" into "the deep part of
+ * this picture is missing", and the depth is reported like a dropped element
+ * so the reader isn't left comparing a truncated render against the file.
+ */
+const MAX_DEPTH = 512
+
 export function buildSvgDom(
   source: XmlElement,
   doc: Document,
   options: BuildOptions = {},
 ): BuildResult {
   const removed: string[] = []
-  if (!isSvgRoot(source)) return { root: null, removed }
-  const root = buildElement(source, doc, removed, {
-    stampOffsets: options.stampOffsets ?? true,
-    allowStylesheets: options.allowStylesheets ?? false,
-  })
-  return { root: root as SVGElement | null, removed }
+  const depthLimit = { hit: false }
+  if (!isSvgRoot(source)) return { root: null, removed, truncated: false }
+  const root = buildElement(
+    source,
+    doc,
+    removed,
+    {
+      stampOffsets: options.stampOffsets ?? true,
+      allowStylesheets: options.allowStylesheets ?? false,
+    },
+    0,
+    depthLimit,
+  )
+  return { root: root as SVGElement | null, removed, truncated: depthLimit.hit }
 }
 
 /**
@@ -114,7 +140,13 @@ function buildElement(
   doc: Document,
   removed: string[],
   options: Required<BuildOptions>,
+  depth: number,
+  depthLimit: { hit: boolean },
 ): Element | null {
+  if (depth > MAX_DEPTH) {
+    depthLimit.hit = true
+    return null
+  }
   const name = localName(node.name)
   if (!ALLOWED_ELEMENTS.has(name) || (name === 'style' && !options.allowStylesheets)) {
     removed.push(name)
@@ -152,7 +184,7 @@ function buildElement(
       el.appendChild(doc.createTextNode(child.value))
       continue
     }
-    const built = buildElement(child, doc, removed, options)
+    const built = buildElement(child, doc, removed, options, depth + 1, depthLimit)
     if (built) el.appendChild(built)
   }
   return el

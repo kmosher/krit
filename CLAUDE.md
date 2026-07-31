@@ -490,6 +490,33 @@ is a guarantee — the residual race is the length of a fold:
   `document.getSelection()` inside one returns real light-DOM nodes with no
   retargeting. The stale comment in `CommentForm` about being "portaled into
   the shadow root" is what makes this look harder than it is.
+- **One long line does not break its own file, it breaks the whole surface.**
+  Pierre wraps a long line across many screen rows and its virtualizer's height
+  estimate for that run is wrong, so every item is placed from a bad offset: at
+  ~16k characters the review renders half a screen too low, at ~56k it is pushed
+  off the viewport and the pane looks blank. Nothing throws and nothing logs —
+  the file list still lists every file, which is why this reads as "krit is
+  broken" rather than as one bad file. Minified bundles, lockfiles and inlined
+  data URIs reach that length in ordinary repos, so it is a papercut long before
+  it is anything adversarial. `longLines.ts` holds the cap and App withholds
+  those files from `DiffViewer`, naming them in a strip above it.
+  - **Emptying the body is not enough**, which is the part that costs a day:
+    handing CodeView a hunk-less copy (`emptyDiffFor`, the mechanism the preview
+    pane uses) still reserves the item's height, so the surface stays displaced
+    and the file-level annotation that would explain it never renders. Only
+    removing the item from the list works.
+  - Diagnose this from a **screenshot**, not from the DOM. `document.body
+    .innerText` omits the shadow-rendered rows entirely, so a healthy surface
+    and a displaced one both read as "nothing rendered" — two wrong conclusions
+    in one session came from that alone.
+- **`RenderErrorBoundary` is the net under everything else**, because React
+  unmounts the entire root when a render *or an effect* throws with no boundary
+  above it — one file's renderer taking the whole review, unsent drafts and all.
+  There is one per preview pane and one around the surface. It resets on a
+  `resetKey` (the file's source, the file set) since React never retries a
+  boundary on its own and the fix has usually already landed on disk. It is a
+  net, not a diagnosis: the long-line failure above throws nothing, so no
+  boundary can see it.
 - **A preview renderer's entire contract is `data-src`.** Every element it
   emits carries `"<startOffset>-<endOffset>"` into the *file*, and
   `previewAnchor.ts` needs nothing else — which is why Markdown, `.ipynb` and
