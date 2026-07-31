@@ -375,6 +375,14 @@ skill together when you do.
   `store::load` migrates them, and that migration is the only thing keeping a
   queued comment from leaking — every suppression check is `== "queued"`, which
   a stale `"draft"` would satisfy nowhere.
+- **Only a queued comment is editable**, and its "Queued" badge is the button
+  that opens the editor (`QueuedCommentEditor`). The restriction is not caution
+  about the UI: `PUT /api/comments/{id}` broadcasts nothing for a body change —
+  the only broadcast on that route is the catch-up `comment-added` when a queued
+  comment is posted — so editing an already-posted comment would leave the
+  reviewer and the agent reading different text with nothing anywhere to say so.
+  Making open comments editable means giving that route a `comment-updated`
+  broadcast first, and teaching the agent side what to do with it.
 - Pending drafts are the one mutation that **deliberately does not broadcast**.
   Echoing a reviewer's keystrokes back into the form they came from fights the
   form, and unsent text is not the agent's business — so there is no SSE event

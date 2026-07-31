@@ -4,14 +4,22 @@ import { CommentBubble } from './CommentBubble'
 import type { ReviewComment } from '../../types'
 import { makeComment } from '../test-utils'
 
-function renderBubble(over: Partial<ReviewComment> = {}) {
+function renderBubble(over: Partial<ReviewComment> = {}, onEdit?: (id: string, body: string) => void) {
   const onDelete = vi.fn()
   const onReply = vi.fn()
   const utils = render(
-    <CommentBubble comment={makeComment(over)} onDelete={onDelete} onReply={onReply} />,
+    <CommentBubble
+      comment={makeComment(over)}
+      onDelete={onDelete}
+      onReply={onReply}
+      onEdit={onEdit}
+    />,
   )
   return { onDelete, onReply, ...utils }
 }
+
+const queuedBadge = () => screen.getByRole('button', { name: /Queued/ })
+const editor = () => screen.getByLabelText('Edit queued comment')
 
 describe('CommentBubble', () => {
   it('shows the comment body', () => {
@@ -164,5 +172,95 @@ describe('CommentBubble', () => {
       fireEvent.click(screen.getByRole('button', { name: /Reply/ }))
       expect(screen.queryByRole('button', { name: 'Queue comment' })).toBeNull()
     })
+  })
+})
+
+describe('editing a queued comment', () => {
+  it('opens the editor from the Queued badge, seeded with the current text', () => {
+    const onEdit = vi.fn()
+    renderBubble({ status: 'queued', body: 'first thoughts' }, onEdit)
+    fireEvent.click(queuedBadge())
+    expect(editor()).toHaveValue('first thoughts')
+  })
+
+  it('saves the rewritten body against the right comment', () => {
+    const onEdit = vi.fn()
+    renderBubble({ id: 'c-target', status: 'queued', body: 'first thoughts' }, onEdit)
+    fireEvent.click(queuedBadge())
+    fireEvent.change(editor(), { target: { value: '  second thoughts  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    // Trimmed, and against the id the badge belongs to — an edit filed against
+    // another comment is invisibly wrong.
+    expect(onEdit).toHaveBeenCalledWith('c-target', 'second thoughts')
+    expect(screen.queryByLabelText('Edit queued comment')).not.toBeInTheDocument()
+  })
+
+  it('saves on Cmd/Ctrl-Enter without reaching for the mouse', () => {
+    const onEdit = vi.fn()
+    renderBubble({ status: 'queued', body: 'a' }, onEdit)
+    fireEvent.click(queuedBadge())
+    fireEvent.change(editor(), { target: { value: 'b' } })
+    fireEvent.keyDown(editor(), { key: 'Enter', metaKey: true })
+    expect(onEdit).toHaveBeenCalledWith('c1', 'b')
+  })
+
+  it('refuses to save an empty body', () => {
+    // An empty comment renders as an anchor with nothing in it, which reads as
+    // a bug. Deleting is the other button.
+    const onEdit = vi.fn()
+    renderBubble({ status: 'queued', body: 'something' }, onEdit)
+    fireEvent.click(queuedBadge())
+    fireEvent.change(editor(), { target: { value: '   ' } })
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    fireEvent.keyDown(editor(), { key: 'Enter', metaKey: true })
+    expect(onEdit).not.toHaveBeenCalled()
+  })
+
+  it('asks before dropping an edit, and closes silently when nothing changed', () => {
+    const onEdit = vi.fn()
+    renderBubble({ status: 'queued', body: 'unchanged' }, onEdit)
+    fireEvent.click(queuedBadge())
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByLabelText('Edit queued comment')).not.toBeInTheDocument()
+
+    fireEvent.click(queuedBadge())
+    fireEvent.change(editor(), { target: { value: 'typed something' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('alert')).toHaveTextContent(/Discard your changes/)
+    expect(screen.getByLabelText('Edit queued comment')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+    expect(screen.queryByLabelText('Edit queued comment')).not.toBeInTheDocument()
+    expect(onEdit).not.toHaveBeenCalled()
+  })
+
+  it('answers the discard question from the keyboard', () => {
+    // Escape that asks a question the keyboard cannot answer is the dead end a
+    // native dialog would have been.
+    const onEdit = vi.fn()
+    renderBubble({ status: 'queued', body: 'x' }, onEdit)
+    fireEvent.click(queuedBadge())
+    fireEvent.change(editor(), { target: { value: 'y' } })
+    fireEvent.keyDown(editor(), { key: 'Escape' })
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    fireEvent.keyDown(editor(), { key: 'Escape' })
+    expect(screen.queryByLabelText('Edit queued comment')).not.toBeInTheDocument()
+    expect(onEdit).not.toHaveBeenCalled()
+  })
+
+  it('offers no editing on a posted comment, whatever its status', () => {
+    // A posted comment has already reached the agent and a body change
+    // broadcasts nothing, so editing one would leave the two sides reading
+    // different text with nothing to say so.
+    const onEdit = vi.fn()
+    renderBubble({ status: 'open', body: 'posted' }, onEdit)
+    expect(screen.queryByRole('button', { name: /Queued/ })).not.toBeInTheDocument()
+    renderBubble({ status: 'resolved', body: 'done' }, onEdit)
+    expect(screen.queryByRole('button', { name: /Queued/ })).not.toBeInTheDocument()
+  })
+
+  it('renders the badge as plain text where no edit handler is wired', () => {
+    renderBubble({ status: 'queued', body: 'read only' })
+    expect(screen.getByText('Queued')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Queued/ })).not.toBeInTheDocument()
   })
 })

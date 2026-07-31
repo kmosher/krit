@@ -43,6 +43,7 @@ export interface PreviewPaneProps {
   ) => void
   onDeleteComment: (id: string) => void
   onReplyComment: (id: string, body: string) => void
+  onEditComment: (id: string, body: string) => void
 }
 
 interface PendingSelection {
@@ -66,6 +67,7 @@ export function PreviewPane({
   onAddComment,
   onDeleteComment,
   onReplyComment,
+  onEditComment,
 }: PreviewPaneProps) {
   const lineStarts = useMemo(() => buildLineIndex(source), [source])
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -299,7 +301,12 @@ export function PreviewPane({
                 “{truncate(c.selectedText, 140)}”
               </div>
             )}
-            <CommentBubble comment={c} onDelete={onDeleteComment} onReply={onReplyComment} />
+            <CommentBubble
+              comment={c}
+              onDelete={onDeleteComment}
+              onReply={onReplyComment}
+              onEdit={onEditComment}
+            />
           </div>
         ))}
       </aside>

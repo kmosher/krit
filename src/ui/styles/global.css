@@ -1157,6 +1157,56 @@ body {
     font-weight: 500;
 }
 
+.comment-bubble-queued-btn {
+    /* A button that has to sit in a row of status badges without looking like
+       a control until you reach for it. */
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 1px 4px;
+    margin: -1px -4px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.comment-bubble-queued-btn:hover,
+.comment-bubble-queued-btn:focus-visible {
+    border-color: var(--primary);
+    background: var(--bg-secondary);
+}
+
+.queued-editor {
+    margin-top: 6px;
+}
+
+.queued-editor-input {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.queued-editor-input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.queued-editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 6px;
+}
+
 .comment-suggestion {
     margin-top: 8px;
     border: 1px solid var(--border);

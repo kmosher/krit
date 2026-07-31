@@ -281,6 +281,7 @@ interface Props {
   ): void
   onDeleteComment(id: string): void
   onReplyComment(id: string, body: string): void
+  onEditComment(id: string, body: string): void
   // SelectionPill's "Delete" — splices `anchor`'s exact character range out
   // of the working-tree file (server-side, via POST /api/edits/delete).
   onDeleteRange?(filePath: string, anchor: SelectionAnchor): void
@@ -467,6 +468,7 @@ export const CodeViewWrapper = memo(
       onAddComment,
       onDeleteComment,
       onReplyComment,
+      onEditComment,
       onDeleteRange,
       onActiveFileChange,
       onEditFile,
@@ -1337,6 +1339,7 @@ export const CodeViewWrapper = memo(
                 onAddComment={onAddComment}
                 onDeleteComment={onDeleteComment}
                 onReplyComment={onReplyComment}
+                onEditComment={onEditComment}
               />
             </Suspense>
           )
@@ -1423,6 +1426,7 @@ export const CodeViewWrapper = memo(
               comment={annotation.metadata as ReviewComment}
               onDelete={onDeleteComment}
               onReply={onReplyComment}
+              onEdit={onEditComment}
             />
           </AnnotationEventGuard>
         )

@@ -3,16 +3,24 @@ import { UserCircle, CheckCircle2, Bot, Reply, History, PenLine } from 'lucide-r
 import type { ReviewComment } from '../../types'
 import { timeAgo } from '../utils'
 import { CommentForm } from './CommentForm'
+import { QueuedCommentEditor } from './QueuedCommentEditor'
 
 interface CommentBubbleProps {
   comment: ReviewComment
   onDelete: (id: string) => void
   onReply: (id: string, body: string) => void
+  // Rewrite a queued comment's text. Only queued comments offer it: a posted
+  // comment has already reached the agent, and the update route broadcasts
+  // nothing for a body change, so editing one would leave the reviewer and the
+  // agent reading different text with nothing to say so. Optional, for the
+  // surfaces that render comments read-only.
+  onEdit?: (id: string, body: string) => void
 }
 
-export function CommentBubble({ comment, onDelete, onReply }: CommentBubbleProps) {
+export function CommentBubble({ comment, onDelete, onReply, onEdit }: CommentBubbleProps) {
   const [, setTick] = useState(0)
   const [replying, setReplying] = useState(false)
+  const [editing, setEditing] = useState(false)
   const isResolved = comment.status === 'resolved'
   const isQueued = comment.status === 'queued'
 
@@ -34,15 +42,29 @@ export function CommentBubble({ comment, onDelete, onReply }: CommentBubbleProps
           </span>
         )}
         <span className="comment-bubble-time">{timeAgo(comment.createdAt)}</span>
-        {isQueued && (
-          <span
-            className="comment-bubble-queued"
-            title="Saved but not posted — invisible to the listening Claude session until you post it (or click Done reviewing)."
-          >
-            <PenLine size={14} />
-            Queued
-          </span>
-        )}
+        {isQueued &&
+          (onEdit ? (
+            // The badge is the edit affordance: a queued comment is the one the
+            // reviewer can still take back, and the pen already says so.
+            <button
+              type="button"
+              className="comment-bubble-queued comment-bubble-queued-btn"
+              onClick={() => setEditing((e) => !e)}
+              aria-expanded={editing}
+              title="Queued — click to edit. Saved but not posted, so it stays invisible to the listening Claude session until you post it (or click Done reviewing)."
+            >
+              <PenLine size={14} />
+              Queued
+            </button>
+          ) : (
+            <span
+              className="comment-bubble-queued"
+              title="Saved but not posted — invisible to the listening Claude session until you post it (or click Done reviewing)."
+            >
+              <PenLine size={14} />
+              Queued
+            </span>
+          ))}
         {isResolved && (
           <span className="comment-bubble-resolved">
             <CheckCircle2 size={14} />
@@ -67,7 +89,18 @@ export function CommentBubble({ comment, onDelete, onReply }: CommentBubbleProps
           &times;
         </button>
       </div>
-      {comment.body && <div className="comment-bubble-body">{comment.body}</div>}
+      {editing && onEdit ? (
+        <QueuedCommentEditor
+          initialBody={comment.body}
+          onSave={(body) => {
+            onEdit(comment.id, body)
+            setEditing(false)
+          }}
+          onCancel={() => setEditing(false)}
+        />
+      ) : (
+        comment.body && <div className="comment-bubble-body">{comment.body}</div>
+      )}
       {comment.suggestion && (
         <div className="comment-suggestion" title="Suggested rewrite">
           <div className="comment-suggestion-label">Suggested rewrite</div>

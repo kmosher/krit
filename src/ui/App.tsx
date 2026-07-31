@@ -316,7 +316,7 @@ export function App() {
     activeFiles,
     editingFiles: inlineEditFiles,
   })
-  const { comments, addComment, removeComment, replyToComment, copyAllComments, postQueued, queuedCount } =
+  const { comments, addComment, removeComment, editComment, replyToComment, copyAllComments, postQueued, queuedCount } =
     useComments(reportError)
   const reviewState = useReviewState()
   const [activeFile, setActiveFile] = useState<string | null>(null)
@@ -982,6 +982,7 @@ export function App() {
             onAddComment={addComment}
             onDeleteComment={removeComment}
             onReplyComment={replyToComment}
+            onEditComment={editComment}
             onDeleteRange={handleDeleteRange}
             onActiveFileChange={setActiveFile}
             onEditFile={handleEditFile}
