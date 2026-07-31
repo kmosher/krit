@@ -14,6 +14,12 @@ export interface EditRange {
   endColumn: number
 }
 
+// Why the server is exiting, carried on its `review-ended` goodbye. Mirrors
+// `krit_core::types::EndReason`. Only `submitted` is an ending the reviewer
+// asked for; the rest arrive at a page that is still open, which is what
+// `useServerHealth` exists to say out loud.
+export type EndReason = 'submitted' | 'idle' | 'no-browser' | 'signal'
+
 // Every frame on `/api/events` (SSE, all frames) and `/api/events-ws` (agent
 // ws, human-originated frames only — see `agent_visible` in krit/src/server.rs).
 // This union is the TypeScript face of Rust's `Event` enum in krit/src/types.rs
@@ -53,7 +59,10 @@ export type KritEvent =
     }
   // The reviewer clicked "Done reviewing"; queued comments are already posted.
   | { type: 'submitted'; timestamp: number; summary?: string }
-  | { type: 'review-ended'; reason: string }
+  // The server's goodbye, broadcast immediately before it exits. Mirrors
+  // `krit_core::types::EndReason`; a client acts on the variant, so this is a
+  // union rather than a string.
+  | { type: 'review-ended'; reason: EndReason }
 
 export interface CommentReply {
   id: string

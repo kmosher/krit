@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { KritEvent } from '../../types'
+import type { EndReason, KritEvent } from '../../types'
 import { closeReviewWindow, endReviewSession, onReviewSessionEnd } from './reviewSession'
 
 export interface ReviewState {
@@ -11,6 +11,13 @@ export interface ReviewState {
   agentCount: number
   /** Timestamp of the most recent Submit click this page has seen, or null. */
   submittedAt: number | null
+  /**
+   * The server's goodbye, or null while it is still running. Surfaced here
+   * rather than through a module-level channel because this stream is already
+   * the one frame carrying it, and a page must not open a third EventSource:
+   * two per tab is the client-count contract the idle shutdown is keyed on.
+   */
+  endedReason: EndReason | null
 }
 
 /**
@@ -24,6 +31,7 @@ export function useReviewState(): ReviewState {
     uiCount: 0,
     agentCount: 0,
     submittedAt: null,
+    endedReason: null,
   })
 
   useEffect(() => {
@@ -52,6 +60,12 @@ export function useReviewState(): ReviewState {
           return
         case 'submitted':
           setState((prev) => ({ ...prev, submittedAt: event.timestamp }))
+          return
+        case 'review-ended':
+          // The goodbye. Recorded rather than acted on: this hook does not
+          // know whether the page is finished with the review, and
+          // `useServerHealth` is what turns it into something on screen.
+          setState((prev) => ({ ...prev, endedReason: event.reason }))
           return
         // Everything else belongs to another consumer (useDiff, useComments).
         // Enumerated rather than defaulted so a new Rust variant has to be

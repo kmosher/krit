@@ -22,6 +22,7 @@ use state::{
     KritState, comments_store_path, default_state_path, remove_state_if_owned, write_state,
 };
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const HELP: &str = r#"krit - Local code review tool for git diffs
 
@@ -400,8 +401,17 @@ async fn serve(
 
     // Every exit path says why it's exiting and cleans the state file —
     // v1's silent-SIGTERM forensics episode, never again.
+    //
+    // A signal goes through `initiate_shutdown` rather than exiting here, so a
+    // killed server says goodbye: `review-ended` is what lets a browser tell a
+    // backend that is gone from one that is merely slow to answer. That path
+    // owns the state-file cleanup too (`set_exit_cleanup`, below — installed
+    // after this spawn, but this task cannot fire before the runtime is
+    // serving). A *second* signal is the reviewer saying they meant it, and
+    // skips the drain.
     {
         let state_path = state_path.clone();
+        let hub = Arc::clone(&hub);
         tokio::spawn(async move {
             let mut sigterm =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -413,6 +423,12 @@ async fn serve(
                 _ = sigterm.recv() => println!("Received SIGTERM — shutting down."),
                 _ = sigint.recv() => println!("\nShutting down..."),
             }
+            hub.initiate_shutdown(krit_core::types::EndReason::Signal);
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sigint.recv() => {}
+            }
+            println!("Second signal — exiting now.");
             remove_state_if_owned(std::process::id(), &state_path);
             std::process::exit(0);
         });

@@ -5,6 +5,8 @@ import type { ReviewComment } from '../types'
 import { useDiff, splitFilePatches, type BinaryFileInfo, type FileContentsMap } from './hooks/useDiff'
 import { useComments } from './hooks/useComments'
 import { useReviewState, submitReview } from './hooks/useReviewState'
+import { useServerHealth } from './hooks/useServerHealth'
+import { ServerGoneBanner } from './components/ServerGoneBanner'
 import { useSettings } from './hooks/useSettings'
 import { useViewed } from './hooks/useViewed'
 import { Toolbar } from './components/Toolbar'
@@ -319,6 +321,7 @@ export function App() {
   const { comments, addComment, removeComment, editComment, settleEdits, replyToComment, copyAllComments, postQueued, queuedCount } =
     useComments(reportError)
   const reviewState = useReviewState()
+  const health = useServerHealth(reviewState.endedReason)
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -869,24 +872,35 @@ export function App() {
     setViewed(filePath, viewed)
   }, [setViewed])
 
+  // The banner rides along on all three returns, including the two that render
+  // no review at all. A server that died before the first fetch landed is
+  // exactly when "Loading diff..." forever, or a bare `Error: Failed to fetch`,
+  // is least able to say what happened.
   if (!loaded || initialLoading) {
     return (
-      <div className="loading">
-        <p>Loading diff...</p>
-      </div>
+      <>
+        <ServerGoneBanner health={health} />
+        <div className="loading">
+          <p>Loading diff...</p>
+        </div>
+      </>
     )
   }
 
   if (error && patch === null) {
     return (
-      <div className="error">
-        <p>Error: {error}</p>
-      </div>
+      <>
+        <ServerGoneBanner health={health} />
+        <div className="error">
+          <p>Error: {error}</p>
+        </div>
+      </>
     )
   }
 
   return (
     <div className="app">
+      <ServerGoneBanner health={health} onCopyComments={copyAllComments} />
       <Toolbar
         repoName={repoName}
         branch={branch}

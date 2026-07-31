@@ -3,7 +3,7 @@
 //! counting and principal-based idle shutdown are bus-level concerns here,
 //! not transport handlers' — v1's hardest bugs lived in that gap.
 
-use crate::types::Event;
+use crate::types::{EndReason, Event};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast};
@@ -205,7 +205,7 @@ impl Hub {
             self.idle_gen.fetch_add(1, Ordering::SeqCst);
             self.disarm_idle_timer();
             println!("Review submitted and the last browser closed — shutting down.");
-            self.initiate_shutdown("submitted");
+            self.initiate_shutdown(EndReason::Submitted);
             return;
         }
         let generation = self.idle_gen.fetch_add(1, Ordering::SeqCst) + 1;
@@ -218,7 +218,7 @@ impl Hub {
                 && hub.ui.load(Ordering::SeqCst) == 0
             {
                 println!("Idle shutdown: no browser connected.");
-                hub.initiate_shutdown("idle");
+                hub.initiate_shutdown(EndReason::Idle);
             }
         });
         *self.idle_timer.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
@@ -241,7 +241,7 @@ impl Hub {
             tokio::time::sleep(std::time::Duration::from_millis(NO_BROWSER_TIMEOUT_MS)).await;
             if !hub.ever_had_browser.load(Ordering::SeqCst) {
                 println!("No browser ever connected — shutting down.");
-                hub.initiate_shutdown("no-browser");
+                hub.initiate_shutdown(EndReason::NoBrowser);
             }
         });
     }
@@ -251,13 +251,11 @@ impl Hub {
     /// streams on seeing the event, which is what lets graceful shutdown
     /// complete — v1's close-deadlock made unrepresentable), then signal
     /// shutdown, with a hard exit as belt-and-suspenders.
-    pub fn initiate_shutdown(self: &Arc<Self>, reason: &str) {
+    pub fn initiate_shutdown(self: &Arc<Self>, reason: EndReason) {
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.broadcast(Event::ReviewEnded {
-            reason: reason.to_string(),
-        });
+        self.broadcast(Event::ReviewEnded { reason });
         let hub = Arc::clone(self);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -493,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn shutting_down_stops_arming_new_idle_timers() {
         let hub = Hub::new();
-        hub.initiate_shutdown("test");
+        hub.initiate_shutdown(EndReason::Idle);
         let (_rx, ui) = hub.subscribe(Role::Ui);
         drop(ui);
         assert!(!armed(&hub));
@@ -503,12 +501,12 @@ mod tests {
     async fn initiate_shutdown_broadcasts_review_ended_exactly_once() {
         let hub = Hub::new();
         let (mut rx, _guard) = hub.subscribe(Role::Ui);
-        hub.initiate_shutdown("done");
-        hub.initiate_shutdown("done again");
+        hub.initiate_shutdown(EndReason::Submitted);
+        hub.initiate_shutdown(EndReason::Signal);
         loop {
             match rx.try_recv().expect("review-ended never landed") {
                 Event::ReviewEnded { reason } => {
-                    assert_eq!(reason, "done");
+                    assert_eq!(reason, EndReason::Submitted);
                     break;
                 }
                 _ => continue,

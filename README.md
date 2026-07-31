@@ -1,5 +1,10 @@
 # krit
 
+> **NO WARRANTY — ACTIVE DEVELOPMENT.** krit is `0.x` and pre-release. The wire
+> protocol, the CLI surface, the settings file and the on-disk state format all
+> change without notice or migration, and a version bump may well eat your
+> in-progress review. Use it on work that is committed somewhere else.
+
 A local code review tool designed for the coding-agent workflow. Review AI-generated changes in a GitHub-PR-like web UI, leave inline comments, and have your agent respond to them live as you write them — reply, resolve, and rewrite without leaving the review.
 
 krit is a single static Rust binary with the web UI embedded.

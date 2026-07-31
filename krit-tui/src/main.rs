@@ -553,7 +553,16 @@ fn run(diff_args: &[String]) -> Result<(), String> {
                         })
                     }
                     Incoming::Event(ServerEvent::Ended { reason }) => {
-                        app.status = Status::Ended(format!("Review ended ({reason}). q to close."));
+                        // The goodbye names the ending, and one of them is not
+                        // an ending at all from here: `signal` means somebody
+                        // killed the server out from under a review that was
+                        // still going. Saying "review ended" to that would file
+                        // it alongside the reviewer finishing.
+                        app.status = Status::Ended(match reason.as_str() {
+                            "signal" => "krit was terminated. q to close.".to_string(),
+                            "idle" => "krit shut down — left idle. q to close.".to_string(),
+                            other => format!("Review ended ({other}). q to close."),
+                        });
                     }
                     Incoming::Event(ServerEvent::Disconnected) => {
                         app.status = Status::Ended(

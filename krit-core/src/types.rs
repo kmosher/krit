@@ -184,8 +184,28 @@ pub enum Event {
         summary: Option<String>,
     },
     ReviewEnded {
-        reason: String,
+        reason: EndReason,
     },
+}
+
+/// Why the server is exiting.
+///
+/// An enum rather than free text because a client has to act on it: a review
+/// that ended because the reviewer finished it needs different words — and a
+/// different level of alarm — from one whose backend was killed out from
+/// under an open page. Adding a variant is a wire change; mirror it in
+/// `src/types.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EndReason {
+    /// The reviewer clicked Done reviewing.
+    Submitted,
+    /// Every UI disconnected and the idle window elapsed.
+    Idle,
+    /// No UI ever connected — a launch that never reached a window.
+    NoBrowser,
+    /// SIGTERM or SIGINT. The one ending the reviewer did not ask for.
+    Signal,
 }
 
 pub fn now_millis() -> u64 {
@@ -266,7 +286,7 @@ mod tests {
         );
         assert_eq!(
             js(&Event::ReviewEnded {
-                reason: "idle".into()
+                reason: EndReason::Idle
             }),
             r#"{"type":"review-ended","reason":"idle"}"#
         );

@@ -1076,7 +1076,7 @@ mod tests {
             ),
             (
                 Event::ReviewEnded {
-                    reason: "idle".into(),
+                    reason: krit_core::types::EndReason::Idle,
                 },
                 Some(ServerEvent::Ended {
                     reason: "idle".into(),

@@ -40,7 +40,7 @@ afterEach(() => {
 describe('useReviewState', () => {
   it('starts at zero with no submit, so the Submit button is disabled before any frame', () => {
     const { result } = renderHook(() => useReviewState())
-    expect(result.current).toEqual({ watcherCount: 0, uiCount: 0, agentCount: 0, submittedAt: null })
+    expect(result.current).toEqual({ watcherCount: 0, uiCount: 0, agentCount: 0, submittedAt: null, endedReason: null })
   })
 
   it('identifies itself as a browser subscriber', () => {
@@ -53,7 +53,7 @@ describe('useReviewState', () => {
   it('publishes the census from a state frame', () => {
     const { result } = renderHook(() => useReviewState())
     act(() => FakeEventSource.last!.emit({ type: 'state', watcherCount: 2, uiCount: 1, agentCount: 3 }))
-    expect(result.current).toEqual({ watcherCount: 2, uiCount: 1, agentCount: 3, submittedAt: null })
+    expect(result.current).toEqual({ watcherCount: 2, uiCount: 1, agentCount: 3, submittedAt: null, endedReason: null })
   })
 
   it('records the submit timestamp without disturbing the counts', () => {
@@ -62,7 +62,7 @@ describe('useReviewState', () => {
     const { result } = renderHook(() => useReviewState())
     act(() => FakeEventSource.last!.emit({ type: 'state', watcherCount: 2, uiCount: 1, agentCount: 0 }))
     act(() => FakeEventSource.last!.emit({ type: 'submitted', timestamp: 1234 }))
-    expect(result.current).toEqual({ watcherCount: 2, uiCount: 1, agentCount: 0, submittedAt: 1234 })
+    expect(result.current).toEqual({ watcherCount: 2, uiCount: 1, agentCount: 0, submittedAt: 1234, endedReason: null })
   })
 
   it('keeps the submit timestamp when a later census arrives', () => {
@@ -81,7 +81,7 @@ describe('useReviewState', () => {
       FakeEventSource.last!.emit({ type: 'state', watcherCount: 1, uiCount: 1, agentCount: 0 })
       FakeEventSource.last!.emit({ type: 'state', watcherCount: 0, uiCount: 2, agentCount: 1 })
     })
-    expect(result.current).toEqual({ watcherCount: 0, uiCount: 2, agentCount: 1, submittedAt: null })
+    expect(result.current).toEqual({ watcherCount: 0, uiCount: 2, agentCount: 1, submittedAt: null, endedReason: null })
   })
 
   it('ignores frames owned by other consumers', () => {
@@ -94,9 +94,19 @@ describe('useReviewState', () => {
       FakeEventSource.last!.emit({ type: 'clients', browsers: 2 })
       FakeEventSource.last!.emit({ type: 'files-changed', paths: ['a.rs'] })
       FakeEventSource.last!.emit({ type: 'file-written', path: null })
-      FakeEventSource.last!.emit({ type: 'review-ended', reason: 'done' })
     })
     expect(result.current).toEqual(before)
+  })
+
+  it('records the goodbye without disturbing the counts', () => {
+    // `useServerHealth` reads this to tell a killed server from a slow one.
+    // It has to survive alongside the census, since the server broadcasts a
+    // final state frame as each subscriber drops on the way out.
+    const { result } = renderHook(() => useReviewState())
+    act(() => FakeEventSource.last!.emit({ type: 'review-ended', reason: 'signal' }))
+    act(() => FakeEventSource.last!.emit({ type: 'state', watcherCount: 0, uiCount: 1, agentCount: 0 }))
+    expect(result.current.endedReason).toBe('signal')
+    expect(result.current.uiCount).toBe(1)
   })
 
   it('survives a malformed frame and keeps serving later ones', () => {

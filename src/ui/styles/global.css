@@ -2033,6 +2033,41 @@ body {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
 }
 
+/* The backend is gone. Top of the viewport, full width, above everything —
+   the one condition where continuing to work costs the reviewer their work, so
+   it does not share the .strip-stack's corner with the recoverable failures.
+   Solid danger fill rather than .app-error's tint for the same reason. */
+
+.server-gone {
+    /* Sticky and in flow, not fixed: fixed took the banner out of the layout
+       and parked it on top of the toolbar. It still covers the toolbar once
+       the page is scrolled — which is why the salvage action the toolbar
+       would have offered (Copy comments) is repeated in the banner. */
+    position: sticky;
+    top: 0;
+    z-index: 500;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    font-size: 13px;
+    color: #fff;
+    background: var(--danger);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.server-gone-text {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    flex: 1;
+    min-width: 0;
+}
+
+.server-gone-text span {
+    opacity: 0.9;
+}
+
 /* Undo toast — bottom-corner, shown after a SelectionPill delete */
 
 .undo-toast {

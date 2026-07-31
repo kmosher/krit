@@ -15,6 +15,20 @@ removed 2026-07), which is why some shapes look the way they do; it is not a
 constraint. Change the wire freely, and move the server, both clients and the
 skill together when you do.
 
+## Versioning and the changelog
+
+krit is `0.x` and nothing consumes the version but `--version`, so **bump it
+liberally** — a patch for a fix, a minor for anything a user would notice or
+that moves the wire. Don't hoard changes waiting for a release-worthy batch;
+the number is free and a bumped version is what makes "which krit is this?"
+answerable. The workspace `version` in `Cargo.toml` and `package.json` and
+`desktop/src-tauri/tauri.conf.json` all carry it and must agree.
+
+Every change that a user or an agent could notice gets a line under
+`## Unreleased` in `CHANGELOG.md`, **in the same commit**. Breaking changes are
+listed under `### Changed`, not called out specially — at `0.x` they are
+routine, which is what the README's warning is for.
+
 ## Edit loops
 
 - **UI against a live server**: debug-build krit serves `dist/client` from
@@ -170,6 +184,31 @@ skill together when you do.
 
 ## Non-obvious behavior (deliberate, don't "fix")
 
+- **"Is the server gone" is answered by a probe, never by a failed page
+  request.** A `500` and a dead port look identical from inside a `.catch`, and
+  they call for opposite treatments — one is an error strip, the other means
+  nothing the reviewer types will ever be stored. `useServerHealth` polls
+  `/api/settings` on a `setInterval` and reads only the network layer: `fetch`
+  resolves for an HTTP error and rejects for a transport failure, so *that* is
+  the line. Three things about it are load-bearing and all fail silently:
+  - **Not `requestAnimationFrame`, and not gated on visibility.** A page driven
+    programmatically reports itself hidden for its whole life — the same trap as
+    the comment poll and the draft-anchor hold — so an rAF loop would be a no-op
+    in exactly the sessions where a dead backend costs the most.
+  - **No third `EventSource`.** The goodbye rides `useReviewState`'s existing
+    stream and is handed down as `endedReason`; two SSE subscriptions per tab is
+    the contract the server's idle shutdown counts on.
+  - **`ended` outranks `gone`.** The server stops answering ~300ms after it says
+    goodbye, so probes fail immediately afterwards; letting them win would trade
+    "krit was terminated" for a generic "not answering" seconds later. A
+    *successful* probe still resets everything, because restarting `krit` on the
+    same port is a real recovery and a permanent tombstone over a working review
+    would be worse than a late one.
+- **Every exit broadcasts `review-ended` first, signals included.** `EndReason`
+  is what lets a client separate a finished review from a killed server, which
+  the socket closing cannot. SIGTERM/SIGINT therefore route through
+  `hub::initiate_shutdown` rather than exiting in the handler; a *second* signal
+  skips the drain, since by then the reviewer has said it twice.
 - The agent WebSocket (`/api/events-ws`) filters out `files-changed` (the
   fs-watcher's batched change event) and `file-changed` (a single direct
   edit/undo), comment-reanchor fallout, and the agent's own reply echoes —
