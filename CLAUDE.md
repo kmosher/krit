@@ -470,31 +470,22 @@ skill together when you do.
 
 ## Known gaps
 
-- `@pierre/diffs` is pinned to an exact **prerelease** (`1.3.0-rc.3`), not a
-  caret range: inline editing needs 1.3.0-only APIs (`item.edit`,
-  `onItemEditComplete`, `EditProvider`, the `./edit` entry point). Because
-  `dist/` is gitignored and `build.rs` runs vite, a from-source build of the
-  Rust binary needs that exact version to still be on the registry — move to
-  1.3.0 final once it publishes. An exact pin has no caret for `pnpm update`
-  to follow, so nothing will prompt you.
+- **The pool owns the theme, not the view.** The pool renders every surface
+  that isn't in an edit session, and it is configured by `highlighterOptions`
+  on `WorkerPoolContextProvider` (`main.tsx`) — *not* by the `theme` option on
+  the view, which upstream documents as ignored under a pool. krit passes the
+  pool no theme, so everything renders in Pierre's own `pierre-dark`/
+  `pierre-light`; that is why `CodeViewWrapper`'s options carry `themeType` but
+  no `theme`. To restyle, set `highlighterOptions`.
 
-- **The theme that reaches the worker pool is the one that paints. Set a theme
-  in both places or neither.** The pool renders every surface that isn't in an
-  edit session, and it is configured by `highlighterOptions` on
-  `WorkerPoolContextProvider` (`main.tsx`) — *not* by the `theme` option on the
-  view. krit passes the pool no theme, so everything renders in Pierre's own
-  `pierre-dark`/`pierre-light`. A `theme` named on the CodeView options alone
-  reaches only the editor's tokenizer, so the two disagree, and from
-  `1.3.0-rc.2` that disagreement is fatal: the tokenizer's constructor calls
-  `setTheme` for a theme the shared highlighter never attached, throws
-  ``Theme not found``, and — because the throw lands before the content element
-  is made `contentEditable` — the file enters an edit session with no editable
-  element at all. The only symptom is an unhandled rejection. krit therefore
-  names no theme on either side; that is why `CodeViewWrapper`'s options carry
-  `themeType` but no `theme`. Upstream fix (attach both themes) is filed from
-  `kmosher/pierre`, branch `kmosher/shiki-fix`; once it ships, naming a theme in
-  both places becomes safe. rc.1 tolerated the mismatch because
-  `initializeHighlighter` read the instance options instead of the pool's.
+  A theme named on the view alone used to be fatal rather than merely ignored
+  (`1.3.0-rc.2` and `-rc.3`): the tokenizer resolved its theme from the
+  component while the shared highlighter had been loaded from the pool's, so
+  `setTheme` threw ``Theme not found`` from the tokenizer's constructor —
+  before the content element was made `contentEditable`, leaving an edit
+  session with no editable element and an unhandled rejection as the only
+  symptom. Fixed upstream in `1.3.0` (pierrecomputer/pierre#1037, from our
+  issue #1036): one resolver now feeds both the highlighter and the tokenizer.
 
 - `@pierre/theming@1.0.0` declares a peer of `@pierre/theme: ^1.1.0` but the
   tree resolves `@pierre/theme@2.0.0` — an unsatisfied peer inside upstream's
