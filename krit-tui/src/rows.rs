@@ -141,6 +141,41 @@ pub fn gaps_of(file: &FileDiff, total_lines: u32) -> Vec<GapRange> {
     gaps
 }
 
+/// Which of a diff's two sides a line, a column or an anchor belongs to.
+///
+/// One name for an axis that was spelled four ways: a bare `bool`, `left`/
+/// `right` on a `Pair`, `additions: bool` on the anchor helpers, and the wire's
+/// own strings. None of those said at the call site which value meant which
+/// side, and an inverted one anchors a comment on the wrong line with nothing
+/// on screen to say so — the failure this whole area keeps producing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The deletions side: the file as it was, drawn in the left column.
+    Old,
+    /// The additions side: the file as it is, drawn in the right column and the
+    /// side a comment means unless something says otherwise.
+    New,
+}
+
+impl Side {
+    /// What the wire calls it. The server validates against these two strings
+    /// and `reanchor.rs` matches on `"additions"`, so this is the only spelling
+    /// that may reach a `ReviewComment`.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Side::Old => "deletions",
+            Side::New => "additions",
+        }
+    }
+
+    /// The side a line belongs to, given whether it has a new-file number.
+    /// Context lines have both, and report as `New` — the side a comment on an
+    /// unchanged line means.
+    pub fn of_line(has_new_line: bool) -> Side {
+        if has_new_line { Side::New } else { Side::Old }
+    }
+}
+
 /// One row of a side-by-side hunk: the old line on the left, the new one on the
 /// right, either of which may be absent.
 ///
@@ -150,6 +185,18 @@ pub fn gaps_of(file: &FileDiff, total_lines: u32) -> Vec<GapRange> {
 pub struct Pair {
     pub left: Option<usize>,
     pub right: Option<usize>,
+}
+
+impl Pair {
+    /// The line this pair draws on one side. `left`/`right` are what the
+    /// *renderer* needs — they are columns — and this is what everything else
+    /// needs, which is the side.
+    pub fn on(self, side: Side) -> Option<usize> {
+        match side {
+            Side::Old => self.left,
+            Side::New => self.right,
+        }
+    }
 }
 
 /// Lay a hunk out side by side.

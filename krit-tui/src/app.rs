@@ -11,8 +11,8 @@ use crate::comments::{CommentAnchor, CommentRows, layout};
 use crate::compose::Composer;
 use crate::patch::{FileDiff, parse_patch};
 use crate::rows::{
-    GapRange, MARKER_COLS, Opened, Row, build_rows, comment_rows, file_rows, gaps_of, gutter_width,
-    hunk_rows, next_stop, scroll_to_show, split_half_width, split_side_prefix,
+    GapRange, MARKER_COLS, Opened, Row, Side, build_rows, comment_rows, file_rows, gaps_of,
+    gutter_width, hunk_rows, next_stop, scroll_to_show, split_half_width, split_side_prefix,
 };
 use crate::text::{cluster_at_column, display_width, expand_tabs};
 use krit_core::types::ReviewComment;
@@ -85,7 +85,7 @@ pub enum Action {
         column: usize,
         /// Which code column of a split row the press landed in; `None` in
         /// unified view.
-        side: Option<bool>,
+        side: Option<Side>,
     },
     SelectExtend {
         row: usize,
@@ -193,15 +193,14 @@ pub struct Selection {
     /// Keyboard visual mode: movement extends the selection rather than
     /// leaving it behind.
     pub visual: bool,
-    /// Which code column of a split row the drag happened in — `true` for the
-    /// new side. `None` in unified view, and for `v`, where the row itself is
-    /// the side.
+    /// Which code column of a split row the drag happened in. `None` in unified
+    /// view, and for `v`, where the row itself is the side.
     ///
     /// Carried rather than derived, because in split view a row holds both
     /// sides at once: deriving would read a drag over a deleted line as a
     /// comment on its replacement, which is a comment on text the reviewer
     /// never pointed at and no error anywhere.
-    pub side: Option<bool>,
+    pub side: Option<Side>,
 }
 
 impl Selection {
@@ -996,8 +995,8 @@ impl App {
         &self,
         col: u16,
         row: Option<Row>,
-        held: Option<bool>,
-    ) -> (usize, Option<bool>) {
+        held: Option<Side>,
+    ) -> (usize, Option<Side>) {
         let within = col.saturating_sub(self.panes.diff.x) as usize;
         // Only a `Row::Split` is drawn in two columns. An expanded gap keeps the
         // unified shape even in split view — its text is the same on both sides,
@@ -1014,8 +1013,8 @@ impl App {
         let prefix = split_side_prefix(self.gutter);
         let half = split_half_width(self.wrap_width, self.gutter);
         let divider = prefix + half;
-        let side = held.unwrap_or(within > divider);
-        let into_side = if side {
+        let side = held.unwrap_or(Side::of_line(within > divider));
+        let into_side = if side == Side::New {
             within.saturating_sub(divider + 1)
         } else {
             // Past the divider while holding the left column: the pointer has
@@ -1055,22 +1054,28 @@ impl App {
         // because line numbers on the wire belong to a side, and everything in
         // range that disagrees is simply not part of the anchor.
         let dragged_side = self.selection.and_then(|s| s.side);
-        let (file, additions) = marked.iter().find_map(|row| {
+        let (file, side) = marked.iter().find_map(|row| {
             let (file, hunk, line) = self.leading_line(*row)?;
             let l = &self.files[file].hunks[hunk].lines[line];
-            Some((file, dragged_side.unwrap_or(l.new_line.is_some())))
+            Some((
+                file,
+                dragged_side.unwrap_or(Side::of_line(l.new_line.is_some())),
+            ))
         })?;
 
         let mut numbers: Vec<(u32, &str)> = Vec::new();
         for row in marked {
-            let Some((f, hunk, line)) = self.line_on_side(*row, additions) else {
+            let Some((f, hunk, line)) = self.line_on_side(*row, side) else {
                 continue;
             };
             if f != file {
                 continue;
             }
             let l = &self.files[file].hunks[hunk].lines[line];
-            let number = if additions { l.new_line } else { l.old_line };
+            let number = match side {
+                Side::New => l.new_line,
+                Side::Old => l.old_line,
+            };
             if let Some(n) = number {
                 numbers.push((n, l.text.as_str()));
             }
@@ -1085,7 +1090,7 @@ impl App {
 
         Some(CommentAnchor {
             file_path: self.files[file].path.clone(),
-            side: if additions { "additions" } else { "deletions" },
+            side: side.wire_name(),
             start_line,
             end_line,
             line_content: texts.join("\n"),
@@ -1132,13 +1137,10 @@ impl App {
     /// this row" is a real question with a real answer; in unified it is the row
     /// itself or nothing, which is what the old code said by matching on
     /// `Row::Code` alone.
-    fn line_on_side(&self, row: Row, additions: bool) -> Option<(usize, usize, usize)> {
+    fn line_on_side(&self, row: Row, side: Side) -> Option<(usize, usize, usize)> {
         match row {
             Row::Code { file, hunk, line } => Some((file, hunk, line)),
-            Row::Split { file, hunk, pair } => {
-                let side = if additions { pair.right } else { pair.left };
-                side.map(|l| (file, hunk, l))
-            }
+            Row::Split { file, hunk, pair } => pair.on(side).map(|l| (file, hunk, l)),
             _ => None,
         }
     }

@@ -14,7 +14,7 @@ use crate::comments::{CommentAnchor, CommentLine};
 use crate::compose::Composer;
 use crate::patch::{ChangeKind, LineKind};
 use crate::rows::{
-    MARKER_COLS, Note, Row, comments_in, line_marker, row_window, split_half_width,
+    MARKER_COLS, Note, Row, Side, comments_in, line_marker, row_window, split_half_width,
     split_side_prefix, stat_label,
 };
 use crate::text::{display_width, expand_tabs, fit_columns, slice_columns};
@@ -640,9 +640,9 @@ fn render_row<'a>(
             // Only the column the drag happened in is underlined; a line-wise
             // selection has no side and marks both. See `Selection::side`.
             let dragged = app.selection.and_then(|s| s.side);
-            let side = |which: Option<usize>, additions: bool| -> Vec<Span<'a>> {
+            let side = |which: Option<usize>, which_side: Side| -> Vec<Span<'a>> {
                 let marks = match dragged {
-                    Some(s) if s != additions => None,
+                    Some(s) if s != which_side => None,
                     _ => marks,
                 };
                 let Some(li) = which else {
@@ -655,7 +655,10 @@ fn render_row<'a>(
                     )];
                 };
                 let l = &h.lines[li];
-                let number = if additions { l.new_line } else { l.old_line };
+                let number = match which_side {
+                    Side::New => l.new_line,
+                    Side::Old => l.old_line,
+                };
                 let style = match l.kind {
                     LineKind::Addition => theme.fg(Color::Green),
                     LineKind::Deletion => theme.fg(Color::Red),
@@ -678,12 +681,12 @@ fn render_row<'a>(
                 spans.extend(marked_spans(&visible, style, app.h_scroll, half, marks));
                 spans
             };
-            let mut spans = side(pair.left, false);
+            let mut spans = side(pair.left, Side::Old);
             // A divider rather than a space: two code columns with nothing
             // between them read as one wrapped line, which is the whole failure
             // mode split view exists to avoid.
             spans.push(Span::styled("│", theme.dim().patch(cursor)));
-            spans.extend(side(pair.right, true));
+            spans.extend(side(pair.right, Side::New));
             Line::from(spans)
         }
         Row::Expand { file, gap } => {
