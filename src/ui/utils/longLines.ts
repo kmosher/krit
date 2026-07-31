@@ -4,13 +4,20 @@ import type { FileDiffMetadata } from '@pierre/diffs'
  * The longest line krit will hand to CodeView.
  *
  * A single very long line does not break the file it is in — it breaks the
- * whole surface. Pierre wraps a long line across many screen rows, and its
- * virtualizer's height estimate for the wrapped run is wrong, so every item is
- * positioned from a bad offset: at ~16k characters the review renders roughly
- * half a screen too low, and at ~56k it is pushed off the viewport entirely and
- * the pane looks blank. Nothing throws, nothing logs, and the file list still
- * lists every file — which is why this reads as "krit is broken" rather than as
- * one bad file.
+ * whole surface. Pierre wraps such a line across thousands of screen rows, and
+ * every other item on the surface is then positioned from a bad offset: at ~16k
+ * characters the review renders roughly half a screen too low, and at ~56k it
+ * is pushed off the viewport entirely and the pane looks blank. Nothing throws,
+ * nothing logs, and the file list still lists every file — which is why this
+ * reads as "krit is broken" rather than as one bad file.
+ *
+ * Where upstream gets it wrong is not established. The obvious suspect, the
+ * virtualizer's height estimate for the wrapped run, is not it: the estimate is
+ * corrected by `reconcileHeights` and the correction propagates, which
+ * `virtualizedFileDiffWrappedLines.test.ts` in our pierre fork pins down. A
+ * standalone CodeView (`apps/longline-repro` there) does not displace at all at
+ * either length, so whatever triggers it needs more than a wrapped line. Treat
+ * the numbers above as measurements of krit, not as a diagnosis.
  *
  * Minified bundles, generated lockfiles, single-line JSON and inlined data URIs
  * all reach this length in ordinary repos, so this is a papercut on real work

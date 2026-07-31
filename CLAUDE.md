@@ -516,10 +516,13 @@ is a guarantee — the residual race is the length of a fold:
   retargeting. The stale comment in `CommentForm` about being "portaled into
   the shadow root" is what makes this look harder than it is.
 - **One long line does not break its own file, it breaks the whole surface.**
-  Pierre wraps a long line across many screen rows and its virtualizer's height
-  estimate for that run is wrong, so every item is placed from a bad offset: at
-  ~16k characters the review renders half a screen too low, at ~56k it is pushed
-  off the viewport and the pane looks blank. Nothing throws and nothing logs —
+  Pierre wraps a long line across thousands of screen rows and every other item
+  is then placed from a bad offset: at ~16k characters the review renders half a
+  screen too low, at ~56k it is pushed off the viewport and the pane looks
+  blank. **Why upstream gets this wrong is not established** — the virtualizer's
+  height estimate, the obvious suspect, is corrected properly, and a standalone
+  CodeView does not displace at either length (both pinned down in our pierre
+  fork on `kmosher/longline-virt`). Nothing throws and nothing logs —
   the file list still lists every file, which is why this reads as "krit is
   broken" rather than as one bad file. Minified bundles, lockfiles and inlined
   data URIs reach that length in ordinary repos, so it is a papercut long before
