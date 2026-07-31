@@ -83,6 +83,9 @@ pub enum Action {
     SelectStart {
         row: usize,
         column: usize,
+        /// Which code column of a split row the press landed in; `None` in
+        /// unified view.
+        side: Option<bool>,
     },
     SelectExtend {
         row: usize,
@@ -115,6 +118,9 @@ pub enum Action {
     /// `scroll_to_show` from immediately undoing it.
     ScrollViewDown(usize),
     ScrollViewUp(usize),
+    /// Side-by-side, or unified. A preference: on a pane too narrow to carry
+    /// two code columns it is remembered and not obeyed.
+    ToggleSplit,
     /// Open or fold the unchanged run under the cursor by a few lines. Does
     /// nothing anywhere else, which is why the keys are announced on the row
     /// itself rather than in the footer — they are only live where they mean
@@ -125,6 +131,15 @@ pub enum Action {
     /// part of starting the gesture.
     FocusFile(usize),
 }
+
+/// Narrowest diff pane that still makes two code columns worth having.
+///
+/// Each side spends `gutter + 3` on its own numbers and marker, and the two are
+/// separated by a divider — so at a typical gutter of 3 this leaves about 38
+/// columns of code per side. Below it the fallback is unified, which is a
+/// readable diff at any width; a split view that fits four words per line is
+/// not.
+pub const SPLIT_MIN_COLS: usize = 90;
 
 /// Lines opened per `+`, from each edge. Ten is about a screenful between the
 /// two, which is the amount of context a reader asks for when a hunk's own
@@ -168,6 +183,15 @@ pub struct Selection {
     /// Keyboard visual mode: movement extends the selection rather than
     /// leaving it behind.
     pub visual: bool,
+    /// Which code column of a split row the drag happened in — `true` for the
+    /// new side. `None` in unified view, and for `v`, where the row itself is
+    /// the side.
+    ///
+    /// Carried rather than derived, because in split view a row holds both
+    /// sides at once: deriving would read a drag over a deleted line as a
+    /// comment on its replacement, which is a comment on text the reviewer
+    /// never pointed at and no error anywhere.
+    pub side: Option<bool>,
 }
 
 impl Selection {
@@ -239,6 +263,9 @@ pub struct App {
     pub compose: Option<Composer>,
     pub show_help: bool,
     pub show_files: bool,
+    /// Whether the reviewer wants side-by-side. What they get is `split()`,
+    /// which also has to fit.
+    pub split_pref: bool,
     /// Whether we are holding the mouse. On, the wheel scrolls and a click
     /// moves the cursor; off, the terminal gets its own selection back so the
     /// reviewer can copy a line the ordinary way.
@@ -307,6 +334,7 @@ impl Default for App {
             compose: None,
             show_help: false,
             show_files: true,
+            split_pref: true,
             mouse: true,
             tab_size: 4,
             listeners: 0,
@@ -503,6 +531,7 @@ impl App {
             &self.comment_rows,
             &self.gaps,
             &self.expanded,
+            self.split(),
         );
         if self.cursor >= self.rows.len() {
             self.cursor = self.rows.len().saturating_sub(1);
@@ -677,6 +706,20 @@ impl App {
                 }
             }
             Action::ToggleCollapse => self.toggle_collapse(),
+            Action::ToggleSplit => {
+                self.split_pref = !self.split_pref;
+                // The row model *is* the view here — a pair is one row and a
+                // unified line is one row, so the same file is a different
+                // number of rows in each. Re-find the cursor by identity the
+                // way a refetch does, or toggling walks the reviewer down the
+                // file by however much the hunks above them compressed.
+                let at = self.rows.get(self.cursor).copied();
+                self.rebuild();
+                if let Some(row) = at.and_then(|r| self.rows.iter().position(|x| *x == r)) {
+                    self.cursor = row;
+                }
+                self.selection = None;
+            }
             Action::Expand(step) => {
                 self.expand_gap(step);
             }
@@ -702,10 +745,13 @@ impl App {
                         head: self.cursor,
                         columns: None,
                         visual: true,
+                        // Line-wise, so the row decides the side the way it
+                        // does in unified view.
+                        side: None,
                     }),
                 }
             }
-            Action::SelectStart { row, column } => {
+            Action::SelectStart { row, column, side } => {
                 self.cursor = row.min(last);
                 self.focus = Focus::Diff;
                 self.selection = Some(Selection {
@@ -713,6 +759,7 @@ impl App {
                     head: row,
                     columns: Some((column, column)),
                     visual: false,
+                    side,
                 });
             }
             Action::SelectExtend { row, column } | Action::SelectEnd { row, column } => {
@@ -839,10 +886,38 @@ impl App {
         })
     }
 
-    /// The column of a line's text under a mouse column.
-    fn text_column_at(&self, col: u16) -> usize {
+    /// The column of a line's text under a mouse column, and in split view
+    /// which of the two code columns it landed in.
+    ///
+    /// The prefix arithmetic here is the mirror image of what `ui` draws, and
+    /// the two agreeing is load-bearing in a way nothing catches: a mismatch
+    /// does not fail, it anchors the comment a few characters off. Unified
+    /// spends `gutter * 2 + MARKER_COLS` before the text; split spends
+    /// `gutter + MARKER_COLS - 1` per side, twice, with one column of divider
+    /// between — which is why the half width comes from `ui::split_half_width`
+    /// rather than being worked out again here.
+    ///
+    /// The side is `None` in unified view, where a row *is* a side.
+    fn text_column_at(&self, col: u16) -> (usize, Option<bool>) {
         let within = col.saturating_sub(self.panes.diff.x) as usize;
-        self.h_scroll + within.saturating_sub(self.gutter * 2 + MARKER_COLS)
+        if !self.split() {
+            return (
+                self.h_scroll + within.saturating_sub(self.gutter * 2 + MARKER_COLS),
+                None,
+            );
+        }
+        let prefix = self.gutter + MARKER_COLS - 1;
+        let half = crate::ui::split_half_width(self.wrap_width, self.gutter);
+        let divider = prefix + half;
+        if within <= divider {
+            (self.h_scroll + within.saturating_sub(prefix), Some(false))
+        } else {
+            let into_right = within - divider - 1;
+            (
+                self.h_scroll + into_right.saturating_sub(prefix),
+                Some(true),
+            )
+        }
     }
 
     /// What a comment posted right now would be anchored to: the selection if
@@ -868,22 +943,20 @@ impl App {
         // everything after it that disagrees is simply not part of the anchor.
         // A selection dragged across a deletion and its replacement can only
         // be one or the other: line numbers on the wire belong to a side.
-        let (file, additions) = marked.iter().find_map(|row| match *row {
-            Row::Code { file, hunk, line } => {
-                let l = &self.files[file].hunks[hunk].lines[line];
-                Some((file, l.new_line.is_some()))
-            }
-            _ => None,
+        // A drag in split view already said which side it meant, by which of
+        // the two code columns it happened in. Deriving it from the row instead
+        // would read a drag over a deleted line as a comment on its
+        // replacement — the right line number for text nobody selected.
+        let dragged_side = self.selection.and_then(|s| s.side);
+        let (file, additions) = marked.iter().find_map(|row| {
+            let (file, hunk, line) = self.leading_line(*row)?;
+            let l = &self.files[file].hunks[hunk].lines[line];
+            Some((file, dragged_side.unwrap_or(l.new_line.is_some())))
         })?;
 
         let mut numbers: Vec<(u32, &str)> = Vec::new();
         for row in marked {
-            let Row::Code {
-                file: f,
-                hunk,
-                line,
-            } = *row
-            else {
+            let Some((f, hunk, line)) = self.line_on_side(*row, additions) else {
                 continue;
             };
             if f != file {
@@ -911,6 +984,56 @@ impl App {
             line_content: texts.join("\n"),
             columns,
         })
+    }
+
+    /// Whether the diff is actually being drawn side by side.
+    ///
+    /// The reviewer's preference *and* enough room to honour it. Measured on
+    /// the diff pane rather than the terminal, because the file list takes a
+    /// fixed 34 columns off the front — a 120-column terminal showing the list
+    /// has 86 to split, and two 36-column code columns are not a diff anyone
+    /// can read. Hiding the list is therefore a way to get split view back on a
+    /// narrow terminal, which is the behaviour you want and would be impossible
+    /// to explain if the threshold were on the window.
+    pub fn split(&self) -> bool {
+        self.split_pref && self.wrap_width >= SPLIT_MIN_COLS
+    }
+
+    /// The hunk line a row leads with, whichever view drew it.
+    ///
+    /// This and `line_on_side` are what keep one anchoring path for unified and
+    /// split. A split row carries two lines where a unified row carries one, and
+    /// without a shared answer to "what does this row say" the two views would
+    /// each grow their own anchor logic — and a disagreement between them is a
+    /// comment that lands on a different line depending on which view the
+    /// reviewer happened to be in, with nothing on screen to say so.
+    ///
+    /// A pair leads with its **new** side when it has one. That matches the
+    /// unified rule (an addition or a context line reports as additions) and it
+    /// is the side a reviewer means by default.
+    fn leading_line(&self, row: Row) -> Option<(usize, usize, usize)> {
+        match row {
+            Row::Code { file, hunk, line } => Some((file, hunk, line)),
+            Row::Split { file, hunk, pair } => pair.right.or(pair.left).map(|l| (file, hunk, l)),
+            _ => None,
+        }
+    }
+
+    /// The hunk line a row contributes to one side of the anchor.
+    ///
+    /// In split view a pair holds both sides at once, so "the deletions side of
+    /// this row" is a real question with a real answer; in unified it is the row
+    /// itself or nothing, which is what the old code said by matching on
+    /// `Row::Code` alone.
+    fn line_on_side(&self, row: Row, additions: bool) -> Option<(usize, usize, usize)> {
+        match row {
+            Row::Code { file, hunk, line } => Some((file, hunk, line)),
+            Row::Split { file, hunk, pair } => {
+                let side = if additions { pair.right } else { pair.left };
+                side.map(|l| (file, hunk, l))
+            }
+            _ => None,
+        }
     }
 
     /// Turn two display columns into the wire's character anchor: UTF-16
@@ -981,10 +1104,14 @@ impl App {
                     return files;
                 }
                 match self.diff_row_at(col, row) {
-                    Some(index) => Action::SelectStart {
-                        row: index,
-                        column: self.text_column_at(col),
-                    },
+                    Some(index) => {
+                        let (column, side) = self.text_column_at(col);
+                        Action::SelectStart {
+                            row: index,
+                            column,
+                            side,
+                        }
+                    }
                     None => Action::None,
                 }
             }
@@ -998,7 +1125,11 @@ impl App {
                 let Some(index) = open.then(|| self.diff_row_clamped(row)).flatten() else {
                     return Action::None;
                 };
-                let column = self.text_column_at(col);
+                // The side is fixed by where the drag *started*: a pointer
+                // that wanders across the divider is still selecting the text
+                // it began in, and switching sides mid-drag would silently
+                // re-anchor the whole range onto a different line.
+                let (column, _) = self.text_column_at(col);
                 if matches!(event.kind, MouseEventKind::Up(_)) {
                     Action::SelectEnd { row: index, column }
                 } else {
@@ -1180,6 +1311,7 @@ fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
         // line-wise — and here it always is.
         (KeyCode::Char('v'), false) | (KeyCode::Char('V'), false) => Action::ToggleVisual,
         (KeyCode::Char('?'), false) => Action::ToggleHelp,
+        (KeyCode::Char('s'), false) => Action::ToggleSplit,
         // Same physical key shifted and unshifted, so they mean the same thing;
         // binding them differently is how a reviewer expands twice by accident.
         (KeyCode::Char('+'), false) | (KeyCode::Char('='), false) => {
@@ -2043,6 +2175,71 @@ mod tests {
         assert_eq!(
             app.selection, None,
             "a reload drops it rather than moving it"
+        );
+    }
+
+    /// `texty()` in split view, on a pane wide enough to carry it.
+    fn split_texty() -> App {
+        let mut app = App::default();
+        app.load(&payload(TEXTY), 20);
+        app.split_pref = true;
+        app.set_panes(Panes {
+            diff: Rect::new(0, 1, 120, 20),
+            diff_top_row: 0,
+            files: None,
+            files_top: 0,
+        });
+        assert!(app.split(), "120 columns is room for two");
+        app
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_two_columns_falls_back_to_unified() {
+        // Remembered, not forgotten: hiding the file list or widening the
+        // terminal has to bring it back without the reviewer asking twice.
+        let mut app = split_texty();
+        app.set_panes(Panes {
+            diff: Rect::new(0, 1, 60, 20),
+            diff_top_row: 0,
+            files: None,
+            files_top: 0,
+        });
+        assert!(!app.split(), "60 columns is not");
+        assert!(app.split_pref, "but the preference survived");
+        assert!(
+            app.rows.iter().any(|r| matches!(r, Row::Code { .. })),
+            "and the rows are unified ones again"
+        );
+    }
+
+    #[test]
+    fn a_drag_in_the_old_column_anchors_on_the_deletions_side() {
+        // The row holds both sides at once, so nothing but the drag itself can
+        // say which one the reviewer meant. Deriving it would file a comment
+        // against the replacement line — the right number, the wrong text.
+        let mut app = split_texty();
+        let gutter = app.gutter;
+        let left_text = (gutter + MARKER_COLS - 1) as u16;
+        // Row 3 of the model pairs "-charlie delta" with "+echo foxtrot";
+        // screen row 4 with the diff pane starting at y=1.
+        drag(&mut app, (left_text, 4), (left_text + 6, 4));
+        let anchor = app.comment_anchor().expect("a line of code was marked");
+        assert_eq!(anchor.side, "deletions");
+        assert_eq!(anchor.columns.unwrap().2, "charlie");
+    }
+
+    #[test]
+    fn a_drag_in_the_new_column_anchors_on_the_additions_side() {
+        let mut app = split_texty();
+        let half = crate::ui::split_half_width(app.wrap_width, app.gutter);
+        let right_text = (app.gutter + MARKER_COLS - 1) * 2 + half + 1;
+        drag(&mut app, (right_text as u16, 4), (right_text as u16 + 3, 4));
+        let anchor = app.comment_anchor().expect("a line of code was marked");
+        assert_eq!(anchor.side, "additions");
+        assert_eq!(
+            anchor.columns.unwrap().2,
+            "echo",
+            "the same drag, one column over, is the other line"
         );
     }
 

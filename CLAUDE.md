@@ -344,6 +344,31 @@ is a guarantee — the residual race is the length of a fold:
     nothing, a reviewer cannot tell a file too large to expand from a key that
     does not work. Only the interior ones: the run after the last hunk is
     bounded by the file's length, which is exactly what a refusal withholds.
+- **Split view is a different row model, not a different way of drawing one.**
+  A `Row::Split` carries a *pair* of hunk-line indices where `Row::Code` carries
+  one, so the same file is a different number of rows in each view — which is
+  why toggling re-finds the cursor by row identity the way a refetch does, and
+  why the row model rebuilds rather than the renderer branching. Three things
+  follow:
+  - **Pairing is per run, not per hunk.** A run of deletions pairs index-wise
+    with the run of additions that replaced it, and context ends a run. Pair
+    across the whole hunk instead and a hunk containing two separate edits puts
+    the first deletion beside an addition from the second, several lines away —
+    two columns describing unrelated changes, which looks like a diff.
+  - **A drag carries the side it happened in** (`Selection::side`), because a
+    split row holds both sides at once and deriving the side from the row would
+    read a drag over a deleted line as a comment on its replacement: the right
+    line number attached to text the reviewer never pointed at. `leading_line`
+    and `line_on_side` are what keep *one* anchoring path for both views — two
+    would disagree eventually, and a comment that lands differently depending on
+    which view was open is invisible from either.
+  - **`App::text_column_at` is the mirror of what `ui` draws**, and in split
+    view both halves must agree on `split_half_width`. Nothing catches a
+    mismatch: it does not fail, it anchors the comment a few characters off.
+    The fallback threshold is measured on the **diff pane**, not the terminal,
+    because the file list takes a fixed 34 columns — so hiding the list is a way
+    to get split view back on a narrow terminal, which is the behaviour you want
+    and would be unexplainable if the threshold were on the window.
 - **A mutation nobody broadcasts is invisible to any client that only
   listens**, and the browser's 3s `useComments` poll is what hid that for a
   long time. `krit-tui` has no poll, so every gap showed up there as a key that

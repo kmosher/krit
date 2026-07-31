@@ -43,7 +43,7 @@ they carry:
 
 | Web UI | Terminal |
 | --- | --- |
-| Split / unified diff | Both; auto-fall-back to unified under ~120 columns |
+| Split / unified diff | Done — auto-falls back to unified under a 90-column pane |
 | Syntax highlighting | `syntect` + `two-face`'s bundled themes |
 | Hunk expansion | Done — `fileContents` carries both sides per file |
 | File tree with change-type icons | Distinct ASCII sigils, not just color |
@@ -279,12 +279,13 @@ exists and the composer could hydrate from it, which is worth having in a pane
 that gets closed and reopened. Two clients on one slot is last-writer-wins, so
 a TUI and a browser open on the same review would not see each other type.
 
-**Phase 2 — parity polish.** In progress. Hunk expansion is **done**: the gaps
-between hunks open a few lines at a time from both edges (`+` / `-`, `z` for all
-of it), out of the `fileContents` every diff response already carries. Still to
-do: split view with the narrow-terminal fallback, syntax highlighting, viewed
-state via `/api/viewed`, the stale-file indicators, refresh modes, the
-degraded-color paths.
+**Phase 2 — parity polish.** In progress. **Done:** hunk expansion (the gaps
+between hunks open a few lines at a time from both edges — `+` / `-`, `z` for
+all of it — out of the `fileContents` every diff response already carries), and
+split view with the narrow-terminal fallback (`s`, honouring the shared
+`diffStyle` setting, falling back to unified when the diff *pane* is under 90
+columns). Still to do: syntax highlighting, viewed state via `/api/viewed`, the
+stale-file indicators, refresh modes, the degraded-color paths.
 
 **Phase 3 — herdr plugin.** `herdr-plugin.toml` with a `split` pane and
 toggle/open/close actions, a `[[build]]` step, `--env KRIT_STATE_FILE`

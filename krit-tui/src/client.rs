@@ -128,6 +128,10 @@ pub struct Settings {
     pub staged: bool,
     pub untracked: bool,
     pub tab_size: usize,
+    /// `diffStyle == "split"`. The reviewer's choice, shared with the browser;
+    /// whether the terminal is wide enough to honour it is `App::split`'s
+    /// question, not this one.
+    pub split: bool,
 }
 
 impl Default for Settings {
@@ -136,6 +140,9 @@ impl Default for Settings {
             staged: true,
             untracked: true,
             tab_size: 4,
+            // The server ships "split" as the default, so the terminal starts
+            // where the browser does rather than inventing a second default.
+            split: true,
         }
     }
 }
@@ -152,6 +159,14 @@ impl Settings {
                 .as_u64()
                 .map(|n| n.clamp(1, 16) as usize)
                 .unwrap_or(fallback.tab_size),
+            // Anything other than the two known strings falls back rather than
+            // being read as unified: a settings file from a newer krit should
+            // not silently change how this one draws.
+            split: match value["diffStyle"].as_str() {
+                Some("split") => true,
+                Some("unified") => false,
+                _ => fallback.split,
+            },
         }
     }
 }
@@ -1225,7 +1240,8 @@ mod tests {
             Settings {
                 staged: true,
                 untracked: true,
-                tab_size: 4
+                tab_size: 4,
+                split: true,
             }
         );
 
@@ -1237,7 +1253,8 @@ mod tests {
             Settings {
                 staged: false,
                 untracked: false,
-                tab_size: 2
+                tab_size: 2,
+                split: true,
             }
         );
     }
