@@ -41,20 +41,35 @@ pub fn display_width(s: &str) -> usize {
 /// this has to know the column it starts at, and why it cannot be done with
 /// `str::replace`.
 pub fn expand_tabs(s: &str, tab_size: usize) -> String {
-    let stop = tab_size.max(1);
     let mut out = String::with_capacity(s.len());
     let mut col = 0;
     for g in s.graphemes(true) {
+        let advance = cluster_advance(g, col, tab_size);
         if g == "\t" {
-            let pad = stop - (col % stop);
-            out.extend(std::iter::repeat_n(' ', pad));
-            col += pad;
+            out.extend(std::iter::repeat_n(' ', advance));
         } else {
             out.push_str(g);
-            col += cluster_width(g);
         }
+        col += advance;
     }
     out
+}
+
+/// How many cells `g` occupies when it starts at column `col`.
+///
+/// Only a tab depends on `col`, and that dependency is the whole reason this
+/// is a shared function rather than two copies of the same arithmetic. The
+/// renderer walks a line through `expand_tabs` while `highlight` walks the
+/// same line to put syntax runs in column space; a tab rule that differed
+/// between them would not fail, it would tint the wrong characters, and only
+/// on lines that happen to contain a tab.
+pub fn cluster_advance(g: &str, col: usize, tab_size: usize) -> usize {
+    if g == "\t" {
+        let stop = tab_size.max(1);
+        stop - (col % stop)
+    } else {
+        cluster_width(g)
+    }
 }
 
 /// The part of `s` visible in a window `width` cells wide starting at column

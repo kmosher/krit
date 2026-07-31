@@ -342,6 +342,10 @@ pub struct App {
     /// Horizontal wheel notches seen in a row, signed by direction and zeroed
     /// by any vertical notch. See `H_WHEEL_INTENT`.
     pub h_wheel: i32,
+    /// Syntax colors, computed off the draw loop by the fetcher and carried in
+    /// on the payload. Empty is the normal state under `NO_COLOR` and for
+    /// every file whose text the server withheld.
+    pub highlights: crate::highlight::Highlights,
 }
 
 /// How many horizontal wheel notches in a row mean the reviewer wants to
@@ -379,6 +383,7 @@ impl Default for App {
             offset: 0,
             h_scroll: 0,
             h_wheel: 0,
+            highlights: Default::default(),
             focus: Focus::Diff,
             repo: String::new(),
             branch: String::new(),
@@ -421,6 +426,7 @@ impl App {
         self.custom_mode = payload.custom_mode;
         self.files = parse_patch(&payload.patch, &payload.untracked_files);
         self.take_file_text(payload);
+        self.highlights = payload.highlights.clone();
         self.rebuild();
         self.cursor = match anchor.and_then(|p| self.row_of_path(&p)) {
             Some(row) => row,
@@ -1556,6 +1562,7 @@ mod tests {
 
     fn payload(patch: &str) -> DiffPayload {
         DiffPayload {
+            highlights: Default::default(),
             patch: patch.to_string(),
             repo_name: "krit".into(),
             branch: "main".into(),
@@ -2415,6 +2422,7 @@ mod tests {
         payload.file_contents.insert(
             "b.rs".into(),
             crate::client::FileSides {
+                old: Default::default(),
                 new: crate::client::SideText {
                     contents: Some(lines.join("\n")),
                     ..Default::default()
@@ -2465,6 +2473,7 @@ mod tests {
         payload.file_contents.insert(
             "b.rs".into(),
             crate::client::FileSides {
+                old: Default::default(),
                 new: crate::client::SideText {
                     oversize: true,
                     ..Default::default()

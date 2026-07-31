@@ -9,6 +9,7 @@
 //! loop that is waiting is a loop that is not redrawing and not reading keys.
 
 use crate::comments::CommentAnchor;
+use crate::highlight::{self, Highlighter, depth_from_env};
 use krit_core::state::{KritState, StateError, client_base_url, default_state_path, read_state_at};
 use krit_core::types::ReviewComment;
 use serde::Deserialize;
@@ -17,6 +18,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -59,18 +61,32 @@ pub struct DiffPayload {
     /// response; the browser reads the same field for the same purpose.
     #[serde(default)]
     pub file_contents: HashMap<String, FileSides>,
+    /// Filled in by the fetcher thread, not by serde — highlighting is the one
+    /// piece of load-time work that scales with the *content* of the review
+    /// rather than its shape, so it belongs anywhere except the draw loop.
+    /// Riding along on the payload is what keeps it there without a second
+    /// channel or a second `Incoming` variant to keep in step.
+    #[serde(skip)]
+    pub highlights: crate::highlight::Highlights,
 }
 
 /// One file's text, as `/api/diff` bundles it.
 ///
-/// The response carries `old` too and nothing models it, because nothing reads
-/// it: a hunk's lines already carry both sides' text, and a gap holds unchanged
-/// lines, which are the same text on either side. Split view did not change
-/// that — it draws both columns out of the hunk.
+/// Gap expansion reads only `new`, because a gap holds unchanged lines and
+/// those are the same text on either side — split view did not change that,
+/// since it draws both columns out of the hunk. Highlighting is what finally
+/// needed `old`: syntax has to be parsed down a whole file to be right, and
+/// the file a deletion row's text belongs to is the pre-image.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct FileSides {
     #[serde(default)]
     pub new: SideText,
+    /// The pre-image. Gap expansion never needed it — an unchanged run is the
+    /// same text on both sides — but highlighting does: a deletion row's text
+    /// is the old file's line, and tinting it against the new file would
+    /// color words that are not there. The server has always sent it.
+    #[serde(default)]
+    pub old: SideText,
 }
 
 /// One side's text, or the reason there is none.
@@ -600,6 +616,23 @@ fn terminate(child: &mut Child) {
     let _ = child.kill();
 }
 
+/// The process's one highlighter, built on first use.
+///
+/// Shared rather than per-fetch because the syntax set is nearly all of what
+/// highlighting costs and every fetch wants the same one, and shared rather
+/// than owned by the fetcher thread because startup fetches on the main
+/// thread. `None` means the terminal has no color to spend, which skips
+/// loading the set at all.
+fn highlighter() -> Option<&'static Highlighter> {
+    static HIGHLIGHTER: OnceLock<Option<Highlighter>> = OnceLock::new();
+    HIGHLIGHTER
+        .get_or_init(|| {
+            let theme = std::env::var("KRIT_THEME").ok();
+            Highlighter::new(depth_from_env(), theme.as_deref())
+        })
+        .as_ref()
+}
+
 pub fn fetch_diff(base: &str, settings: Settings) -> Result<DiffPayload, String> {
     // The parameters are not optional in practice: `/api/diff` reads a missing
     // `staged`/`untracked` as **false**, which is a view no client ever chose
@@ -613,7 +646,19 @@ pub fn fetch_diff(base: &str, settings: Settings) -> Result<DiffPayload, String>
     match agent(REQUEST_TIMEOUT).get(&url).call() {
         Ok(res) => res
             .into_json::<DiffPayload>()
-            .map_err(|e| format!("krit sent a diff this client can't read: {e}")),
+            .map_err(|e| format!("krit sent a diff this client can't read: {e}"))
+            // Highlighting hangs off the fetch itself rather than off the
+            // fetcher *thread*, because startup fetches its first diff on this
+            // thread and would otherwise render uncolored until the first
+            // refetch — a review that gains its colors when an agent happens to
+            // touch a file, which reads as a bug in the highlighter.
+            .map(|mut payload| {
+                if let Some(h) = highlighter() {
+                    payload.highlights =
+                        highlight::of_payload(h, &payload.file_contents, settings.tab_size);
+                }
+                payload
+            }),
         Err(ureq::Error::Status(code, res)) => {
             // The diff route 500s with a JSON `error` when git itself failed
             // (a typo'd ref, an unreadable object). That message is the useful

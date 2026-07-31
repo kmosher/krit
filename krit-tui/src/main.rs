@@ -9,6 +9,7 @@ mod app;
 mod client;
 mod comments;
 mod compose;
+mod highlight;
 mod patch;
 mod rows;
 mod term;

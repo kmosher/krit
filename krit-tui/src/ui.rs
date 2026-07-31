@@ -12,6 +12,7 @@
 use crate::app::{App, Focus, Panes, Status};
 use crate::comments::{CommentAnchor, CommentLine};
 use crate::compose::Composer;
+use crate::highlight::Run;
 use crate::patch::{ChangeKind, LineKind};
 use crate::rows::{
     MARKER_COLS, Note, Row, Side, comments_in, line_marker, row_window, split_half_width,
@@ -618,11 +619,22 @@ fn render_row<'a>(
                 Span::styled(fit_columns(&num(l.new_line), gutter), gutter_style),
                 Span::styled(format!(" {marker} "), style),
             ];
-            spans.extend(marked_spans(
+            let side = Side::of_line(l.new_line.is_some());
+            let runs = app
+                .highlights
+                .runs(
+                    &app.files[file].path,
+                    side,
+                    l.new_line.or(l.old_line).unwrap_or(0),
+                    display_width(&body),
+                )
+                .unwrap_or(&[]);
+            spans.extend(code_spans(
                 &visible,
                 style,
                 app.h_scroll,
                 text_width,
+                runs,
                 marks,
             ));
             Line::from(spans)
@@ -746,6 +758,72 @@ fn plural(n: u32) -> &'static str {
 /// end of a short line — a blank line inside a multi-line drag, or a pointer
 /// released in the empty right-hand side of the pane — has to show as marked,
 /// and there is no text there to carry the attribute.
+/// One code row's text under two overlays: what the syntax says it is, and
+/// what the reviewer is pointing at.
+///
+/// Order matters and only one order is defensible — the mark wins every column
+/// it covers, because a selection the reviewer cannot see is worse than a
+/// keyword that lost its color for the length of one drag.
+///
+/// The row's own `+`/`-` color survives in the marker column rather than on the
+/// text, since syntax and change-kind both want the foreground and only one can
+/// have it. That is why the marker column is styled separately from the body
+/// and why it is never horizontally scrolled: with highlighting on, it is the
+/// thing carrying the distinction the text used to.
+fn code_spans<'a>(
+    visible: &str,
+    style: Style,
+    h_scroll: usize,
+    text_width: usize,
+    runs: &[Run],
+    marks: Option<(usize, usize)>,
+) -> Vec<Span<'a>> {
+    if runs.is_empty() {
+        return marked_spans(visible, style, h_scroll, text_width, marks);
+    }
+    // Cut the visible window wherever either overlay starts or stops, then
+    // style each piece from what covers it. Boundaries rather than per-column
+    // styling, because a span is what ratatui draws and a themed line is a
+    // handful of runs, not a hundred columns.
+    let clip = |c: usize| c.saturating_sub(h_scroll).min(text_width);
+    let mut cuts = vec![0, text_width];
+    for r in runs {
+        cuts.push(clip(r.from));
+        cuts.push(clip(r.to));
+    }
+    if let Some((from, to)) = marks {
+        cuts.push(clip(from));
+        cuts.push(clip(to));
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = Vec::new();
+    for pair in cuts.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if b <= a {
+            continue;
+        }
+        // Look the overlays up in *full-line* columns: the cuts are visible
+        // ones, and the two frames differ by exactly `h_scroll`.
+        let at = a + h_scroll;
+        let mut seg = style;
+        if let Some(r) = runs.iter().find(|r| r.from <= at && at < r.to) {
+            seg = seg.fg(r.color);
+            if r.bold {
+                seg = seg.add_modifier(Modifier::BOLD);
+            }
+        }
+        if marks.is_some_and(|(from, to)| at >= from && at < to) {
+            seg = seg.patch(marked());
+        }
+        out.push(Span::styled(
+            fit_columns(&slice_columns(visible, a, b - a), b - a),
+            seg,
+        ));
+    }
+    out
+}
+
 fn marked_spans<'a>(
     visible: &str,
     style: Style,
@@ -878,6 +956,7 @@ mod tests {
         let mut app = App::default();
         app.load(
             &DiffPayload {
+                highlights: Default::default(),
                 patch: PATCH.to_string(),
                 repo_name: "krit".into(),
                 branch: "main".into(),
