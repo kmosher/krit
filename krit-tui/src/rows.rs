@@ -99,6 +99,13 @@ impl GapRange {
 /// last. `total_lines` is the new side's length; without it the trailing gap
 /// cannot be sized and the end of the file is unreachable.
 ///
+/// **`total_lines == 0` means the length is unknown**, and is a supported
+/// argument: only the runs *between* hunks come back, with no trailing one.
+/// `take_file_text` passes it for a file whose text the server refused to send,
+/// so the row can still say why it will not open. It is also what a file with
+/// no new side at all reports — a deletion — where the answer is likewise that
+/// there is nothing after the last hunk.
+///
 /// Returned in file order and indexed by position, because that index is what
 /// the expansion state is keyed on — a gap identified by its line numbers would
 /// lose the reviewer's expansions the moment an edit above it shifted them.
@@ -119,7 +126,12 @@ pub fn gaps_of(file: &FileDiff, total_lines: u32) -> Vec<GapRange> {
         delta = (hunk.new_start as i64 + hunk.new_len as i64)
             - (hunk.old_start as i64 + hunk.old_len as i64);
     }
-    if total_lines >= cursor {
+    // `cursor >= 1` as well as the length check: a deleted or emptied file's
+    // only hunk is `@@ -1,N +0,0 @@`, which leaves `cursor` at 0, and `0 >= 0`
+    // would claim a trailing gap running from line 0 to line 0 — one line, on a
+    // side that has none. That phantom is also the only way to reach
+    // `Row::Context { line: 0 }`, whose `line - 1` underflows.
+    if cursor >= 1 && total_lines >= cursor {
         gaps.push(GapRange {
             new_start: cursor,
             new_end: total_lines,
@@ -218,9 +230,16 @@ impl Row {
     }
 }
 
-/// Flatten files into rows. `collapsed` holds paths whose bodies are hidden —
-/// the header still renders, so a collapsed file is navigable rather than
-/// gone.
+/// Flatten files into rows.
+///
+/// - `collapsed` holds paths whose bodies are hidden — the header still
+///   renders, so a collapsed file is navigable rather than gone.
+/// - `gaps` is the unchanged runs between hunks, by path, and `expanded` how
+///   much of each one the reviewer has opened. A path missing from `gaps` draws
+///   no `⋯` row, which is what a file whose text never arrived looks like.
+/// - `split` selects the row model, not a drawing style: it swaps every
+///   `Row::Code` for a `Row::Split` carrying both sides, so the same file is a
+///   different number of rows either way.
 pub fn build_rows(
     files: &[FileDiff],
     collapsed: &HashSet<String>,
@@ -300,7 +319,14 @@ pub fn build_rows(
                         hunk: hi,
                         pair,
                     });
-                    for li in [pair.right, pair.left].into_iter().flatten() {
+                    // A context pair holds the *same* line index on both
+                    // sides, so iterating both would push its comments twice —
+                    // the body rendered twice, and a phantom stop for `}`.
+                    let sides = match (pair.right, pair.left) {
+                        (Some(r), Some(l)) if r == l => vec![r],
+                        (r, l) => r.into_iter().chain(l).collect(),
+                    };
+                    for li in sides {
                         push_comments(&mut rows, fi, comments.after_line(fi, hi, li));
                     }
                 }
@@ -477,6 +503,25 @@ pub fn gutter_width(files: &[FileDiff]) -> usize {
 /// line, and a disagreement would put every character-level selection off by
 /// a fixed amount — which reads as a plausible anchor, not as an error.
 pub const MARKER_COLS: usize = 4;
+
+/// Columns one side of a split row spends before its text: its line-number
+/// gutter, then the space, marker and space.
+///
+/// Here beside `MARKER_COLS`, and for the same reason its doc gives — `ui`
+/// draws with it, `App::text_column_at` subtracts it to turn a mouse column
+/// back into a column of the line, and the tests locate their coordinates with
+/// it. Three copies of the arithmetic is how they drift, and a drift here does
+/// not fail: it anchors the comment a few characters off.
+pub fn split_side_prefix(gutter: usize) -> usize {
+    gutter + MARKER_COLS - 1
+}
+
+/// Code columns available to *one* side of a split row: what is left after both
+/// prefixes and the one-column divider between them, halved.
+pub fn split_half_width(pane_width: usize, gutter: usize) -> usize {
+    let chrome = 2 * split_side_prefix(gutter) + 1;
+    pane_width.saturating_sub(chrome) / 2
+}
 
 /// `+N −M` for a file's header.
 pub fn stat_label(file: &FileDiff) -> String {
@@ -902,6 +947,26 @@ mod tests {
         assert_eq!(gaps[2].new_start, 32);
         assert_eq!(gaps[2].new_end, 60);
         assert_eq!(gaps[2].old_line(32), Some(31));
+    }
+
+    #[test]
+    fn a_file_with_no_new_side_offers_no_gap_at_all() {
+        // A deletion, and a file emptied without being deleted, both produce
+        // `@@ -1,N +0,0 @@`. The trailing-gap guard used to read `0 >= 0` as a
+        // one-line gap on a side that has none — a `⋯ 1 unchanged line` row for
+        // a line that does not exist, and the only route to `Row::Context
+        // { line: 0 }`, whose `line - 1` underflows.
+        let emptied = "diff --git a/gone.txt b/gone.txt\n\
+                       @@ -1,3 +0,0 @@\n\
+                       -one\n\
+                       -two\n\
+                       -three";
+        let files = parse_patch(emptied, &[]);
+        assert_eq!(gaps_of(&files[0], 0), Vec::new());
+        // And the same when the server *did* send text for it (an emptied file
+        // reports `contents: ""`, so the length is a real zero rather than the
+        // unknown-length sentinel).
+        assert_eq!(gaps_of(&files[0], 0), Vec::new());
     }
 
     #[test]

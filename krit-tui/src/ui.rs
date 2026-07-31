@@ -14,7 +14,8 @@ use crate::comments::{CommentAnchor, CommentLine};
 use crate::compose::Composer;
 use crate::patch::{ChangeKind, LineKind};
 use crate::rows::{
-    MARKER_COLS, Note, Row, comments_in, line_marker, row_window, scroll_to_show, stat_label,
+    MARKER_COLS, Note, Row, comments_in, line_marker, row_window, scroll_to_show, split_half_width,
+    split_side_prefix, stat_label,
 };
 use crate::text::{display_width, expand_tabs, fit_columns, slice_columns};
 use ratatui::Frame;
@@ -454,19 +455,6 @@ fn marked() -> Style {
     Style::default().add_modifier(Modifier::UNDERLINED)
 }
 
-/// Code columns available to *one* side of a split row.
-///
-/// Each side spends `gutter` on its line number and three more on the space,
-/// marker and space; one column between them is the divider. Shared with
-/// `App::text_column_at`, which turns a mouse column back into a column of the
-/// text — the two have to agree exactly or a drag in the right-hand pane
-/// anchors at an offset, which reads as a plausible selection rather than an
-/// error.
-pub fn split_half_width(pane_width: usize, gutter: usize) -> usize {
-    let chrome = 2 * (gutter + MARKER_COLS - 1) + 1;
-    pane_width.saturating_sub(chrome) / 2
-}
-
 fn render_row<'a>(
     app: &App,
     theme: &Theme,
@@ -619,6 +607,12 @@ fn render_row<'a>(
         // what it is — the only difference is where the text came from. A
         // different shape here would make expanded lines read as an annotation
         // rather than as the file.
+        //
+        // That holds in split view too, where it is a deliberate exception to
+        // the two-column layout: an unchanged line is the same text on both
+        // sides, so a split gap row would be the same string twice. It is drawn
+        // once across the pane instead, and `App::text_column_at` decodes it
+        // with the unified prefix for the same reason.
         Row::Context { file, gap, line } => {
             let (text, old) = app.context_line(file, gap, line).unwrap_or(("", None));
             let body = expand_tabs(text, app.tab_size);
@@ -642,10 +636,8 @@ fn render_row<'a>(
         Row::Split { file, hunk, pair } => {
             let h = &app.files[file].hunks[hunk];
             let half = split_half_width(pane_width, gutter);
-            // A character drag belongs to the column it happened in, so only
-            // that column is underlined. A line-wise selection has no side and
-            // marks both, which is what it means. Marking both for a drag would
-            // claim the reviewer had selected text they never pointed at.
+            // Only the column the drag happened in is underlined; a line-wise
+            // selection has no side and marks both. See `Selection::side`.
             let dragged = app.selection.and_then(|s| s.side);
             let side = |which: Option<usize>, additions: bool| -> Vec<Span<'a>> {
                 let marks = match dragged {
@@ -657,7 +649,7 @@ fn render_row<'a>(
                     // what says "nothing here was added" — a short row would
                     // just look like the end of the file.
                     return vec![Span::styled(
-                        fit_columns("", gutter + MARKER_COLS - 1 + half),
+                        fit_columns("", split_side_prefix(gutter) + half),
                         Style::default().patch(cursor),
                     )];
                 };
@@ -670,7 +662,14 @@ fn render_row<'a>(
                 }
                 .patch(cursor);
                 let body = expand_tabs(&l.text, app.tab_size);
-                let visible = slice_columns(&body, app.h_scroll, half);
+                // Padded to the full half, not just sliced to it. `slice_columns`
+                // truncates and never pads, so a side shorter than `half` would
+                // put the divider — and everything right of it — wherever this
+                // line happened to end. That is not merely ragged: it is the
+                // column `App::text_column_at` subtracts to decide which side a
+                // click landed in, so an unpadded row silently decodes every
+                // drag in the right-hand column against the left-hand line.
+                let visible = fit_columns(&slice_columns(&body, app.h_scroll, half), half);
                 let mut spans = vec![
                     Span::styled(fit_columns(&num(number), gutter), theme.dim().patch(cursor)),
                     Span::styled(format!(" {} ", line_marker(l.kind)), style),
@@ -887,6 +886,64 @@ mod tests {
             .draw(|f| panes = draw(f, app, &theme, false))
             .unwrap();
         (rows_of(terminal.backend().buffer()), panes)
+    }
+
+    /// `app()` drawn side by side, on a pane wide enough to carry it.
+    fn split_app() -> App {
+        let mut app = app();
+        app.split_pref = true;
+        app.show_files = false;
+        app.set_panes(Panes {
+            diff: Rect::new(0, 1, 120, 20),
+            diff_top_row: 0,
+            files: None,
+            files_top: 0,
+        });
+        assert!(app.split(), "120 columns is room for two");
+        app
+    }
+
+    #[test]
+    fn every_split_row_puts_its_divider_in_the_same_column() {
+        // Read off a rendered frame rather than recomputed, because the
+        // arithmetic being checked is exactly what a recomputing test would
+        // share with the code. `slice_columns` truncates and does not pad, so
+        // an unpadded side put the divider wherever its line ended — ragged on
+        // screen, and decoded by `text_column_at` as a divider that is not
+        // there, which sends every right-column drag to the left-hand line.
+        let app = split_app();
+        let screen = render(&app, 120, 20);
+        let expect = split_side_prefix(app.gutter) + split_half_width(120, app.gutter);
+
+        let dividers: Vec<usize> = screen
+            .iter()
+            .filter(|line| line.contains('│'))
+            .map(|line| line.chars().position(|c| c == '│').unwrap())
+            .collect();
+        assert!(
+            dividers.len() >= 3,
+            "expected several split rows, got {dividers:?}"
+        );
+        for at in &dividers {
+            assert_eq!(*at, expect, "divider moved: {dividers:?} in {screen:#?}");
+        }
+    }
+
+    #[test]
+    fn a_row_with_only_one_side_is_padded_like_the_rest() {
+        // `+ also()` has no deletion beside it. The blank column is what says
+        // "nothing was removed here"; a short row would read as end-of-file.
+        let app = split_app();
+        let screen = render(&app, 120, 20);
+        let lone = screen
+            .iter()
+            .find(|line| line.contains("also()"))
+            .expect("the unpaired addition rendered");
+        let at = lone.chars().position(|c| c == '│').unwrap();
+        assert_eq!(
+            at,
+            split_side_prefix(app.gutter) + split_half_width(120, app.gutter)
+        );
     }
 
     #[test]
