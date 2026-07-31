@@ -8,9 +8,11 @@
 //! the draw loop must never be the thing waiting on the network, because a
 //! loop that is waiting is a loop that is not redrawing and not reading keys.
 
+use crate::comments::CommentAnchor;
 use krit_core::state::{KritState, StateError, client_base_url, default_state_path, read_state_at};
+use krit_core::types::ReviewComment;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -103,6 +105,15 @@ pub enum ServerEvent {
     /// request — see `QUIET` and `refetch_at` in `main.rs`, which own the
     /// quiet window.
     Changed,
+    /// A comment was added, edited, resolved, re-anchored, or replied to. Like
+    /// `Changed`, it names no id: the viewer refetches the list, which is one
+    /// request either way and cannot drift from what the server holds.
+    CommentsChanged,
+    /// Who else is on this review. The count is what gates Done reviewing —
+    /// finishing with nobody listening posts a `submitted` nothing receives.
+    Watchers {
+        count: usize,
+    },
     Submitted {
         summary: Option<String>,
     },
@@ -115,14 +126,34 @@ pub enum ServerEvent {
     Disconnected,
 }
 
-/// Anything a background thread hands the draw loop. One channel for both, so
-/// the loop has a single place to drain and no ordering surprises.
+/// Anything a background thread hands the draw loop. One channel for all of
+/// them, so the loop has a single place to drain and no ordering surprises.
 #[derive(Clone, Debug)]
 pub enum Incoming {
     Event(ServerEvent),
     /// A refetch the loop asked for, finished. `Err` keeps the last good diff
     /// on screen and puts the message in the strip.
     Diff(Box<Result<DiffPayload, String>>),
+    Comments(Box<Result<Vec<ReviewComment>, String>>),
+    /// A write the reviewer asked for, finished — posting a comment, a reply,
+    /// a status change. `Ok` carries what to say about it; the refetch that
+    /// makes it visible is driven by the server's own broadcast, not by this.
+    Done {
+        result: Box<Result<String, String>>,
+        /// Whether this came out of the open composer, so a failure can leave
+        /// the form up with the reviewer's text still in it — and an unrelated
+        /// write finishing cannot close a form it has nothing to do with.
+        composed: bool,
+    },
+}
+
+/// What the worker thread can be asked for. Requests of the same kind
+/// coalesce; a write never does, because two of them are two different things
+/// the reviewer asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fetch {
+    Diff,
+    Comments,
 }
 
 /// How we got a server, because it changes what the reviewer should be told:
@@ -511,23 +542,200 @@ pub fn fetch_diff(base: &str, settings: Settings) -> Result<DiffPayload, String>
     }
 }
 
-/// Run diff fetches on a thread, so the draw loop only ever asks and listens.
+/// Every comment on the review, the reviewer's own queued ones included.
 ///
-/// Returns the handle to ask on. Requests coalesce: whatever arrived while a
-/// fetch was in flight becomes one more fetch, not a queue of them.
-pub fn spawn_fetcher(base: String, settings: Settings, tx: Sender<Incoming>) -> Sender<()> {
-    let (request_tx, request_rx): (Sender<()>, Receiver<()>) = channel();
+/// `includeQueued=true` for the same reason the browser sends it: a queued
+/// comment is the reviewer's unposted work, and this is a reviewer's client.
+/// The parameter exists to keep *agent-facing* listings from leaking it.
+pub fn fetch_comments(base: &str) -> Result<Vec<ReviewComment>, String> {
+    let url = format!("{base}/api/comments?includeQueued=true");
+    match agent(REQUEST_TIMEOUT).get(&url).call() {
+        Ok(res) => res
+            .into_json::<Vec<ReviewComment>>()
+            .map_err(|e| format!("krit sent comments this client can't read: {e}")),
+        Err(err) => Err(format!("cannot read comments: {err}")),
+    }
+}
+
+/// Run fetches on a thread, so the draw loop only ever asks and listens.
+///
+/// Returns the handle to ask on. Requests of one kind coalesce: whatever
+/// arrived while a fetch was in flight becomes one more fetch, not a queue of
+/// them. The two kinds are tracked separately — a burst of file writes must
+/// not turn into a comment refetch, and a burst of comment traffic must not
+/// re-run `git diff`.
+pub fn spawn_fetcher(base: String, settings: Settings, tx: Sender<Incoming>) -> Sender<Fetch> {
+    let (request_tx, request_rx): (Sender<Fetch>, Receiver<Fetch>) = channel();
     std::thread::spawn(move || {
-        while request_rx.recv().is_ok() {
+        while let Ok(first) = request_rx.recv() {
+            let mut diff = first == Fetch::Diff;
+            let mut comments = first == Fetch::Comments;
             // Collapse anything that piled up behind this one.
-            while request_rx.try_recv().is_ok() {}
-            let result = fetch_diff(&base, settings);
-            if tx.send(Incoming::Diff(Box::new(result))).is_err() {
-                return; // the viewer is gone
+            while let Ok(more) = request_rx.try_recv() {
+                diff |= more == Fetch::Diff;
+                comments |= more == Fetch::Comments;
+            }
+            if diff {
+                let result = fetch_diff(&base, settings);
+                if tx.send(Incoming::Diff(Box::new(result))).is_err() {
+                    return; // the viewer is gone
+                }
+            }
+            if comments {
+                let result = fetch_comments(&base);
+                if tx.send(Incoming::Comments(Box::new(result))).is_err() {
+                    return;
+                }
             }
         }
     });
     request_tx
+}
+
+/// A change the reviewer asked for.
+///
+/// Every one of these is a request the browser makes too, on the same route
+/// with the same shape — the server is the whole review model and neither
+/// client has state of its own to keep in step. What comes back is a sentence
+/// for the strip; what makes the change *visible* is the server's own
+/// broadcast, which arrives as a `CommentsChanged` like anyone else's.
+#[derive(Clone, Debug)]
+pub enum Write {
+    Comment {
+        anchor: Box<CommentAnchor>,
+        body: String,
+        queued: bool,
+    },
+    Reply {
+        id: String,
+        body: String,
+    },
+    Status {
+        id: String,
+        status: &'static str,
+    },
+    PostQueued,
+    Submit {
+        summary: Option<String>,
+    },
+}
+
+impl Write {
+    fn request(&self, base: &str) -> (String, Value) {
+        match self {
+            Write::Comment {
+                anchor,
+                body,
+                queued,
+            } => {
+                let mut payload = json!({
+                    "filePath": anchor.file_path,
+                    "side": anchor.side,
+                    "lineNumber": anchor.start_line,
+                    "endLine": anchor.end_line,
+                    "lineContent": anchor.line_content,
+                    "body": body,
+                    "status": if *queued { "queued" } else { "open" },
+                });
+                // All three or none: the server reads a partial character
+                // anchor as no anchor at all, which would silently widen the
+                // comment to the whole line.
+                if let Some((start, end, text)) = &anchor.columns {
+                    payload["startColumn"] = json!(start);
+                    payload["endColumn"] = json!(end);
+                    payload["selectedText"] = json!(text);
+                }
+                (format!("{base}/api/comments"), payload)
+            }
+            // `source=ui` is what marks this a human's reply: the server
+            // labels it `author: "user"`, broadcasts it to the agent, and
+            // reopens the comment if it had been resolved. Without it a
+            // reviewer's reply is filed as the agent's own and never reaches
+            // it — the parameter is not a formality.
+            Write::Reply { id, body } => (
+                format!("{base}/api/comments/{id}/replies?source=ui"),
+                json!({ "body": body }),
+            ),
+            Write::Status { id, status } => (
+                format!("{base}/api/comments/{id}"),
+                json!({ "status": status }),
+            ),
+            Write::PostQueued => (format!("{base}/api/queued/post"), json!({})),
+            Write::Submit { summary } => {
+                (format!("{base}/api/submit"), json!({ "summary": summary }))
+            }
+        }
+    }
+
+    /// Whether this write came out of the composer — that is, whether there is
+    /// text on screen that has to survive a failure.
+    fn composed(&self) -> bool {
+        matches!(
+            self,
+            Write::Comment { .. } | Write::Reply { .. } | Write::Submit { .. }
+        )
+    }
+
+    /// What to say in the strip when it worked.
+    fn note(&self, response: &Value) -> String {
+        match self {
+            Write::Comment { queued: true, .. } => "Comment queued.".to_string(),
+            Write::Comment { .. } => "Comment posted.".to_string(),
+            Write::Reply { .. } => "Reply posted.".to_string(),
+            Write::Status {
+                status: "resolved", ..
+            } => "Resolved.".to_string(),
+            Write::Status { .. } => "Reopened.".to_string(),
+            Write::PostQueued => match response["posted"].as_u64().unwrap_or(0) {
+                1 => "1 queued comment posted.".to_string(),
+                n => format!("{n} queued comments posted."),
+            },
+            Write::Submit { .. } => "Review submitted.".to_string(),
+        }
+    }
+}
+
+/// Send one write, on a thread of its own.
+///
+/// A thread each rather than a queue: writes are rare — a keystroke does not
+/// write — and putting them behind the fetcher would make posting a comment
+/// wait out whatever `git diff` was doing. Two writes racing is two things the
+/// reviewer asked for, and the server orders them.
+pub fn spawn_write(base: String, write: Write, tx: Sender<Incoming>) {
+    std::thread::spawn(move || {
+        let composed = write.composed();
+        let _ = tx.send(Incoming::Done {
+            result: Box::new(send(&base, &write)),
+            composed,
+        });
+    });
+}
+
+fn send(base: &str, write: &Write) -> Result<String, String> {
+    let (url, payload) = write.request(base);
+    let request = agent(REQUEST_TIMEOUT).post(&url);
+    // PUT and POST are not interchangeable here; the status route is a PUT.
+    let response = match write {
+        Write::Status { .. } => agent(REQUEST_TIMEOUT).put(&url).send_json(payload),
+        _ => request.send_json(payload),
+    };
+    match response {
+        Ok(res) => {
+            let value: Value = res.into_json().unwrap_or(Value::Null);
+            Ok(write.note(&value))
+        }
+        // The server's own message, not the status code: it says which field
+        // was rejected, and 400 alone sends someone reading server source.
+        Err(ureq::Error::Status(code, res)) => {
+            let body = res.into_string().unwrap_or_default();
+            let detail = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_string))
+                .unwrap_or(body);
+            Err(format!("krit refused this ({code}): {detail}"))
+        }
+        Err(err) => Err(format!("cannot reach krit: {err}")),
+    }
 }
 
 /// Pull every complete SSE frame out of `buf` and classify it. Split out from
@@ -572,14 +780,28 @@ fn classify(value: &Value) -> Option<ServerEvent> {
         // `krit refresh` has no event of its own — it broadcasts
         // `file-written` with a null path, which is exactly what it means.
         "files-changed" | "file-changed" | "file-written" => Some(ServerEvent::Changed),
+        // Comment traffic, including the re-anchor fallout `/api/events-ws`
+        // filters out of the agent's stream. A comment whose line moved under
+        // an edit has to move on screen too, so the noisy stream is the right
+        // one for a human's client.
+        "comment-added" | "comment-updated" | "reply-added" => Some(ServerEvent::CommentsChanged),
+        // Watchers, not browsers: `clients` counts UI subscriptions (and this
+        // viewer is one of them), while `state` separates them from agents.
+        // Done reviewing needs *someone listening on the agent side*, which
+        // only `state` can answer.
+        "state" => Some(ServerEvent::Watchers {
+            count: (value["watcherCount"].as_u64().unwrap_or(0)
+                + value["agentCount"].as_u64().unwrap_or(0)) as usize,
+        }),
         "submitted" => Some(ServerEvent::Submitted {
             summary: value["summary"].as_str().map(str::to_string),
         }),
         "review-ended" => Some(ServerEvent::Ended {
             reason: value["reason"].as_str().unwrap_or("unknown").to_string(),
         }),
-        // state / clients / comment traffic: nothing for a read-only viewer to
-        // do. Phase 1 grows this list rather than removing the default.
+        // clients / user-edit: nothing the viewer does about them. Both edit
+        // routes broadcast `file-changed` immediately before `user-edit`, so
+        // the refetch is already covered and reacting to both would double it.
         _ => None,
     }
 }
@@ -759,17 +981,38 @@ mod tests {
     }
 
     #[test]
-    fn events_a_read_only_viewer_has_no_use_for_are_dropped_not_misread() {
-        // `state` and `clients` arrive constantly; each must not read as a
-        // reason to refetch.
-        assert!(
+    fn presence_traffic_is_never_mistaken_for_a_reason_to_refetch() {
+        // `state` and `clients` arrive constantly. `state` is presence — it
+        // must move the watcher count and nothing else; `clients` counts UI
+        // subscriptions, which includes this viewer, and answers no question
+        // the TUI asks.
+        assert_eq!(
             frames(
-                "data: {\"type\":\"state\",\"watcherCount\":1,\"uiCount\":1,\"agentCount\":0}\n\n"
-            )
-            .is_empty()
+                "data: {\"type\":\"state\",\"watcherCount\":1,\"uiCount\":3,\"agentCount\":2}\n\n"
+            ),
+            vec![ServerEvent::Watchers { count: 3 }],
+            "watchers plus agents, and never the UI count — this client is one"
         );
         assert!(frames("data: {\"type\":\"clients\",\"browsers\":2}\n\n").is_empty());
-        assert!(frames("data: {\"type\":\"comment-added\",\"comment\":{}}\n\n").is_empty());
+    }
+
+    #[test]
+    fn comment_traffic_refetches_the_list_rather_than_naming_an_id() {
+        // Including `comment-updated`, which is re-anchor fallout the agent's
+        // stream filters out: a comment whose line moved under an edit has to
+        // move on screen too.
+        assert_eq!(
+            frames(
+                "data: {\"type\":\"comment-added\",\"comment\":{}}\n\n\
+                 data: {\"type\":\"comment-updated\",\"comment\":{}}\n\n\
+                 data: {\"type\":\"reply-added\",\"commentId\":\"i\"}\n\n"
+            ),
+            vec![
+                ServerEvent::CommentsChanged,
+                ServerEvent::CommentsChanged,
+                ServerEvent::CommentsChanged
+            ]
+        );
     }
 
     #[test]
@@ -841,15 +1084,21 @@ mod tests {
             ),
             (
                 Event::State {
-                    watcher_count: 0,
+                    watcher_count: 1,
                     ui_count: 1,
-                    agent_count: 0,
+                    agent_count: 1,
                 },
-                None,
+                Some(ServerEvent::Watchers { count: 2 }),
             ),
             (Event::Clients { browsers: 1 }, None),
-            (Event::CommentAdded { comment: comment() }, None),
-            (Event::CommentUpdated { comment: comment() }, None),
+            (
+                Event::CommentAdded { comment: comment() },
+                Some(ServerEvent::CommentsChanged),
+            ),
+            (
+                Event::CommentUpdated { comment: comment() },
+                Some(ServerEvent::CommentsChanged),
+            ),
             (
                 Event::ReplyAdded {
                     comment_id: "i".into(),
@@ -861,7 +1110,7 @@ mod tests {
                     },
                     comment_status: "open".into(),
                 },
-                None,
+                Some(ServerEvent::CommentsChanged),
             ),
             (
                 Event::UserEdit {

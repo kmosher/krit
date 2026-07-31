@@ -8,10 +8,14 @@
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode, supports_keyboard_enhancement,
 };
 use std::io::{self, Stdout, stdout};
 use std::sync::Arc;
@@ -28,15 +32,30 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// reachable — `enable_raw_mode` works through `/dev/tty` while the escape
 /// sequences go to stdout, so `krit-tui | head` succeeds at the first and gets
 /// EPIPE on the second.
-fn enter_screen(mouse: bool) -> io::Result<()> {
+fn enter_screen(mouse: bool, enhanced: bool) -> io::Result<()> {
     enable_raw_mode()?;
     if let Err(err) = execute!(stdout(), EnterAlternateScreen) {
         let _ = disable_raw_mode();
         return Err(err);
     }
+    // Bracketed paste is not optional for the composer: without it, pasting a
+    // three-line comment is three `Enter`s, and every terminal form that has
+    // ever shipped without it submits after the first line. Not part of the
+    // unwind below — a terminal that refuses it is one where paste is
+    // character-by-character, which is worse than it was, not broken.
+    let _ = execute!(stdout(), EnableBracketedPaste);
+    if enhanced {
+        // Only what the composer actually reads: disambiguation is what makes
+        // `Ctrl+Enter` distinguishable from `Enter`. Reporting *all* keys as
+        // escape codes would also report releases, which `action_for` already
+        // has to filter and which nothing here wants.
+        let _ = execute!(
+            stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     if mouse && let Err(err) = execute!(stdout(), EnableMouseCapture) {
-        let _ = execute!(stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        let _ = leave_screen();
         return Err(err);
     }
     Ok(())
@@ -46,7 +65,11 @@ fn leave_screen() -> io::Result<()> {
     // Unconditionally released, whatever we think the state is: this runs from
     // a panic hook too, and a terminal left reporting mouse events writes
     // escape sequences into the user's next shell prompt every time they move
-    // the pointer. Releasing one that was never taken costs nothing.
+    // the pointer. Releasing one that was never taken costs nothing — and a
+    // terminal left with the keyboard flags pushed reports keys nobody can
+    // read, which is the same class of mess.
+    let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
+    let _ = execute!(stdout(), DisableBracketedPaste);
     let _ = execute!(stdout(), DisableMouseCapture);
     // Raw mode next: it has the wider blast radius, so if only one of the
     // remaining two succeeds it should be this one.
@@ -81,20 +104,36 @@ pub struct Session {
     /// re-entering the screen after a suspend restores the same state rather
     /// than silently taking it back from a reviewer who gave it away.
     mouse: bool,
+    /// Whether this terminal speaks the Kitty keyboard protocol. Asked once:
+    /// the query is a round-trip with a timeout, and doing it again on every
+    /// resume would put a blocking read on the path back from Ctrl+Z.
+    enhanced: bool,
 }
 
 impl Session {
     pub fn start(mouse: bool) -> io::Result<(Self, Tui)> {
         install_panic_hook();
-        enter_screen(mouse)?;
+        // A DA1-style query with a timeout, so it costs something — but only
+        // once, and the answer decides whether the footer may promise a
+        // binding. `unwrap_or(false)` because a terminal that will not say is
+        // one to assume the least of.
+        let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+        enter_screen(mouse, enhanced)?;
         let terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
         Ok((
             Session {
                 restored: false,
                 mouse,
+                enhanced,
             },
             terminal,
         ))
+    }
+
+    /// Whether `Ctrl+Enter` is distinguishable from `Enter` here. The composer
+    /// works either way; the footer has to say which.
+    pub fn keyboard_enhanced(&self) -> bool {
+        self.enhanced
     }
 
     /// Take or release the mouse mid-session.
@@ -130,7 +169,7 @@ impl Session {
         // `enter_screen` unwinds its own partial failure: if this returns Err,
         // the terminal really is still the shell's, and `finish` is right to
         // do nothing.
-        enter_screen(self.mouse)?;
+        enter_screen(self.mouse, self.enhanced)?;
         self.restored = false;
 
         // Whoever had the terminal while we were stopped drew on it, and

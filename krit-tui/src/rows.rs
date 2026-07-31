@@ -8,6 +8,7 @@
 //! diffs its own back buffer, so drawing is nearly free and the expense is
 //! *building* rows.
 
+use crate::comments::CommentRows;
 use crate::patch::{FileDiff, LineKind};
 use std::collections::HashSet;
 
@@ -31,6 +32,14 @@ pub enum Row {
         hunk: usize,
         line: usize,
     },
+    /// One line of a comment block. `line` indexes the laid-out block rather
+    /// than the comment's body: a body wraps, and a model row that rendered as
+    /// three screen rows would break every scroll calculation there is.
+    Comment {
+        file: usize,
+        comment: usize,
+        line: usize,
+    },
     /// One blank line between files, so the headers don't collide.
     Gap,
 }
@@ -50,8 +59,18 @@ impl Row {
             Row::File { file }
             | Row::Meta { file, .. }
             | Row::Hunk { file, .. }
-            | Row::Code { file, .. } => Some(file),
+            | Row::Code { file, .. }
+            | Row::Comment { file, .. } => Some(file),
             Row::Gap => None,
+        }
+    }
+
+    /// The comment this row is part of, if it is part of one. What the reply
+    /// and resolve keys act on.
+    pub fn comment(self) -> Option<usize> {
+        match self {
+            Row::Comment { comment, .. } => Some(comment),
+            _ => None,
         }
     }
 }
@@ -59,8 +78,23 @@ impl Row {
 /// Flatten files into rows. `collapsed` holds paths whose bodies are hidden —
 /// the header still renders, so a collapsed file is navigable rather than
 /// gone.
-pub fn build_rows(files: &[FileDiff], collapsed: &HashSet<String>) -> Vec<Row> {
+pub fn build_rows(
+    files: &[FileDiff],
+    collapsed: &HashSet<String>,
+    comments: &CommentRows,
+) -> Vec<Row> {
     let mut rows = Vec::new();
+    let push_comments = |rows: &mut Vec<Row>, file: usize, which: &[usize]| {
+        for &comment in which {
+            for line in 0..comments.height(comment) {
+                rows.push(Row::Comment {
+                    file,
+                    comment,
+                    line,
+                });
+            }
+        }
+    };
     for (fi, file) in files.iter().enumerate() {
         if fi > 0 {
             rows.push(Row::Gap);
@@ -79,6 +113,9 @@ pub fn build_rows(files: &[FileDiff], collapsed: &HashSet<String>) -> Vec<Row> {
             });
             continue;
         }
+        // Comments whose line is nowhere in the diff. Under the header rather
+        // than nowhere: see `comments::Anchor::File`.
+        push_comments(&mut rows, fi, comments.under_file(fi));
         if file.binary {
             rows.push(Row::Meta {
                 file: fi,
@@ -94,10 +131,25 @@ pub fn build_rows(files: &[FileDiff], collapsed: &HashSet<String>) -> Vec<Row> {
                     hunk: hi,
                     line: li,
                 });
+                push_comments(&mut rows, fi, comments.after_line(fi, hi, li));
             }
         }
     }
     rows
+}
+
+/// How many comments a file holds, laid out or not — what the collapsed note
+/// reports, so folding a file does not silently take its conversation with it.
+pub fn comments_in(files: &[FileDiff], file: usize, comments: &CommentRows) -> usize {
+    let mut n = comments.under_file(file).len();
+    if let Some(f) = files.get(file) {
+        for (hi, hunk) in f.hunks.iter().enumerate() {
+            for li in 0..hunk.lines.len() {
+                n += comments.after_line(file, hi, li).len();
+            }
+        }
+    }
+    n
 }
 
 /// Row indices of every file header, in order.
@@ -105,6 +157,16 @@ pub fn file_rows(rows: &[Row]) -> Vec<usize> {
     rows.iter()
         .enumerate()
         .filter(|(_, r)| matches!(r, Row::File { .. }))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Row index of each comment's *first* line, in order — so `}` steps from one
+/// comment to the next rather than through a long body a line at a time.
+pub fn comment_rows(rows: &[Row]) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, r)| matches!(r, Row::Comment { line: 0, .. }))
         .map(|(i, _)| i)
         .collect()
 }
@@ -177,6 +239,15 @@ pub fn gutter_width(files: &[FileDiff]) -> usize {
     widest.to_string().len().max(2)
 }
 
+/// The columns between the gutters and the code: one separator space, the
+/// change marker, and one more space.
+///
+/// Here rather than in `ui` because two modules have to agree on it. `ui`
+/// draws it; `App` subtracts it to turn a mouse column into a column of the
+/// line, and a disagreement would put every character-level selection off by
+/// a fixed amount — which reads as a plausible anchor, not as an error.
+pub const MARKER_COLS: usize = 4;
+
 /// `+N −M` for a file's header.
 pub fn stat_label(file: &FileDiff) -> String {
     format!("+{} −{}", file.additions, file.deletions)
@@ -208,8 +279,28 @@ mod tests {
 
     fn rows_of(patch: &str) -> (Vec<crate::patch::FileDiff>, Vec<Row>) {
         let files = parse_patch(patch, &[]);
-        let rows = build_rows(&files, &HashSet::new());
+        let rows = build_rows(&files, &HashSet::new(), &CommentRows::default());
         (files, rows)
+    }
+
+    fn comment(path: &str, line: u32) -> krit_core::types::ReviewComment {
+        krit_core::types::ReviewComment {
+            id: format!("{path}:{line}"),
+            file_path: path.into(),
+            side: "additions".into(),
+            line_number: line,
+            end_line: None,
+            line_content: String::new(),
+            body: "note".into(),
+            status: "open".into(),
+            created_at: 0,
+            replies: Vec::new(),
+            outdated: None,
+            suggestion: None,
+            start_column: None,
+            end_column: None,
+            selected_text: None,
+        }
     }
 
     #[test]
@@ -255,10 +346,60 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_renders_under_the_line_it_is_anchored_to() {
+        // TWO_FILES: a.rs new-side line 1 is the "+y" row (hunk 0, line 1).
+        let files = parse_patch(TWO_FILES, &[]);
+        let comments = crate::comments::layout(&[comment("a.rs", 1)], &files, 60);
+        let rows = build_rows(&files, &HashSet::new(), &comments);
+        let at = rows
+            .iter()
+            .position(|r| matches!(r, Row::Comment { .. }))
+            .expect("the comment is in the rows");
+        assert_eq!(
+            rows[at - 1],
+            Row::Code {
+                file: 0,
+                hunk: 0,
+                line: 1
+            }
+        );
+        // One model row per rendered line, so scrolling stays arithmetic.
+        let block: Vec<&Row> = rows.iter().filter(|r| r.comment().is_some()).collect();
+        assert_eq!(block.len(), comments.height(0));
+        assert_eq!(rows[at].file(), Some(0));
+    }
+
+    #[test]
+    fn a_comment_outside_every_hunk_renders_under_the_file_header() {
+        let files = parse_patch(TWO_FILES, &[]);
+        let comments = crate::comments::layout(&[comment("a.rs", 900)], &files, 60);
+        let rows = build_rows(&files, &HashSet::new(), &comments);
+        let at = rows
+            .iter()
+            .position(|r| matches!(r, Row::Comment { .. }))
+            .expect("still rendered");
+        assert_eq!(rows[at - 1], Row::File { file: 0 });
+    }
+
+    #[test]
+    fn collapsing_a_file_hides_its_comments_with_its_body() {
+        // Consistent with the web UI, where `collapsed` suppresses annotations
+        // along with the rows — and with the reviewer's intent, which was to
+        // put the whole file away. The note says how many went with it.
+        let files = parse_patch(TWO_FILES, &[]);
+        let comments = crate::comments::layout(&[comment("a.rs", 1)], &files, 60);
+        let collapsed: HashSet<String> = ["a.rs".to_string()].into_iter().collect();
+        let rows = build_rows(&files, &collapsed, &comments);
+        assert!(!rows.iter().any(|r| r.comment().is_some()));
+        assert_eq!(comments_in(&files, 0, &comments), 1);
+        assert_eq!(comments_in(&files, 1, &comments), 0);
+    }
+
+    #[test]
     fn a_collapsed_file_keeps_its_header_so_it_stays_navigable() {
         let files = parse_patch(TWO_FILES, &[]);
         let collapsed: HashSet<String> = ["a.rs".to_string()].into_iter().collect();
-        let rows = build_rows(&files, &collapsed);
+        let rows = build_rows(&files, &collapsed, &CommentRows::default());
         assert_eq!(rows[0], Row::File { file: 0 });
         assert_eq!(
             rows[1],

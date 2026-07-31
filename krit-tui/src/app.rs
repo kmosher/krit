@@ -7,9 +7,15 @@
 //! what's left in `ui.rs` is drawing.
 
 use crate::client::DiffPayload;
+use crate::comments::{CommentAnchor, CommentRows, layout};
+use crate::compose::Composer;
 use crate::patch::{FileDiff, parse_patch};
-use crate::rows::{Row, build_rows, file_rows, gutter_width, hunk_rows, next_stop, scroll_to_show};
-use crate::text::{display_width, expand_tabs};
+use crate::rows::{
+    MARKER_COLS, Row, build_rows, comment_rows, file_rows, gutter_width, hunk_rows, next_stop,
+    scroll_to_show,
+};
+use crate::text::{cluster_at_column, display_width, expand_tabs};
+use krit_core::types::ReviewComment;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -67,21 +73,97 @@ pub enum Action {
     ToggleCollapse,
     Refetch,
     ToggleHelp,
-    /// Dismiss the help overlay if it is up; otherwise nothing.
-    CloseHelp,
+    /// Back out of the innermost thing that is up: the help overlay, then a
+    /// selection. Never quits — see the note on the `Esc` binding.
+    Escape,
+    /// Start line-wise selection at the cursor, or end it.
+    ToggleVisual,
+    /// Begin, extend and finish a character-level selection. From a drag: a
+    /// terminal reports the cell under the pointer, so the column comes free.
+    SelectStart {
+        row: usize,
+        column: usize,
+    },
+    SelectExtend {
+        row: usize,
+        column: usize,
+    },
+    SelectEnd {
+        row: usize,
+        column: usize,
+    },
     Suspend,
     ToggleFiles,
     /// Release the mouse back to the terminal (or take it again).
     ToggleMouse,
+    /// Open the composer on the selection, or on the cursor's own line.
+    Comment,
+    /// Open the composer on the comment under the cursor.
+    Reply,
+    /// Resolve the comment under the cursor, or reopen it.
+    ToggleResolved,
+    /// Post every queued comment.
+    PostQueued,
+    /// Done reviewing: opens the composer for concluding notes.
+    Submit,
+    /// Move to the next comment in the review, or the previous one.
+    NextComment,
+    PrevComment,
     /// Move the *view* without moving the cursor — what a wheel does. Every
     /// other movement drags the view along behind the cursor; this one is the
     /// exception, and keeping it a separate action is what stops the next
     /// `scroll_to_show` from immediately undoing it.
     ScrollViewDown(usize),
     ScrollViewUp(usize),
-    /// Put the cursor on a row, or on a file's header. From a click.
-    FocusRow(usize),
+    /// Put the cursor on a file's header. From a click in the file list; a
+    /// click in the diff arrives as `SelectStart`, which moves the cursor as
+    /// part of starting the gesture.
     FocusFile(usize),
+}
+
+/// What the reviewer has marked, and what a comment posted from it would be
+/// anchored to.
+///
+/// Two ends and no ordering: `anchor` is where it started and `head` is where
+/// it is now, so dragging back past the start reverses without the range ever
+/// being empty. Everything downstream reads it through `range`, which sorts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: usize,
+    pub head: usize,
+    /// Display columns at the two ends. `None` is line-wise, which is what
+    /// `v` produces: a keyboard has no caret to put in the middle of a line,
+    /// and a line-level comment is a shape the wire and the browser already
+    /// have. A mouse hands us `(row, column)` for free, which is the one thing
+    /// a terminal makes easier than a browser — `selectionMapping.ts` is 400
+    /// lines of hit-testing to recover what arrives here in the event.
+    pub columns: Option<(usize, usize)>,
+    /// Keyboard visual mode: movement extends the selection rather than
+    /// leaving it behind.
+    pub visual: bool,
+}
+
+impl Selection {
+    /// First and last row, in order.
+    pub fn rows(&self) -> (usize, usize) {
+        (self.anchor.min(self.head), self.anchor.max(self.head))
+    }
+
+    pub fn contains(&self, row: usize) -> bool {
+        let (first, last) = self.rows();
+        (first..=last).contains(&row)
+    }
+
+    /// Start and end display column, in the order the rows are in — so a drag
+    /// that went right-to-left within one line still reads left-to-right.
+    fn columns_in_order(&self) -> Option<(usize, usize)> {
+        let (a, h) = self.columns?;
+        if self.head < self.anchor || (self.head == self.anchor && h < a) {
+            Some((h, a))
+        } else {
+            Some((a, h))
+        }
+    }
 }
 
 /// A line of feedback under the diff. Not a modal, and never a prompt: the
@@ -100,8 +182,24 @@ pub enum Status {
 pub struct App {
     pub files: Vec<FileDiff>,
     pub rows: Vec<Row>,
+    /// Every comment on the review, queued ones included, exactly as the
+    /// server holds them. Never edited in place: a write goes to the server
+    /// and the list is refetched, so what is on screen is what an agent would
+    /// read. Optimistic local edits would be two sources of truth for a value
+    /// the whole point of which is that both sides agree.
+    pub comments: Vec<ReviewComment>,
+    /// Those comments laid out at `wrap_width`, and indexed by where they
+    /// attach. Rebuilt with `rows`, since the rows are built from it.
+    pub comment_rows: CommentRows,
+    /// The width comment bodies were wrapped to — the diff pane's, as the last
+    /// frame drew it.
+    pub wrap_width: usize,
     pub collapsed: HashSet<String>,
     pub cursor: usize,
+    /// What the reviewer has marked, if anything. A comment is posted against
+    /// this when it is set and against the cursor's own line when it is not,
+    /// so there is one anchor path rather than two.
+    pub selection: Option<Selection>,
     pub offset: usize,
     pub h_scroll: usize,
     pub focus: Focus,
@@ -109,6 +207,9 @@ pub struct App {
     pub branch: String,
     pub custom_mode: bool,
     pub status: Status,
+    /// The open form, if there is one. Not a modal: the diff is still drawn,
+    /// still scrolls under it, and the loop never stops reading.
+    pub compose: Option<Composer>,
     pub show_help: bool,
     pub show_files: bool,
     /// Whether we are holding the mouse. On, the wheel scrolls and a click
@@ -116,6 +217,10 @@ pub struct App {
     /// reviewer can copy a line the ordinary way.
     pub mouse: bool,
     pub tab_size: usize,
+    /// Watchers and agents subscribed to the server, from the `state` event.
+    /// Done reviewing means nothing with nobody listening — the browser greys
+    /// the button out for the same reason.
+    pub watchers: usize,
     pub should_quit: bool,
     pub panes: Panes,
     /// Aggregates over the whole review, recomputed in `rebuild` rather than
@@ -134,8 +239,14 @@ impl Default for App {
         Self {
             files: Vec::new(),
             rows: Vec::new(),
+            comments: Vec::new(),
+            comment_rows: CommentRows::default(),
+            // A plausible pane, so the first layout — built before any frame
+            // has reported a width — is not wrapped to nothing.
+            wrap_width: 80,
             collapsed: HashSet::new(),
             cursor: 0,
+            selection: None,
             offset: 0,
             h_scroll: 0,
             focus: Focus::Diff,
@@ -143,10 +254,12 @@ impl Default for App {
             branch: String::new(),
             custom_mode: false,
             status: Status::Idle,
+            compose: None,
             show_help: false,
             show_files: true,
             mouse: true,
             tab_size: 4,
+            watchers: 0,
             should_quit: false,
             panes: Panes::default(),
             gutter: 2,
@@ -182,8 +295,25 @@ impl App {
         self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
     }
 
+    /// Replace the comment list, keeping the cursor on whatever it was on.
+    ///
+    /// A comment arriving mid-session inserts rows, and every row below it
+    /// shifts. Anchoring on the row's *identity* rather than its index is what
+    /// stops a reply landing in another pane from walking the reviewer's
+    /// cursor down the file.
+    pub fn set_comments(&mut self, comments: Vec<ReviewComment>, viewport: usize) {
+        let at = self.rows.get(self.cursor).copied();
+        self.comments = comments;
+        self.rebuild();
+        if let Some(row) = at.and_then(|r| self.rows.iter().position(|x| *x == r)) {
+            self.cursor = row;
+        }
+        self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
+    }
+
     pub fn rebuild(&mut self) {
-        self.rows = build_rows(&self.files, &self.collapsed);
+        self.comment_rows = layout(&self.comments, &self.files, self.wrap_width);
+        self.rows = build_rows(&self.files, &self.collapsed, &self.comment_rows);
         if self.cursor >= self.rows.len() {
             self.cursor = self.rows.len().saturating_sub(1);
         }
@@ -205,18 +335,48 @@ impl App {
     }
 
     /// Take the geometry the last frame reported, and reconcile anything that
-    /// depends on what was actually drawn.
+    /// depends on what was actually drawn. Returns whether that reconciliation
+    /// invalidated the frame it came from.
     ///
     /// Focus is the case that matters: the file pane can be missing because
     /// the reviewer hid it *or* because the terminal is too narrow, and only
     /// the frame knows which. Focus left on a pane nobody drew erases the
     /// cursor's reverse-video bar — the one indicator that survives NO_COLOR —
     /// with no message and no obvious way back.
-    pub fn set_panes(&mut self, panes: Panes) {
+    ///
+    /// Comment bodies wrap to the diff pane's width, and a wrapped body is a
+    /// number of *rows* — so a resize changes the row model, not just the
+    /// picture. Rebuilding here rather than in the resize handler is what
+    /// makes hiding the file list (which widens the pane without resizing the
+    /// terminal) rewrap too.
+    pub fn set_panes(&mut self, panes: Panes) -> bool {
         self.panes = panes;
         if panes.files.is_none() {
             self.focus = Focus::Diff;
         }
+        // Opening the composer takes rows away from the diff, and the row the
+        // reviewer is commenting on must not be one of them. Nothing else
+        // re-runs this: `apply` scrolls for actions, and a pane shrinking is
+        // not one.
+        let height = panes.diff.height as usize;
+        let scrolled = scroll_to_show(self.offset, height, self.cursor, self.rows.len());
+        let moved = scrolled != self.offset;
+        self.offset = scrolled;
+
+        let width = panes.diff.width as usize;
+        if width > 0 && width != self.wrap_width {
+            self.wrap_width = width;
+            self.rebuild();
+            return true;
+        }
+        moved
+    }
+
+    /// The comment the cursor is inside, if it is inside one. What `R` and
+    /// `X` act on.
+    pub fn comment_under_cursor(&self) -> Option<&ReviewComment> {
+        let index = self.rows.get(self.cursor)?.comment()?;
+        self.comments.get(index)
     }
 
     pub fn cursor_path(&self) -> Option<String> {
@@ -247,6 +407,7 @@ impl App {
 
     pub fn apply(&mut self, action: Action, viewport: usize) {
         let last = self.rows.len().saturating_sub(1);
+        let before = self.cursor;
 
         // Wheel scrolling moves the view out from under the cursor on purpose,
         // so it must not fall through to the `scroll_to_show` below — that
@@ -307,7 +468,51 @@ impl App {
             }
             Action::ToggleCollapse => self.toggle_collapse(),
             Action::ToggleHelp => self.show_help = !self.show_help,
-            Action::CloseHelp => self.show_help = false,
+            // One key, innermost first. The reviewer's model of Esc is "get me
+            // out of whatever this is", and it must never reach "out of krit"
+            // — see the binding for why.
+            Action::Escape => {
+                if self.show_help {
+                    self.show_help = false;
+                } else {
+                    self.selection = None;
+                }
+            }
+            Action::ToggleVisual => {
+                self.selection = match self.selection {
+                    Some(sel) if sel.visual => None,
+                    // A mouse selection is replaced rather than adopted:
+                    // extending someone else's character range with `j` would
+                    // have to decide what the columns now mean.
+                    _ => Some(Selection {
+                        anchor: self.cursor,
+                        head: self.cursor,
+                        columns: None,
+                        visual: true,
+                    }),
+                }
+            }
+            Action::SelectStart { row, column } => {
+                self.cursor = row.min(last);
+                self.focus = Focus::Diff;
+                self.selection = Some(Selection {
+                    anchor: row,
+                    head: row,
+                    columns: Some((column, column)),
+                    visual: false,
+                });
+            }
+            Action::SelectExtend { row, column } | Action::SelectEnd { row, column } => {
+                if let Some(sel) = &mut self.selection {
+                    sel.head = row.min(last);
+                    if let Some((start, _)) = sel.columns {
+                        sel.columns = Some((start, column));
+                    }
+                }
+                // The cursor follows the pointer, so releasing leaves it at
+                // the end of what was marked rather than back at the start.
+                self.cursor = row.min(last);
+            }
             Action::ToggleFiles => {
                 self.show_files = !self.show_files;
                 // Moving focus off a list we just hid. This is not the whole
@@ -319,10 +524,8 @@ impl App {
                 }
             }
             Action::ToggleMouse => self.mouse = !self.mouse,
-            Action::FocusRow(row) => {
-                self.cursor = row.min(last);
-                self.focus = Focus::Diff;
-            }
+            Action::NextComment => self.jump(&comment_rows(&self.rows), true),
+            Action::PrevComment => self.jump(&comment_rows(&self.rows), false),
             Action::FocusFile(index) => {
                 if let Some(file) = self.files.get(index)
                     && let Some(row) = self.row_of_path(&file.path)
@@ -335,16 +538,180 @@ impl App {
             // Returned above.
             Action::ScrollViewDown(_) | Action::ScrollViewUp(_) => {}
             // Handled by the caller, which owns the socket and the terminal.
-            Action::Refetch | Action::Suspend => {}
+            // Everything that talks to the server is in that group: `App` is
+            // the model, and a model that could post a comment would need to
+            // know how to fail at it too.
+            Action::Refetch
+            | Action::Suspend
+            | Action::Comment
+            | Action::Reply
+            | Action::ToggleResolved
+            | Action::PostQueued
+            | Action::Submit => {}
+        }
+
+        let dragging = matches!(
+            action,
+            Action::SelectStart { .. } | Action::SelectExtend { .. } | Action::SelectEnd { .. }
+        );
+        match self.selection {
+            // Visual mode: the head follows the cursor, so every movement key
+            // there is doubles as a way to extend — including `]`, `n` and
+            // `G`, which is most of the value of doing it this way.
+            Some(sel) if sel.visual => {
+                if let Some(sel) = &mut self.selection {
+                    sel.head = self.cursor;
+                }
+            }
+            // A mouse selection is dropped the moment the cursor leaves it, so
+            // what is highlighted is always what `c` would comment on. Letting
+            // it linger means the reviewer can be looking at one line and
+            // about to comment on another.
+            Some(_) if self.cursor != before && !dragging => self.selection = None,
+            _ => {}
+        }
+        // A drag that never left its cell is a click, not a one-character
+        // selection: the two are the same pair of events, and a click is what
+        // the reviewer meant far more often.
+        if let (Action::SelectEnd { .. }, Some(sel)) = (action, self.selection)
+            && sel.anchor == sel.head
+            && sel.columns.map(|(a, h)| a == h) == Some(true)
+        {
+            self.selection = None;
         }
         self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
     }
 
+    /// The display columns of `row` that are inside the selection, half-open.
+    ///
+    /// `usize::MAX` for "to the end of the line": a row in the middle of a
+    /// multi-line selection has no right-hand limit, and clamping it to the
+    /// text's width here would mean measuring the text twice.
+    pub fn selected_columns(&self, row: usize) -> Option<(usize, usize)> {
+        let sel = self.selection?;
+        if !sel.contains(row) {
+            return None;
+        }
+        let (first, last) = sel.rows();
+        let Some((start, end)) = sel.columns_in_order() else {
+            return Some((0, usize::MAX));
+        };
+        // The cell under the pointer is inside the selection, hence `end + 1`
+        // — see `text::cluster_at_column` for why a terminal counts cells and
+        // a browser counts insertion points.
+        Some(match (row == first, row == last) {
+            (true, true) => (start, end + 1),
+            (true, false) => (start, usize::MAX),
+            (false, true) => (0, end + 1),
+            (false, false) => (0, usize::MAX),
+        })
+    }
+
+    /// The column of a line's text under a mouse column.
+    fn text_column_at(&self, col: u16) -> usize {
+        let within = col.saturating_sub(self.panes.diff.x) as usize;
+        self.h_scroll + within.saturating_sub(self.gutter * 2 + MARKER_COLS)
+    }
+
+    /// What a comment posted right now would be anchored to: the selection if
+    /// there is one, the cursor's own line if there is not.
+    ///
+    /// `None` when there is no line of code in range — the cursor is on a file
+    /// header, a hunk header, the gap, or inside another comment. Better to
+    /// say so than to invent an anchor: a comment stored against a defaulted
+    /// one is durable garbage that no UI can place, which is why the server
+    /// refuses to default it either.
+    pub fn comment_anchor(&self) -> Option<CommentAnchor> {
+        let (first, last) = match self.selection {
+            Some(sel) => sel.rows(),
+            None => (self.cursor, self.cursor),
+        };
+        // The side and the file come from the first line of code in range —
+        // everything after it that disagrees is simply not part of the anchor.
+        // A selection dragged across a deletion and its replacement can only
+        // be one or the other: line numbers on the wire belong to a side.
+        let (file, additions) = self
+            .rows
+            .get(first..=last.min(self.rows.len().saturating_sub(1)))?
+            .iter()
+            .find_map(|row| match *row {
+                Row::Code { file, hunk, line } => {
+                    let l = &self.files[file].hunks[hunk].lines[line];
+                    Some((file, l.new_line.is_some()))
+                }
+                _ => None,
+            })?;
+
+        let mut numbers: Vec<(u32, &str)> = Vec::new();
+        for row in &self.rows[first..=last.min(self.rows.len() - 1)] {
+            let Row::Code {
+                file: f,
+                hunk,
+                line,
+            } = *row
+            else {
+                continue;
+            };
+            if f != file {
+                continue;
+            }
+            let l = &self.files[file].hunks[hunk].lines[line];
+            let number = if additions { l.new_line } else { l.old_line };
+            if let Some(n) = number {
+                numbers.push((n, l.text.as_str()));
+            }
+        }
+        let (&(start_line, _), &(end_line, _)) = (numbers.first()?, numbers.last()?);
+        let texts: Vec<&str> = numbers.iter().map(|(_, t)| *t).collect();
+
+        let columns = self
+            .selection
+            .and_then(|s| s.columns_in_order())
+            .map(|(start, end)| self.narrow(&texts, start, end));
+
+        Some(CommentAnchor {
+            file_path: self.files[file].path.clone(),
+            side: if additions { "additions" } else { "deletions" },
+            start_line,
+            end_line,
+            line_content: texts.join("\n"),
+            columns,
+        })
+    }
+
+    /// Turn two display columns into the wire's character anchor: UTF-16
+    /// offsets into the first and last anchored lines, and the exact text
+    /// between them.
+    ///
+    /// The columns belong to the rows the drag started and ended on, which are
+    /// not always the rows that survived into `texts` — a drag across a
+    /// deletion and its replacement keeps only one side. Applying them to the
+    /// first and last line that *did* survive is the answer that stays inside
+    /// the range the reviewer marked.
+    fn narrow(&self, texts: &[&str], start: usize, end: usize) -> (u32, u32, String) {
+        let first = texts.first().copied().unwrap_or_default();
+        let last = texts.last().copied().unwrap_or_default();
+        let from = cluster_at_column(first, self.tab_size, start).0;
+        // Inclusive of the cell the pointer was over, so the end is the far
+        // side of that character.
+        let to = cluster_at_column(last, self.tab_size, end).1;
+        let selected = if texts.len() == 1 {
+            first[from.byte.min(to.byte)..to.byte.max(from.byte)].to_string()
+        } else {
+            let mut out = vec![first[from.byte..].to_string()];
+            out.extend(texts[1..texts.len() - 1].iter().map(|t| t.to_string()));
+            out.push(last[..to.byte].to_string());
+            out.join("\n")
+        };
+        (from.utf16 as u32, to.utf16 as u32, selected)
+    }
+
     /// What a mouse event means, given where the last frame put things.
     ///
-    /// `Action::None` for anything outside a pane, and for the events we
-    /// deliberately ignore: a drag across the screen is a stream of moves, and
-    /// acting on each would drag the cursor along with the pointer.
+    /// `Action::None` for anything outside a pane. A press in the diff starts
+    /// a selection rather than only moving the cursor: the two are the same
+    /// gesture until the pointer moves, and `apply` settles which it was when
+    /// the button comes back up.
     pub fn mouse_action(&self, event: MouseEvent) -> Action {
         if !self.mouse {
             return Action::None;
@@ -363,7 +730,30 @@ impl App {
                 if let Some(files) = self.files_pane_hit(col, row) {
                     return files;
                 }
-                self.diff_hit(col, row)
+                match self.diff_row_at(col, row) {
+                    Some(index) => Action::SelectStart {
+                        row: index,
+                        column: self.text_column_at(col),
+                    },
+                    None => Action::None,
+                }
+            }
+            // Only while a selection of our own is open: a drag that started
+            // outside the pane, or after `v`, is not ours to extend.
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+                let open = self.selection.is_some_and(|s| !s.visual);
+                // The pointer leaving the pane during a drag is normal —
+                // clamp to the pane's rows rather than dropping the event, or
+                // a selection stops growing halfway down the screen.
+                let Some(index) = open.then(|| self.diff_row_clamped(row)).flatten() else {
+                    return Action::None;
+                };
+                let column = self.text_column_at(col);
+                if matches!(event.kind, MouseEventKind::Up(_)) {
+                    Action::SelectEnd { row: index, column }
+                } else {
+                    Action::SelectExtend { row: index, column }
+                }
             }
             _ => Action::None,
         }
@@ -380,16 +770,28 @@ impl App {
         (index < self.files.len()).then_some(Action::FocusFile(index))
     }
 
-    fn diff_hit(&self, col: u16, row: u16) -> Action {
+    /// The model row drawn under a point, or `None` if the point is outside
+    /// the diff pane or past the last row.
+    fn diff_row_at(&self, col: u16, row: u16) -> Option<usize> {
         let area = self.panes.diff;
         if !contains(area, col, row) {
-            return Action::None;
+            return None;
         }
         let index = self.panes.diff_top_row + (row - area.y) as usize;
-        if index >= self.rows.len() {
-            return Action::None;
+        (index < self.rows.len()).then_some(index)
+    }
+
+    /// The same, for a drag: the column is ignored and a row above or below
+    /// the pane is pulled back to its nearest edge, so a selection dragged off
+    /// the top of the screen keeps growing.
+    fn diff_row_clamped(&self, row: u16) -> Option<usize> {
+        let area = self.panes.diff;
+        if area.height == 0 || self.rows.is_empty() {
+            return None;
         }
-        Action::FocusRow(index)
+        let within = row.clamp(area.y, area.bottom().saturating_sub(1));
+        let index = self.panes.diff_top_row + (within - area.y) as usize;
+        Some(index.min(self.rows.len() - 1))
     }
 
     /// Put the cursor's row at the top of the view.
@@ -472,13 +874,13 @@ fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
     let action = match (key.code, ctrl) {
         (KeyCode::Char('q'), false) => Action::Quit,
         (KeyCode::Char('c'), true) => Action::Quit,
-        // Esc closes the overlay and otherwise does nothing. It deliberately
-        // does not quit: crossterm reports a lone `\x1b` it cannot resolve
-        // into a longer sequence as `Esc`, and terminals emit sequences it
-        // does not model — so quitting on it means a stray report can end the
-        // session mid-review. `q` and Ctrl+C already cover leaving, and phase
-        // 1 wants Esc for cancelling the composer.
-        (KeyCode::Esc, _) => Action::CloseHelp,
+        // Esc backs out of whatever is up — the overlay, then a selection —
+        // and otherwise does nothing. It deliberately does not quit: crossterm
+        // reports a lone `\x1b` it cannot resolve into a longer sequence as
+        // `Esc`, and terminals emit sequences it does not model, so quitting
+        // on it means a stray report can end the session mid-review. `q` and
+        // Ctrl+C already cover leaving.
+        (KeyCode::Esc, _) => Action::Escape,
         (KeyCode::Char('z'), true) => Action::Suspend,
         (KeyCode::Char('d'), true) => Action::HalfPageDown,
         (KeyCode::Char('u'), true) => Action::HalfPageUp,
@@ -498,8 +900,20 @@ fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
         (KeyCode::Tab, _) => Action::ToggleFocus,
         (KeyCode::Char('z'), false) | (KeyCode::Enter, _) => Action::ToggleCollapse,
         (KeyCode::Char('r'), false) => Action::Refetch,
+        (KeyCode::Char('c'), false) => Action::Comment,
+        // Capitals for the verbs that act on someone else's comment, so a
+        // mistyped lowercase key cannot post or resolve anything.
+        (KeyCode::Char('R'), false) => Action::Reply,
+        (KeyCode::Char('X'), false) => Action::ToggleResolved,
+        (KeyCode::Char('P'), false) => Action::PostQueued,
+        (KeyCode::Char('S'), false) => Action::Submit,
+        (KeyCode::Char('}'), false) => Action::NextComment,
+        (KeyCode::Char('{'), false) => Action::PrevComment,
         (KeyCode::Char('f'), false) => Action::ToggleFiles,
         (KeyCode::Char('m'), false) => Action::ToggleMouse,
+        // `V` too, because in vim the two differ by whether the selection is
+        // line-wise — and here it always is.
+        (KeyCode::Char('v'), false) | (KeyCode::Char('V'), false) => Action::ToggleVisual,
         (KeyCode::Char('?'), false) => Action::ToggleHelp,
         _ => Action::None,
     };
@@ -1036,7 +1450,9 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_does_not_pull_the_cursor_along_with_it() {
+    fn a_drag_that_is_not_ours_is_not_a_selection() {
+        // Nothing open: the press happened somewhere else, or the reviewer is
+        // in visual mode and the pointer is incidental.
         let mut app = app();
         with_panes(&mut app);
         assert_eq!(
@@ -1047,9 +1463,232 @@ mod tests {
             app.mouse_action(mouse(MouseEventKind::Moved, 50, 8)),
             Action::None
         );
+        app.apply(Action::ToggleVisual, 20);
         assert_eq!(
-            app.mouse_action(mouse(MouseEventKind::Up(MouseButton::Left), 50, 8)),
-            Action::None
+            app.mouse_action(mouse(MouseEventKind::Drag(MouseButton::Left), 50, 8)),
+            Action::None,
+            "a keyboard selection is not extended by the pointer"
         );
+    }
+
+    // ---- selection ------------------------------------------------------
+
+    /// Drag from one point to another, as a terminal reports it.
+    fn drag(app: &mut App, from: (u16, u16), to: (u16, u16)) {
+        for event in [
+            mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+            mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1),
+            mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1),
+        ] {
+            let action = app.mouse_action(event);
+            app.apply(action, 20);
+        }
+    }
+
+    /// A patch whose lines have text worth selecting parts of.
+    const TEXTY: &str = "diff --git a/a.rs b/a.rs\n\
+                         @@ -1,3 +1,3 @@\n\
+                         \x20alpha bravo\n\
+                         -charlie delta\n\
+                         +echo foxtrot";
+
+    fn texty() -> App {
+        let mut app = App::default();
+        app.load(&payload(TEXTY), 20);
+        app.panes = Panes {
+            diff: Rect::new(0, 1, 80, 20),
+            diff_top_row: 0,
+            files: None,
+            files_top: 0,
+        };
+        app
+    }
+
+    #[test]
+    fn a_click_is_a_click_and_a_drag_is_a_selection() {
+        // They are the same pair of events until the pointer moves, so the
+        // press cannot decide — only the release can.
+        let mut app = texty();
+        // Row 2 of the model (" alpha bravo") is screen row 3.
+        drag(&mut app, (10, 3), (10, 3));
+        assert_eq!(app.selection, None, "a press and release in one cell");
+        assert_eq!(app.cursor, 2, "but it still moved the cursor");
+
+        drag(&mut app, (10, 3), (14, 3));
+        assert!(app.selection.is_some(), "the pointer moved");
+    }
+
+    #[test]
+    fn a_drag_across_one_line_anchors_the_characters_under_it() {
+        // The payoff of doing this in a terminal: the column arrives in the
+        // event, where the browser needs 400 lines of caret hit-testing.
+        let mut app = texty();
+        // Row 4 is "+echo foxtrot"; the code starts after two 2-wide gutters
+        // and the 4-column marker field, so column 6 of the pane is column 0
+        // of the text.
+        let text_x = 8u16;
+        drag(&mut app, (text_x, 5), (text_x + 3, 5));
+        let anchor = app.comment_anchor().expect("a line of code was marked");
+        assert_eq!(anchor.file_path, "a.rs");
+        assert_eq!(anchor.side, "additions");
+        assert_eq!((anchor.start_line, anchor.end_line), (2, 2));
+        let (start, end, text) = anchor.columns.expect("a character anchor");
+        assert_eq!((start, end), (0, 4));
+        assert_eq!(text, "echo", "the cell under the pointer is included");
+    }
+
+    #[test]
+    fn a_drag_back_the_way_it_came_still_reads_left_to_right() {
+        let mut app = texty();
+        let text_x = 8u16;
+        drag(&mut app, (text_x + 3, 5), (text_x, 5));
+        let (start, end, text) = app.comment_anchor().unwrap().columns.unwrap();
+        assert_eq!((start, end), (0, 4));
+        assert_eq!(text, "echo");
+    }
+
+    #[test]
+    fn a_drag_down_the_screen_spans_lines_and_keeps_both_columns() {
+        let mut app = texty();
+        let text_x = 8u16;
+        // From "alpha bravo" column 6 down to "echo foxtrot" column 4.
+        drag(&mut app, (text_x + 6, 3), (text_x + 3, 5));
+        let anchor = app.comment_anchor().unwrap();
+        // The deletion row in between contributes nothing: line numbers on the
+        // wire belong to a side, and this range is the additions side.
+        assert_eq!(anchor.side, "additions");
+        assert_eq!((anchor.start_line, anchor.end_line), (1, 2));
+        assert_eq!(anchor.line_content, "alpha bravo\necho foxtrot");
+        let (start, end, text) = anchor.columns.unwrap();
+        assert_eq!((start, end), (6, 4));
+        assert_eq!(text, "bravo\necho");
+    }
+
+    #[test]
+    fn a_selection_that_starts_on_a_deletion_is_anchored_on_that_side() {
+        let mut app = texty();
+        // Row 3 (screen row 4) is "-charlie delta".
+        drag(&mut app, (8, 4), (14, 4));
+        let anchor = app.comment_anchor().unwrap();
+        assert_eq!(anchor.side, "deletions");
+        assert_eq!((anchor.start_line, anchor.end_line), (2, 2));
+        assert_eq!(anchor.columns.unwrap().2, "charlie");
+    }
+
+    #[test]
+    fn with_no_selection_a_comment_goes_on_the_cursors_own_line() {
+        // One anchor path rather than two: `c` on a line and `c` on a marked
+        // range have to produce the same shape, or the two disagree the first
+        // time one of them is changed.
+        let mut app = texty();
+        app.apply(Action::Down(2), 20);
+        let anchor = app.comment_anchor().expect("the cursor is on code");
+        assert_eq!((anchor.start_line, anchor.end_line), (1, 1));
+        assert_eq!(anchor.line_content, "alpha bravo");
+        assert_eq!(anchor.columns, None, "a whole line, like a browser's");
+    }
+
+    #[test]
+    fn there_is_nothing_to_comment_on_from_a_header_or_a_gap() {
+        // Rather than inventing an anchor: the server refuses a defaulted one
+        // for the same reason, since a comment nothing can place is durable
+        // garbage.
+        let mut app = texty();
+        assert_eq!(app.rows[app.cursor], Row::File { file: 0 });
+        assert!(app.comment_anchor().is_none());
+        app.apply(Action::Down(1), 20);
+        assert!(matches!(app.rows[app.cursor], Row::Hunk { .. }));
+        assert!(app.comment_anchor().is_none());
+    }
+
+    #[test]
+    fn visual_mode_extends_with_every_movement_key_there_is() {
+        let mut app = texty();
+        app.apply(Action::Down(2), 20); // onto " alpha bravo"
+        app.apply(Action::ToggleVisual, 20);
+        app.apply(Action::Bottom, 20);
+        let anchor = app.comment_anchor().unwrap();
+        assert_eq!((anchor.start_line, anchor.end_line), (1, 2));
+        assert_eq!(
+            anchor.columns, None,
+            "line-wise: a keyboard has no caret to put mid-line"
+        );
+
+        // And `v` again puts it away.
+        app.apply(Action::ToggleVisual, 20);
+        assert_eq!(app.selection, None);
+    }
+
+    #[test]
+    fn escape_backs_out_of_one_thing_at_a_time_and_never_out_of_krit() {
+        let mut app = texty();
+        app.show_help = true;
+        app.apply(Action::ToggleVisual, 20);
+        app.apply(Action::Escape, 20);
+        assert!(!app.show_help);
+        assert!(app.selection.is_some(), "the overlay went first");
+        app.apply(Action::Escape, 20);
+        assert_eq!(app.selection, None);
+        app.apply(Action::Escape, 20);
+        assert!(!app.should_quit, "and never the session");
+    }
+
+    #[test]
+    fn moving_off_a_mouse_selection_drops_it() {
+        // What is marked is what `c` would comment on. A selection left behind
+        // by the cursor means looking at one line and commenting on another.
+        let mut app = texty();
+        drag(&mut app, (8, 5), (12, 5));
+        assert!(app.selection.is_some());
+        app.apply(Action::Up(1), 20);
+        assert_eq!(app.selection, None);
+    }
+
+    #[test]
+    fn a_drag_off_the_edge_of_the_pane_keeps_going() {
+        // The pointer leaving the pane mid-drag is normal; dropping the event
+        // would stop the selection growing halfway down the screen.
+        let mut app = texty();
+        app.apply(Action::Bottom, 20);
+        drag(&mut app, (8, 5), (8, 0));
+        let (first, _) = app.selection.expect("still selecting").rows();
+        assert_eq!(first, 0, "clamped to the pane's first row");
+    }
+
+    #[test]
+    fn the_marked_columns_of_each_row_describe_what_to_underline() {
+        let mut app = texty();
+        drag(&mut app, (8 + 6, 3), (8 + 3, 5));
+        // First row: from the start column to the end of the line. Middle:
+        // all of it. Last: up to and including the cell under the pointer.
+        assert_eq!(app.selected_columns(2), Some((6, usize::MAX)));
+        assert_eq!(app.selected_columns(3), Some((0, usize::MAX)));
+        assert_eq!(app.selected_columns(4), Some((0, 4)));
+        assert_eq!(app.selected_columns(1), None);
+    }
+
+    #[test]
+    fn a_tab_indented_line_selects_the_characters_it_looks_like() {
+        // Columns on screen are not columns in the file: the anchor has to
+        // come back through the tab expansion or every comment on indented
+        // code is off by however many tabs precede it.
+        let patch = "diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-x\n+\tlet x = 1;";
+        let mut app = App {
+            tab_size: 4,
+            ..App::default()
+        };
+        app.load(&payload(patch), 20);
+        app.panes = Panes {
+            diff: Rect::new(0, 1, 80, 20),
+            diff_top_row: 0,
+            files: None,
+            files_top: 0,
+        };
+        // "\tlet x = 1;" draws as "    let x = 1;", so screen column 4 is the
+        // `l` — source offset 1, not 4.
+        drag(&mut app, (8 + 4, 4), (8 + 6, 4));
+        let (start, end, text) = app.comment_anchor().unwrap().columns.unwrap();
+        assert_eq!((start, end), (1, 4));
+        assert_eq!(text, "let");
     }
 }
