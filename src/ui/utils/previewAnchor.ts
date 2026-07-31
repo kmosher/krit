@@ -93,6 +93,23 @@ export function nearestSpanElement(node: Node | null, root: Element): Element | 
 }
 
 /**
+ * Elements whose text content is not on screen. Skipping them is what keeps
+ * the search floor below sound: the floor assumes rendered text is never
+ * longer than the source it came from, and a `<style>` block breaks that
+ * assumption outright — Mermaid emits about 5 kB of generated CSS inside the
+ * element a diagram is stamped with, which is more text than most files under
+ * review contain. Counted, it pushes the floor past the end of the source and
+ * every lookup in that element fails, so every selection snaps to the whole
+ * file. There is no error and the anchor still looks reasonable, which is what
+ * makes this worth naming.
+ */
+const NON_RENDERED_TEXT = new Set(['STYLE', 'SCRIPT', 'TITLE', 'DESC', 'METADATA', 'DEFS'])
+
+function isRenderedText(node: Node): boolean {
+  return node.nodeType !== 1 || !NON_RENDERED_TEXT.has((node as Element).tagName.toUpperCase())
+}
+
+/**
  * How many rendered characters inside `el` precede `target`. Counts text in
  * document order, which is the order `textContent` concatenates in.
  */
@@ -109,6 +126,7 @@ export function renderedOffsetOf(el: Element, target: Node): number {
       count += (node.nodeValue ?? '').length
       return
     }
+    if (!isRenderedText(node)) return
     for (let c = node.firstChild; c; c = c.nextSibling) {
       walk(c)
       if (found) return
@@ -245,7 +263,7 @@ export function sourceOffsetToDomPoint(
   const collect = (node: Node) => {
     for (let c = node.firstChild; c; c = c.nextSibling) {
       if (c.nodeType === 3) texts.push(c as Text)
-      else if (c.nodeType === 1) collect(c)
+      else if (c.nodeType === 1 && isRenderedText(c)) collect(c)
     }
   }
   collect(el)

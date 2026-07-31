@@ -1,11 +1,13 @@
 // Which files krit can render as a document instead of a diff, and which of
 // their lines the current diff touched.
 
-export type PreviewFormat = 'markdown' | 'html' | 'notebook' | 'csv'
+export type PreviewFormat = 'markdown' | 'html' | 'notebook' | 'csv' | 'svg' | 'mermaid' | 'dot'
 
 const MARKDOWN_EXT = new Set(['md', 'markdown', 'mdown', 'mkd', 'mdx'])
 const HTML_EXT = new Set(['html', 'htm'])
 const CSV_EXT = new Set(['csv', 'tsv', 'tab'])
+const MERMAID_EXT = new Set(['mmd', 'mermaid'])
+const DOT_EXT = new Set(['dot', 'gv'])
 
 /** null for anything krit has no renderer for — the caller shows no toggle. */
 export function previewFormatFor(path: string): PreviewFormat | null {
@@ -17,6 +19,9 @@ export function previewFormatFor(path: string): PreviewFormat | null {
   if (HTML_EXT.has(ext)) return 'html'
   if (ext === 'ipynb') return 'notebook'
   if (CSV_EXT.has(ext)) return 'csv'
+  if (ext === 'svg') return 'svg'
+  if (MERMAID_EXT.has(ext)) return 'mermaid'
+  if (DOT_EXT.has(ext)) return 'dot'
   return null
 }
 

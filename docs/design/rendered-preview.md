@@ -1,11 +1,11 @@
 # Rendered previews: reviewing prose and artifacts, not their source
 
-> **Status: stages 1–5 and 7 implemented.** Markdown, HTML, `.ipynb` and
-> `.csv`/`.tsv` previews, selection → comment, comment display,
-> suggest-from-source, and the sandboxed HTML path all landed, and the preview
-> replaces a file's diff **in place** rather than opening a modal. Stage 6
-> (whole-surface docs mode) is not built, and neither are the SVG, Mermaid and
-> Graphviz renderers sketched below. Where the build diverged from this plan —
+> **Status: every format in this plan is implemented.** Markdown, HTML,
+> `.ipynb`, `.csv`/`.tsv`, `.svg`, Mermaid (both `.mmd` files and fenced
+> blocks) and Graphviz `.dot` all render, with selection → comment, comment
+> display and suggest-from-source on each, and the preview replaces a file's
+> diff **in place** rather than opening a modal. Stage 6 (whole-surface docs
+> mode) is the only unbuilt piece. Where the build diverged from this plan —
 > including one claim below that turned out to be wrong — is recorded at the
 > end.
 
@@ -279,18 +279,17 @@ render as-is; images already have a home in `BinaryFileDiff`.
 *exactly* line/column with no escape wrinkle at all (modulo quoted fields).
 Almost free once the preview scaffolding exists.
 
-**`.svg` — nearly free.** Render inline; anchor via `parse5` source locations,
-the same code the HTML path needs. GitHub's rich diff covers SVG for the same
+**`.svg` — built.** Rendered inline through an allowlist; anchored off each
+element's own source offsets. GitHub's rich diff covers SVG for the same
 reason.
 
-**Mermaid — good fit, watch the weight.** Both `.mmd` files and fenced
+**Mermaid — built.** Both `.mmd` files and fenced
 ` ```mermaid ` blocks inside Markdown, which is where agents actually put
 them. Mermaid emits node ids derived from node names, so per-node anchoring is
 plausible; whole-diagram anchoring is fine for v1. It is a large dependency —
 lazy-load it separately from the Markdown module.
 
-**Graphviz `.dot`** — same shape as Mermaid via a wasm build, less common in
-agent output. Later.
+**Graphviz `.dot` — built**, same shape as Mermaid via a wasm build.
 
 Not worth it: **AsciiDoc** and **reStructuredText** (weak or absent JS
 tooling, and nothing agent-written targets them); **PDF** (not a thing that
@@ -384,3 +383,38 @@ a rendered figure, and an unstamped subtree yields no anchor rather than a
 plausible wrong one. `text/html` outputs are dropped for the same reason the
 HTML preview is sandboxed: they are arbitrary kernel-authored markup, and the
 notebook pane renders in the page.
+
+**A diagram anchors by quote, and that took no new code.** Mermaid and Graphviz
+render from text to a picture, so there are no per-element source offsets to
+stamp — the offsets in the generated SVG describe markup nobody is reviewing.
+The picture is therefore wrapped in *one* element carrying the diagram source's
+span, and the locate-by-value rule already in `previewAnchor.ts` searches that
+slice for the selected label's text. Selecting a node in a rendered flowchart
+lands on the line that declared it, exactly, and a label Mermaid rewrapped
+snaps outward to the whole diagram. That is the ladder's quote tier arriving
+for free, which is the strongest evidence so far that `data-src` was the right
+contract to build everything on.
+
+**The floor heuristic had a hole, and diagrams are what found it.** The
+locate-by-value search starts at the count of rendered characters preceding the
+text node, justified by "markup only ever adds characters, so a source position
+is never earlier than its rendered position". Mermaid emits ~5 kB of generated
+CSS in a `<style>` inside the stamped element — more text than most reviewed
+files contain — which pushed the floor past the end of the source and made
+*every* diagram selection snap to the whole file. `renderedOffsetOf` now skips
+elements whose text is never painted. The same hole was reachable from a
+`<style>` block in a Markdown document's raw HTML; nothing had hit it.
+
+**Inline SVG is markup in this page's origin, so it is rebuilt, not injected.**
+`parse5` was not needed here either: `xmlPositions.ts` parses with offsets, and
+`svgPreview.ts` reconstructs the tree with `createElementNS` through an
+allowlist — no `innerHTML` on any preview path. Scripts, `foreignObject`,
+external references and `url()` to anywhere but a document fragment are
+dropped, and what was dropped is *named on screen*, because a picture missing
+its `<image>` looks exactly like a picture that never had one. The HTML preview
+still gets the opaque-origin iframe instead: an artifact is a program and has
+to keep its scripts to be worth previewing, while an SVG that needs a script is
+not a diagram anyone is reviewing as one.
+
+Both engines are behind `import()`. Graphviz's wasm is 1.4 MB and Mermaid is
+about a quarter of the bundle again; the main chunk grew by under a kilobyte.

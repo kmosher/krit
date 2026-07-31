@@ -2499,3 +2499,79 @@ body {
 .csv-preview-empty {
     color: var(--text-secondary);
 }
+
+
+/* ---- SVG and diagram previews ---- */
+
+.svg-preview-body,
+.diagram-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* A diagram is a picture with a light background baked into it as often as
+   not, so it gets a surface of its own rather than sitting on the page's. */
+.svg-preview-canvas,
+.diagram-preview-canvas {
+    overflow-x: auto;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+}
+
+.svg-preview-canvas svg,
+.diagram-preview-canvas svg {
+    max-width: 100%;
+    height: auto;
+}
+
+/* An element the diff touched. `outline` rather than a stroke or a filter:
+   both of those are paint the diagram itself may be using, and overriding
+   them would misreport the picture in the course of annotating it. */
+.svg-preview-canvas [data-changed] {
+    outline: 2px solid var(--success);
+    outline-offset: 2px;
+}
+
+.diagram-preview[data-changed] .diagram-preview-canvas {
+    border-left: 3px solid var(--success);
+}
+
+.svg-preview-error,
+.diagram-preview-error {
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+}
+
+.diagram-preview-error {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.svg-preview-removed {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.diagram-preview pre {
+    margin: 0;
+    padding: 8px 12px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    white-space: pre;
+}
+
+/* A diagram inside a Markdown document is a block in the flow, so it takes the
+   same vertical rhythm the other blocks have. */
+.markdown-preview-body .diagram-preview-fenced {
+    margin: 0 0 1em;
+}

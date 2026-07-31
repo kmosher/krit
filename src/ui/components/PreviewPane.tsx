@@ -17,6 +17,9 @@ import { setFileHighlights } from '../utils/previewHighlights'
 import { MarkdownPreview } from './MarkdownPreview'
 import { NotebookPreview } from './NotebookPreview'
 import { CsvPreview } from './CsvPreview'
+import { SvgPreview } from './SvgPreview'
+import { DiagramPreview } from './DiagramPreview'
+import { renderGraphviz, renderMermaid } from '../utils/diagramRenderers'
 import { SelectionPill } from './SelectionPill'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
@@ -263,6 +266,16 @@ export function PreviewPane({
             source={source}
             delimiter={delimiterFor(filePath)}
             changedRanges={changedRanges}
+          />
+        ) : format === 'svg' ? (
+          <SvgPreview source={source} changedRanges={changedRanges} />
+        ) : format === 'mermaid' || format === 'dot' ? (
+          <DiagramPreview
+            source={source}
+            span={{ start: 0, end: source.length }}
+            changed={changedRanges.length > 0}
+            render={format === 'mermaid' ? renderMermaid : renderGraphviz}
+            label={format === 'mermaid' ? 'Mermaid' : 'Graphviz'}
           />
         ) : (
           <iframe

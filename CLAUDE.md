@@ -294,6 +294,34 @@ skill together when you do.
     rendered figure, and an unstamped subtree yields no anchor rather than a
     wrong one. `text/html` outputs are dropped entirely: the pane renders in
     the page, and that markup is kernel-authored.
+  - **A diagram is stamped once, around the whole picture.** Mermaid and
+    Graphviz generate the SVG, so its element offsets describe markup nobody is
+    reviewing — `buildSvgDom`'s `stampOffsets: false`. One wrapper span is
+    enough, because the locate-by-value rule then finds the selected label in
+    the diagram's real source and anchors on the line that declared it.
+  - **`renderedOffsetOf` must not count text that never paints.** The search
+    floor is justified by "markup only adds characters", and a `<style>` block
+    breaks that outright: Mermaid puts ~5 kB of generated CSS inside the
+    stamped element, which is more text than most reviewed files hold. Counted,
+    the floor lands past the end of the source, every lookup fails, and every
+    selection snaps to the whole file — a plausible-looking anchor, no error.
+    Reachable from a `<style>` in raw HTML in a Markdown file too.
+  - **Mermaid must be initialized with `htmlLabels: false`.** Its default
+    labels are `<foreignObject>`, which the SVG allowlist drops as arbitrary
+    HTML — so the diagram renders with every caption missing and nothing says
+    why. It also splits each label into one `<tspan>` per word, so a text node
+    in the picture is a word, not a caption; that costs nothing, since a word
+    still occurs verbatim in the source.
+- **Inline SVG is rebuilt element by element, never `innerHTML`.** It is live
+  markup in this page's origin — `<script>`, `on*`, `<foreignObject>` and any
+  external reference are script or network from a file under review — so
+  `svgPreview.ts` reconstructs an allowlisted tree with `createElementNS`.
+  `innerHTML` would hand the browser the original markup and make the allowlist
+  the only thing standing between a reviewed file and this origin. What the
+  allowlist removed is named on screen, because a picture missing its `<image>`
+  looks exactly like one that never had it. The HTML artifact preview keeps the
+  opaque-origin iframe instead, deliberately: an artifact has to keep its
+  scripts to be worth previewing, an SVG does not.
 - **A file-level annotation (`lineNumber: 0`) is how the rendered preview
   replaces a diff**, and three things have to line up or it silently renders
   nothing:

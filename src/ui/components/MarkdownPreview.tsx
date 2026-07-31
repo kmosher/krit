@@ -6,6 +6,8 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import { visit } from 'unist-util-visit'
 import type { Root } from 'hast'
 import { rangesIntersect } from '../utils/previewFormat'
+import { DiagramPreview } from './DiagramPreview'
+import { renderMermaid } from '../utils/diagramRenderers'
 
 // Renders Markdown as a document, stamping every element with the source
 // offsets it came from (`data-src`) so a selection over the result can be
@@ -88,6 +90,49 @@ interface Props {
   changed?: boolean
 }
 
+/**
+ * A fenced ` ```mermaid ` block, drawn instead of listed. This is where agents
+ * actually put diagrams, so it matters more than `.mmd` files do.
+ *
+ * The span comes from the `<code>` element's own stamp, which the plugin above
+ * already set — so a label selected in the picture anchors inside the fence,
+ * and a `mapOffset`ed notebook cell needs no special case.
+ */
+function MermaidFence({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
+  const stamp = String(node?.properties?.dataSrc ?? '')
+  const dash = stamp.indexOf('-')
+  const start = dash > 0 ? Number(stamp.slice(0, dash)) : NaN
+  const end = dash > 0 ? Number(stamp.slice(dash + 1)) : NaN
+  const text = flattenText(children)
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return <code>{children}</code>
+  return (
+    <DiagramPreview
+      source={text}
+      span={{ start, end }}
+      render={renderMermaid}
+      label="Mermaid"
+      className="diagram-preview-fenced"
+    />
+  )
+}
+
+function flattenText(children: React.ReactNode): string {
+  if (typeof children === 'string') return children
+  if (Array.isArray(children)) return children.map(flattenText).join('')
+  return ''
+}
+
+// `code` rather than `pre`: only the inner element carries the language class,
+// and only it is stamped with the fence's span.
+const COMPONENTS = {
+  code(props: { className?: string; node?: { properties?: Record<string, unknown> }; children?: React.ReactNode }) {
+    if (/(^|\s)language-mermaid(\s|$)/.test(props.className ?? '')) {
+      return <MermaidFence node={props.node} children={props.children} />
+    }
+    return <code {...props} />
+  },
+}
+
 export function MarkdownPreview({ source, changedRanges, mapOffset, changed }: Props) {
   // Rebuilt only when the changed lines actually move: the plugin closes over
   // them, and a fresh array every render would reparse the document on every
@@ -105,7 +150,11 @@ export function MarkdownPreview({ source, changedRanges, mapOffset, changed }: P
 
   return (
     <div className="markdown-preview-body">
-      <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins as never}>
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={rehypePlugins as never}
+        components={COMPONENTS as never}
+      >
         {source}
       </Markdown>
     </div>

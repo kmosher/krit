@@ -94,6 +94,17 @@ describe('renderedOffsetOf', () => {
     expect(renderedOffsetOf(p, textNode(p, 'bold'))).toBe(10)
     expect(renderedOffsetOf(p, textNode(p, ' tail.'))).toBe(14)
   })
+
+  it('does not count text that is never on screen', () => {
+    // A diagram renderer puts kilobytes of generated CSS inside the element
+    // krit stamped. Counted, the floor lands past the end of the source and
+    // every lookup in that element quietly fails.
+    const root = mount(
+      '<div data-src="0-40"><style>.a{fill:red}</style><span>label</span></div>',
+    )
+    const div = root.querySelector('div')!
+    expect(renderedOffsetOf(div, textNode(div, 'label'))).toBe(0)
+  })
 })
 
 describe('domPointToSourceOffset', () => {
