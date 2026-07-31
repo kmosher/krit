@@ -13,6 +13,27 @@ see the warning at the top of the README.
 
 <!-- releases below -->
 
+## 0.9.0 — 2026-07-31
+
+### Changed
+
+- `krit-tui`'s composer submits on `Enter`, matching the web UI. `Shift+Enter`
+  and `Option+Enter` insert a newline where the terminal can deliver them, and
+  `Ctrl+J` does everywhere — it is the one that needs no keyboard protocol, so
+  it is what the footer names on a terminal that cannot report the other two.
+  `Ctrl+S` still posts and `Ctrl+Q` still queues; `Option+Enter` no longer
+  queues.
+
+### Fixed
+
+- Scrolling a diff with a trackpad no longer slides the code out of
+  `krit-tui`'s pane. A two-finger swipe reports a sideways component the whole
+  way down, and acting on each notch left a screen of line numbers and `+`/`-`
+  markers with no code beside them. Sideways scrolling by wheel now needs a run
+  of horizontal notches, and the footer names the column whenever the pane is
+  scrolled off zero.
+
+
 ## 0.8.1 — 2026-07-31
 
 ### Changed
