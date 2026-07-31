@@ -3,3 +3,6 @@ node_modules
 /coverage
 .pnpm-store
 /target
+# Kept alongside it: a clone that built before the cargo workspace landed
+# has a multi-gigabyte krit/target/ that is otherwise suddenly untracked.
+krit/target/

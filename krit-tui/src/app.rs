@@ -8,7 +8,8 @@
 
 use crate::client::DiffPayload;
 use crate::patch::{FileDiff, parse_patch};
-use crate::rows::{Row, build_rows, file_rows, hunk_rows, next_stop, scroll_to_show};
+use crate::rows::{Row, build_rows, file_rows, gutter_width, hunk_rows, next_stop, scroll_to_show};
+use crate::text::{display_width, expand_tabs};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -30,11 +31,15 @@ pub enum Focus {
 /// is hidden or the terminal is resized.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Panes {
-    /// The rows the diff occupies, and the row index drawn at its top.
+    /// The rows the diff occupies.
     pub diff: Rect,
+    /// The row index drawn on the diff pane's first line — what turns a click
+    /// at a screen row back into a row of the model.
     pub diff_top_row: usize,
-    /// `None` when the file list is hidden — by the `f` toggle or because the
-    /// terminal is too narrow for it.
+    /// `None` when the file list is not drawn — because the `f` toggle hid it,
+    /// or because the terminal is too narrow for it. `App` knows only about
+    /// the first of those, which is why focus is reconciled against this
+    /// rather than against `show_files`.
     pub files: Option<Rect>,
     /// Index of the first file drawn in that list; the list scrolls with the
     /// cursor, so this is not always 0.
@@ -62,6 +67,8 @@ pub enum Action {
     ToggleCollapse,
     Refetch,
     ToggleHelp,
+    /// Dismiss the help overlay if it is up; otherwise nothing.
+    CloseHelp,
     Suspend,
     ToggleFiles,
     /// Release the mouse back to the terminal (or take it again).
@@ -111,6 +118,15 @@ pub struct App {
     pub tab_size: usize,
     pub should_quit: bool,
     pub panes: Panes,
+    /// Aggregates over the whole review, recomputed in `rebuild` rather than
+    /// per frame. The draw loop runs ten times a second and each of these
+    /// walks every line of every hunk.
+    pub gutter: usize,
+    pub totals: (usize, usize),
+    /// Widest expanded line, which is how far sideways there is anything to
+    /// see. Without it `h_scroll` runs off into blank space with no way back
+    /// but a key the footer never mentions.
+    pub widest_line: usize,
 }
 
 impl Default for App {
@@ -133,6 +149,9 @@ impl Default for App {
             tab_size: 4,
             should_quit: false,
             panes: Panes::default(),
+            gutter: 2,
+            totals: (0, 0),
+            widest_line: 0,
         }
     }
 }
@@ -144,7 +163,7 @@ impl App {
     /// the file the reviewer is reading unreadable while they edit it. The
     /// anchor is the file, not the row index: rows above it shift by however
     /// much the edit changed.
-    pub fn load(&mut self, payload: &DiffPayload) {
+    pub fn load(&mut self, payload: &DiffPayload, viewport: usize) {
         let anchor = self.cursor_path();
         self.repo = payload.repo_name.clone();
         self.branch = payload.branch.clone();
@@ -155,12 +174,48 @@ impl App {
             Some(row) => row,
             None => self.cursor.min(self.rows.len().saturating_sub(1)),
         };
+        // `offset` needs clamping as much as `cursor` does, and nothing else
+        // on this path does it: a refetch that shrinks the diff would
+        // otherwise leave the view scrolled past the end, and `row_window`
+        // answers that with an empty range — a blank pane, a valid cursor, and
+        // nothing on screen to say what happened.
+        self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
     }
 
     pub fn rebuild(&mut self) {
         self.rows = build_rows(&self.files, &self.collapsed);
         if self.cursor >= self.rows.len() {
             self.cursor = self.rows.len().saturating_sub(1);
+        }
+        // Both of these walk the whole review, so they are computed when the
+        // review changes rather than when a frame is drawn.
+        self.gutter = gutter_width(&self.files);
+        self.totals = (
+            self.files.iter().map(|f| f.additions).sum(),
+            self.files.iter().map(|f| f.deletions).sum(),
+        );
+        self.widest_line = self
+            .files
+            .iter()
+            .flat_map(|f| &f.hunks)
+            .flat_map(|h| &h.lines)
+            .map(|l| display_width(&expand_tabs(&l.text, self.tab_size)))
+            .max()
+            .unwrap_or(0);
+    }
+
+    /// Take the geometry the last frame reported, and reconcile anything that
+    /// depends on what was actually drawn.
+    ///
+    /// Focus is the case that matters: the file pane can be missing because
+    /// the reviewer hid it *or* because the terminal is too narrow, and only
+    /// the frame knows which. Focus left on a pane nobody drew erases the
+    /// cursor's reverse-video bar — the one indicator that survives NO_COLOR —
+    /// with no message and no obvious way back.
+    pub fn set_panes(&mut self, panes: Panes) {
+        self.panes = panes;
+        if panes.files.is_none() {
+            self.focus = Focus::Diff;
         }
     }
 
@@ -231,20 +286,34 @@ impl App {
             }
             Action::NextHunk => self.jump(&hunk_rows(&self.rows), true),
             Action::PrevHunk => self.jump(&hunk_rows(&self.rows), false),
-            Action::ScrollRight(n) => self.h_scroll += n,
+            // Clamped against the widest line there is, the same way vertical
+            // movement is clamped against the row count. Scrolling into blank
+            // space leaves a pane of bare gutters, and the way back (`0`) is
+            // in the `?` overlay only.
+            Action::ScrollRight(n) => {
+                self.h_scroll = (self.h_scroll + n).min(self.widest_line.saturating_sub(1))
+            }
             Action::ScrollLeft(n) => self.h_scroll = self.h_scroll.saturating_sub(n),
             Action::ResetHScroll => self.h_scroll = 0,
             Action::ToggleFocus => {
                 self.focus = match self.focus {
-                    Focus::Diff => Focus::Files,
+                    // Refused when there is no list on screen to move to —
+                    // otherwise Tab appears to do nothing while quietly
+                    // hiding the cursor.
+                    Focus::Diff if self.panes.files.is_some() => Focus::Files,
+                    Focus::Diff => Focus::Diff,
                     Focus::Files => Focus::Diff,
                 }
             }
             Action::ToggleCollapse => self.toggle_collapse(),
             Action::ToggleHelp => self.show_help = !self.show_help,
+            Action::CloseHelp => self.show_help = false,
             Action::ToggleFiles => {
                 self.show_files = !self.show_files;
-                // Focus cannot stay on a pane that is no longer drawn.
+                // Moving focus off a list we just hid. This is not the whole
+                // invariant — the pane also disappears on a narrow terminal,
+                // which `App` cannot see — so `set_panes` is what actually
+                // enforces "focus follows what was drawn", every frame.
                 if !self.show_files {
                     self.focus = Focus::Diff;
                 }
@@ -256,7 +325,7 @@ impl App {
             }
             Action::FocusFile(index) => {
                 if let Some(file) = self.files.get(index)
-                    && let Some(row) = self.row_of_path(&file.path.clone())
+                    && let Some(row) = self.row_of_path(&file.path)
                 {
                     self.cursor = row;
                     self.reveal_at_top(viewport);
@@ -273,10 +342,9 @@ impl App {
 
     /// What a mouse event means, given where the last frame put things.
     ///
-    /// Returns `None` for anything outside a pane or that we don't act on, so
-    /// the caller can tell "not for us" from "do nothing" — a drag across the
-    /// screen is a stream of moves, and treating each as a click would drag
-    /// the cursor with it.
+    /// `Action::None` for anything outside a pane, and for the events we
+    /// deliberately ignore: a drag across the screen is a stream of moves, and
+    /// acting on each would drag the cursor along with the pointer.
     pub fn mouse_action(&self, event: MouseEvent) -> Action {
         if !self.mouse {
             return Action::None;
@@ -402,8 +470,15 @@ pub fn action_for(key: KeyEvent, pending_g: bool) -> (Action, bool) {
 
 fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
     let action = match (key.code, ctrl) {
-        (KeyCode::Char('q'), false) | (KeyCode::Esc, _) => Action::Quit,
+        (KeyCode::Char('q'), false) => Action::Quit,
         (KeyCode::Char('c'), true) => Action::Quit,
+        // Esc closes the overlay and otherwise does nothing. It deliberately
+        // does not quit: crossterm reports a lone `\x1b` it cannot resolve
+        // into a longer sequence as `Esc`, and terminals emit sequences it
+        // does not model — so quitting on it means a stray report can end the
+        // session mid-review. `q` and Ctrl+C already cover leaving, and phase
+        // 1 wants Esc for cancelling the composer.
+        (KeyCode::Esc, _) => Action::CloseHelp,
         (KeyCode::Char('z'), true) => Action::Suspend,
         (KeyCode::Char('d'), true) => Action::HalfPageDown,
         (KeyCode::Char('u'), true) => Action::HalfPageUp,
@@ -461,7 +536,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::default();
-        app.load(&payload(PATCH));
+        app.load(&payload(PATCH), 10);
         app
     }
 
@@ -565,7 +640,7 @@ mod tests {
                      @@ -5 +5 @@\n\
                      -p\n\
                      +q";
-        app.load(&payload(grown));
+        app.load(&payload(grown), 10);
         assert_eq!(
             app.cursor_path().as_deref(),
             Some("b.rs"),
@@ -574,17 +649,52 @@ mod tests {
     }
 
     #[test]
-    fn a_refetch_that_drops_the_current_file_clamps_instead_of_panicking() {
+    fn a_refetch_that_drops_the_current_file_clamps_both_indices() {
+        // Both, not just the cursor: an offset left past the end makes
+        // `row_window` empty, and the pane renders blank with a perfectly
+        // valid cursor and nothing to say why.
         let mut app = app();
         app.apply(Action::Bottom, 10);
-        app.load(&payload("diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-x\n+y"));
+        app.load(
+            &payload("diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-x\n+y"),
+            10,
+        );
         assert!(app.cursor < app.rows.len());
+        assert!(app.offset <= app.rows.len().saturating_sub(10));
+        assert!(
+            !crate::rows::row_window(app.rows.len(), app.offset, 10).is_empty(),
+            "a shorter diff must still have something on screen"
+        );
+    }
+
+    #[test]
+    fn a_refetch_that_shrinks_the_diff_under_a_scrolled_view_still_shows_it() {
+        // The case the clamp is for: reading the bottom of a long diff when an
+        // agent finishes and most of it goes away.
+        let long: String = (0..80)
+            .map(|n| format!("diff --git a/f{n}.rs b/f{n}.rs\n@@ -1 +1 @@\n-a\n+b\n"))
+            .collect();
+        let mut app = App::default();
+        app.load(&payload(&long), 10);
+        app.apply(Action::Bottom, 10);
+        assert!(app.offset > 100);
+
+        app.load(
+            &payload("diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-x\n+y"),
+            10,
+        );
+        assert!(
+            !crate::rows::row_window(app.rows.len(), app.offset, 10).is_empty(),
+            "offset {} is past a {}-row diff",
+            app.offset,
+            app.rows.len()
+        );
     }
 
     #[test]
     fn an_empty_diff_is_navigable_without_panicking() {
         let mut app = App::default();
-        app.load(&payload(""));
+        app.load(&payload(""), 10);
         assert!(app.rows.is_empty());
         for action in [
             Action::Down(1),
@@ -626,7 +736,7 @@ mod tests {
         app.apply(Action::NextFile, 10);
         app.apply(Action::ToggleCollapse, 10);
         assert!(app.collapsed.contains("b.rs"));
-        app.load(&payload(PATCH));
+        app.load(&payload(PATCH), 10);
         assert!(app.collapsed.contains("b.rs"));
         assert!(
             !app.rows
@@ -671,14 +781,37 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_scroll_never_goes_negative() {
-        let mut app = app();
+    fn horizontal_scroll_stops_at_both_ends_of_what_there_is_to_read() {
+        // A long line to have somewhere to scroll to. Both ends are clamped:
+        // left at zero, and right at the widest line there is — scrolling past
+        // that leaves a pane of bare gutters, and the way back (`0`) is in the
+        // help overlay only.
+        let long = "x".repeat(200);
+        let patch = format!("diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-short\n+{long}");
+        let mut app = App::default();
+        app.load(&payload(&patch), 10);
+        assert_eq!(app.widest_line, 200);
+
         app.apply(Action::ScrollLeft(4), 10);
-        assert_eq!(app.h_scroll, 0);
+        assert_eq!(app.h_scroll, 0, "left of column zero is nothing");
         app.apply(Action::ScrollRight(4), 10);
         app.apply(Action::ScrollRight(4), 10);
         assert_eq!(app.h_scroll, 8);
+
+        for _ in 0..200 {
+            app.apply(Action::ScrollRight(4), 10);
+        }
+        assert_eq!(app.h_scroll, 199, "never past the widest line");
+
         app.apply(Action::ResetHScroll, 10);
+        assert_eq!(app.h_scroll, 0);
+    }
+
+    #[test]
+    fn a_review_with_nothing_in_it_cannot_be_scrolled_sideways() {
+        let mut app = App::default();
+        app.load(&payload(""), 10);
+        app.apply(Action::ScrollRight(4), 10);
         assert_eq!(app.h_scroll, 0);
     }
 
@@ -698,6 +831,7 @@ mod tests {
         // Focus on a pane that is not drawn is focus nothing can move or
         // show, and tab would appear to do nothing.
         let mut app = app();
+        with_panes(&mut app);
         app.apply(Action::ToggleFocus, 10);
         assert_eq!(app.focus, Focus::Files);
         app.apply(Action::ToggleFiles, 10);
@@ -708,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn f_hides_the_files_and_m_releases_the_mouse() {
+    fn f_and_m_are_bound_to_the_files_and_mouse_toggles() {
         assert_eq!(action_for(key('f'), false).0, Action::ToggleFiles);
         assert_eq!(action_for(key('m'), false).0, Action::ToggleMouse);
     }
@@ -794,10 +928,8 @@ mod tests {
 
     #[test]
     fn going_to_a_file_puts_it_at_the_top_not_at_the_bottom() {
-        // Minimal scrolling would land the header on the last visible row, so
-        // arriving at a file would mean looking at the end of the one before
-        // it. Found by clicking one in a real terminal and reading the
-        // previous file.
+        // The counterpart to `walking_by_line_still_scrolls_as_little_as
+        // _possible`: this pins the jump case, which tops the file instead.
         let mut app = app();
         let viewport = 4;
         app.apply(Action::NextFile, viewport);
@@ -856,6 +988,28 @@ mod tests {
         assert_eq!(app.mouse_action(click(33, 5)), Action::None);
         // The header row is above both.
         assert_eq!(app.mouse_action(click(50, 0)), Action::None);
+    }
+
+    #[test]
+    fn focus_follows_what_was_drawn_not_what_was_asked_for() {
+        // The pane also disappears on a narrow terminal, which `App` cannot
+        // see — so the frame is what settles it. Focus left on an undrawn pane
+        // erases the cursor bar, which on a monochrome terminal is the only
+        // cursor there is.
+        let mut app = app();
+        with_panes(&mut app);
+        app.apply(Action::ToggleFocus, 10);
+        assert_eq!(app.focus, Focus::Files);
+
+        app.set_panes(Panes {
+            files: None,
+            ..app.panes
+        });
+        assert_eq!(app.focus, Focus::Diff, "the frame drew no list");
+
+        // And Tab cannot put it back while there is nothing to put it on.
+        app.apply(Action::ToggleFocus, 10);
+        assert_eq!(app.focus, Focus::Diff);
     }
 
     #[test]

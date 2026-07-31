@@ -1,5 +1,7 @@
-//! Drawing. Everything here reads `App` and writes cells; nothing here
-//! decides anything.
+//! Drawing. This module owns geometry and presentation — whether the file
+//! list fits, where the list is scrolled, whether the terminal gets colors —
+//! and reports those decisions back through `Panes` so hit-testing resolves
+//! against what was actually drawn. What it never does is mutate `App`.
 //!
 //! The rule the whole module is shaped by: **no state may be color-only.**
 //! `NO_COLOR` is honored, terminals still exist that have eight colors, and
@@ -9,8 +11,7 @@
 
 use crate::app::{App, Focus, Panes, Status};
 use crate::patch::{ChangeKind, LineKind};
-use crate::rows::row_window;
-use crate::rows::{Note, Row, gutter_width, line_marker, stat_label};
+use crate::rows::{Note, Row, line_marker, row_window, scroll_to_show, stat_label};
 use crate::text::{display_width, expand_tabs, fit_columns, slice_columns};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -71,8 +72,8 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) -> Panes {
     // Two independent reasons the list can be absent: the reviewer hid it,
     // or it does not fit. Either way the diff gets the whole body.
     let mut panes = Panes::default();
-    let show_files = app.show_files && area.width >= FILE_PANE_MIN_TOTAL;
-    let diff_area = if show_files {
+    let files_pane_drawn = app.show_files && area.width >= FILE_PANE_MIN_TOTAL;
+    let diff_area = if files_pane_drawn {
         let split = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(FILE_PANE_WIDTH), Constraint::Min(20)])
@@ -92,9 +93,13 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) -> Panes {
     frame.render_widget(footer(app, theme), chunks[2]);
 
     if app.show_help {
-        let overlay = centered(area, 54, 17);
+        // Sized from the keys themselves. Hard-coding it meant adding a
+        // binding silently clipped the overlay — and it already was: the
+        // longest line was one column wider than the box.
+        let (widget, width, height) = help();
+        let overlay = centered(area, width, height);
         frame.render_widget(Clear, overlay);
-        frame.render_widget(help(), overlay);
+        frame.render_widget(widget, overlay);
         // The overlay covers the panes, so a click while it is up must not
         // reach whatever it is sitting on top of.
         panes = Panes {
@@ -106,8 +111,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) -> Panes {
 }
 
 fn header<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
-    let adds: usize = app.files.iter().map(|f| f.additions()).sum();
-    let dels: usize = app.files.iter().map(|f| f.deletions()).sum();
+    let (adds, dels) = app.totals;
     let scope = if app.custom_mode {
         " (custom range)"
     } else {
@@ -133,7 +137,7 @@ fn footer<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     let (text, style) = match &app.status {
         Status::Idle => (
             format!(
-                " j/k move · n/p hunk · ]/[ file · z fold · f files{} · r refresh · ? keys · q quit",
+                " j/k move · n/p hunk · ]/[ file · z collapse · f files{} · r refresh · ? keys · q quit",
                 // Only worth a cell when it is off, because that is the state
                 // someone needs telling how to undo.
                 if app.mouse { "" } else { " · m mouse off" },
@@ -171,13 +175,19 @@ fn kind_color(kind: ChangeKind) -> Color {
 /// click resolvable — computed here because here is where they are decided.
 fn file_pane<'a>(app: &App, theme: &Theme, area: Rect) -> (Paragraph<'a>, Rect, usize) {
     let current = app.current_file();
-    let inner = FILE_PANE_WIDTH.saturating_sub(2) as usize;
+    let text_cols = FILE_PANE_WIDTH.saturating_sub(2) as usize;
     let visible = area.height.saturating_sub(2) as usize;
-    // Scroll the list so the current file stays on it; the list is not
-    // separately navigable yet, it follows the diff cursor.
-    let start = current
-        .map(|c| c.saturating_sub(visible.saturating_sub(1)))
-        .unwrap_or(0);
+    // The same least-movement rule the diff pane scrolls by, fed the start the
+    // last frame reported. Deriving a start from the current file alone can
+    // only pin it to one edge — the previous version pinned it to the *last*
+    // visible row, so no file below the cursor was ever on screen once the
+    // review outgrew the pane.
+    let start = scroll_to_show(
+        app.panes.files_top,
+        visible,
+        current.unwrap_or(0),
+        app.files.len(),
+    );
     let rows = Rect {
         x: area.x + 1,
         y: area.y + 1,
@@ -188,7 +198,7 @@ fn file_pane<'a>(app: &App, theme: &Theme, area: Rect) -> (Paragraph<'a>, Rect, 
     let mut lines: Vec<Line> = Vec::new();
     for (i, file) in app.files.iter().enumerate().skip(start).take(visible) {
         let stats = stat_label(file);
-        let room = inner.saturating_sub(display_width(&stats) + 3);
+        let room = text_cols.saturating_sub(display_width(&stats) + 3);
         let name = elide_left(&file.path, room);
         let mut style = Style::default();
         if Some(i) == current {
@@ -223,28 +233,28 @@ fn diff_pane<'a>(app: &App, theme: &Theme, area: Rect) -> Paragraph<'a> {
             theme.dim(),
         )));
     }
-    let gutter = gutter_width(&app.files);
     let width = area.width as usize;
-    // old │ new │ marker │ text — a fixed prefix, so the code column never
-    // moves as you scroll between files.
-    let prefix = gutter * 2 + 4;
-    let text_width = width.saturating_sub(prefix);
     let window = row_window(app.rows.len(), app.offset, area.height as usize);
 
     let mut lines: Vec<Line> = Vec::new();
     for index in window {
         let selected = index == app.cursor && app.focus == Focus::Diff;
-        lines.push(render_row(app, theme, index, gutter, text_width, selected));
+        lines.push(render_row(app, theme, index, width, selected));
     }
     Paragraph::new(lines)
 }
+
+/// The columns between the gutters and the code: one separator space, the
+/// change marker, and one more space. Named because three row kinds have to
+/// agree with it — a header that computed the width differently would drift
+/// out of line with the code rows below it.
+const MARKER_COLS: usize = 4;
 
 fn render_row<'a>(
     app: &App,
     theme: &Theme,
     index: usize,
-    gutter: usize,
-    text_width: usize,
+    pane_width: usize,
     selected: bool,
 ) -> Line<'a> {
     let cursor = if selected {
@@ -252,14 +262,21 @@ fn render_row<'a>(
     } else {
         Style::default()
     };
+    // old │ new │ marker │ text — a fixed prefix, so the code column never
+    // moves as you scroll between files.
+    let gutter = app.gutter;
+    let text_width = pane_width.saturating_sub(gutter * 2 + MARKER_COLS);
 
     match app.rows[index] {
-        Row::Gap => Line::from(""),
+        // Padded and styled like every other row: a cursor parked on the gap
+        // between two files would otherwise be invisible, since reverse video
+        // over an empty string covers nothing.
+        Row::Gap => Line::from(Span::styled(fit_columns("", pane_width), cursor)),
         Row::File { file } => {
             let f = &app.files[file];
             let text = format!(" {} {}  {}", f.kind.sigil(), f.path, stat_label(f));
             Line::from(Span::styled(
-                fit_columns(&text, gutter * 2 + 4 + text_width),
+                fit_columns(&text, pane_width),
                 theme
                     .fg(kind_color(f.kind))
                     .add_modifier(Modifier::BOLD)
@@ -273,9 +290,21 @@ fn render_row<'a>(
                     format!("   renamed from {}", f.old_path.as_deref().unwrap_or("?"))
                 }
                 Note::Binary => "   binary file — not shown".to_string(),
-                Note::Collapsed => format!("   folded — {} hunks hidden", f.hunks.len()),
+                Note::Collapsed => {
+                    let n = f.hunks.len();
+                    format!(
+                        "   collapsed — {n} hunk{} hidden",
+                        if n == 1 { "" } else { "s" }
+                    )
+                }
             };
-            Line::from(Span::styled(text, theme.dim().patch(cursor)))
+            // Full width like the rows around it, so the cursor bar is a bar
+            // rather than a fragment — that bar is the only cursor indicator
+            // that survives NO_COLOR.
+            Line::from(Span::styled(
+                fit_columns(&text, pane_width),
+                theme.dim().patch(cursor),
+            ))
         }
         Row::Hunk { file, hunk } => {
             let h = &app.files[file].hunks[hunk];
@@ -284,7 +313,7 @@ fn render_row<'a>(
                 h.old_start, h.old_len, h.new_start, h.new_len, h.section
             );
             Line::from(Span::styled(
-                fit_columns(&text, gutter * 2 + 4 + text_width),
+                fit_columns(&text, pane_width),
                 theme.fg(Color::Cyan).patch(cursor),
             ))
         }
@@ -333,7 +362,9 @@ pub fn elide_left(path: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
-fn help<'a>() -> Paragraph<'a> {
+/// The key list, plus the size a box has to be to show all of it: the widest
+/// line and the number of lines, each plus its two borders.
+fn help<'a>() -> (Paragraph<'a>, u16, u16) {
     let lines = vec![
         Line::from("  j / k, ↑ / ↓      move by line"),
         Line::from("  ctrl-d / ctrl-u   half a screen"),
@@ -342,7 +373,7 @@ fn help<'a>() -> Paragraph<'a> {
         Line::from("  n / p             next / previous hunk"),
         Line::from("  ] / [             next / previous file"),
         Line::from("  h / l, 0          scroll sideways, reset"),
-        Line::from("  z, enter          fold the current file"),
+        Line::from("  z, enter          collapse the current file"),
         Line::from("  tab               move between panes"),
         Line::from("  f                 show / hide the file list"),
         Line::from("  m                 release the mouse to the terminal"),
@@ -351,7 +382,17 @@ fn help<'a>() -> Paragraph<'a> {
         Line::from("  ctrl-z            suspend"),
         Line::from("  ? , q             this / quit"),
     ];
-    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Keys "))
+    let width = lines
+        .iter()
+        .map(|l| display_width(&l.to_string()))
+        .max()
+        .unwrap_or(0) as u16;
+    let height = lines.len() as u16;
+    (
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Keys ")),
+        width + 2,
+        height + 2,
+    )
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -387,13 +428,16 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::default();
-        app.load(&DiffPayload {
-            patch: PATCH.to_string(),
-            repo_name: "krit".into(),
-            branch: "main".into(),
-            custom_mode: false,
-            untracked_files: vec!["notes.md".into()],
-        });
+        app.load(
+            &DiffPayload {
+                patch: PATCH.to_string(),
+                repo_name: "krit".into(),
+                branch: "main".into(),
+                custom_mode: false,
+                untracked_files: vec!["notes.md".into()],
+            },
+            10,
+        );
         app
     }
 
@@ -465,12 +509,15 @@ mod tests {
     #[test]
     fn an_empty_review_says_so_instead_of_drawing_nothing() {
         let mut app = App::default();
-        app.load(&DiffPayload {
-            patch: String::new(),
-            repo_name: "krit".into(),
-            branch: "main".into(),
-            ..Default::default()
-        });
+        app.load(
+            &DiffPayload {
+                patch: String::new(),
+                repo_name: "krit".into(),
+                branch: "main".into(),
+                ..Default::default()
+            },
+            10,
+        );
         let screen = render(&app, 80, 8);
         assert!(
             screen.iter().any(|l| l.contains("No changes")),
@@ -503,26 +550,29 @@ mod tests {
     #[test]
     fn a_binary_file_and_a_rename_render_their_notes() {
         let mut app = App::default();
-        app.load(&DiffPayload {
-            patch: "diff --git a/old.png b/new.png\n\
+        app.load(
+            &DiffPayload {
+                patch: "diff --git a/old.png b/new.png\n\
                     similarity index 100%\n\
                     rename from old.png\n\
                     rename to new.png\n\
                     Binary files a/old.png and b/new.png differ"
-                .to_string(),
-            ..Default::default()
-        });
+                    .to_string(),
+                ..Default::default()
+            },
+            10,
+        );
         let all = render(&app, 90, 10).join("\n");
         assert!(all.contains("renamed from old.png"), "{all}");
         assert!(all.contains("binary file"), "{all}");
     }
 
     #[test]
-    fn folding_a_file_says_how_much_it_hid() {
+    fn collapsing_a_file_says_how_much_it_hid() {
         let mut app = app();
         app.apply(Action::ToggleCollapse, 10);
         let all = render(&app, 90, 12).join("\n");
-        assert!(all.contains("folded — 1 hunks hidden"), "{all}");
+        assert!(all.contains("collapsed — 1 hunk hidden"), "{all}");
         assert!(!all.contains("was()"), "the body is gone: {all}");
     }
 
@@ -560,6 +610,74 @@ mod tests {
         assert!(all.contains("M src/a.rs"), "{all}");
         assert!(all.contains("-     was()"), "{all}");
         assert!(all.contains("+     is()"), "{all}");
+    }
+
+    #[test]
+    fn a_long_file_list_still_shows_what_comes_after_the_current_file() {
+        // The list used to pin the current file to the *last* visible row, so
+        // past ~20 files a reviewer could never see one below the cursor. It
+        // scrolls by the same least-movement rule as the diff.
+        let patch: String = (0..40)
+            .map(|n| format!("diff --git a/f{n:02}.rs b/f{n:02}.rs\n@@ -1 +1 @@\n-a\n+b\n"))
+            .collect();
+        let mut app = App::default();
+        app.load(
+            &DiffPayload {
+                patch,
+                ..Default::default()
+            },
+            10,
+        );
+        assert_eq!(app.files.len(), 40);
+
+        // Starting at the top, the list starts at the top.
+        let (screen, panes) = render_with_panes(&app, 100, 14);
+        assert_eq!(panes.files_top, 0);
+        assert!(screen[2].contains("f00.rs"), "{:?}", screen[2]);
+        assert!(
+            screen.iter().any(|l| l.contains("f05.rs")),
+            "files after the current one are visible"
+        );
+
+        // Walk down past the end of the list; it scrolls to follow.
+        for _ in 0..20 {
+            app.apply(Action::NextFile, 12);
+            app.set_panes(render_with_panes(&app, 100, 14).1);
+        }
+        let panes = render_with_panes(&app, 100, 14).1;
+        assert!(panes.files_top > 0, "the list scrolled to follow");
+
+        // Now the part that was broken: jump back up. The old policy derived
+        // the start from the current file alone every frame, so it pinned the
+        // current file to the *last* visible row no matter how you arrived —
+        // going back to file 12 would show files 3–12 and nothing after. Least
+        // movement puts it at the top instead, so what follows it is visible.
+        let before = panes.files_top;
+        // Far enough that the target is above the window — inside it, least
+        // movement correctly does nothing, which the last assertion covers.
+        for _ in 0..18 {
+            app.apply(Action::PrevFile, 12);
+            app.set_panes(render_with_panes(&app, 100, 14).1);
+        }
+        let (screen, panes) = render_with_panes(&app, 100, 14);
+        let current = app.current_file().expect("a file is current");
+        assert!(panes.files_top < before, "it scrolled back up");
+        assert_eq!(
+            panes.files_top, current,
+            "the file jumped back to is the first on the list, not the last"
+        );
+        assert!(
+            screen
+                .iter()
+                .any(|l| l.contains(&format!("f{:02}.rs", current + 3))),
+            "files after the current one are on screen: {screen:?}"
+        );
+
+        // And a file already on the list doesn't move it at all.
+        let steady = panes.files_top;
+        app.apply(Action::NextFile, 12);
+        app.set_panes(render_with_panes(&app, 100, 14).1);
+        assert_eq!(render_with_panes(&app, 100, 14).1.files_top, steady);
     }
 
     #[test]

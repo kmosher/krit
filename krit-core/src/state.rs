@@ -94,6 +94,17 @@ pub fn read_state(path: &Path) -> Option<KritState> {
     serde_json::from_str(&content).ok()
 }
 
+/// The URL a client should actually connect to.
+///
+/// 127.0.0.1 → localhost, because sandbox host allowlists match on the name
+/// only and would block the loopback connection otherwise. It lives here
+/// rather than in either client because it is a wire rule: the two would drift
+/// with nothing failing, and the symptom — a connection a sandbox rejects —
+/// looks like a dead server rather than a mismatched rewrite.
+pub fn client_base_url(state: &KritState) -> String {
+    state.url.replace("://127.0.0.1", "://localhost")
+}
+
 // Missing file, unreadable file, and unparseable file are three different
 // diagnoses (server never started / wrong KRIT_STATE_FILE vs permissions vs
 // a stale-or-hand-written file) — collapsing them into one generic error
@@ -250,6 +261,52 @@ mod tests {
             StateError::Unreadable(..)
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn state_with_url(url: &str) -> KritState {
+        KritState {
+            port: 1234,
+            pid: 42,
+            cwd: "/x".into(),
+            host: "127.0.0.1".into(),
+            url: url.into(),
+            started_at: 1,
+            v: 2,
+        }
+    }
+
+    #[test]
+    fn loopback_is_rewritten_to_localhost_but_the_port_survives() {
+        // Sandbox host allowlists match on the name only; the rewrite exists
+        // for that and must not disturb the port or the scheme.
+        assert_eq!(
+            client_base_url(&state_with_url("http://127.0.0.1:5173")),
+            "http://localhost:5173"
+        );
+        assert_eq!(
+            client_base_url(&state_with_url("https://127.0.0.1:443")),
+            "https://localhost:443"
+        );
+    }
+
+    #[test]
+    fn a_non_loopback_host_is_left_alone() {
+        // A 0.0.0.0 bind advertises a real host; rewriting it would point the
+        // client at the wrong machine.
+        assert_eq!(
+            client_base_url(&state_with_url("http://192.168.1.9:5173")),
+            "http://192.168.1.9:5173"
+        );
+        assert_eq!(
+            client_base_url(&state_with_url("http://localhost:8080")),
+            "http://localhost:8080"
+        );
+        // Only the scheme-anchored form is a loopback authority — a host that
+        // merely contains the digits keeps them.
+        assert_eq!(
+            client_base_url(&state_with_url("http://my127.0.0.1host:1")),
+            "http://my127.0.0.1host:1"
+        );
     }
 
     #[test]

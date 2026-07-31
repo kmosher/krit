@@ -1066,6 +1066,7 @@ name = "krit-tui"
 version = "2.0.0"
 dependencies = [
  "krit-core",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",

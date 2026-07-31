@@ -119,9 +119,11 @@ pub fn hunk_rows(rows: &[Row]) -> Vec<usize> {
 }
 
 /// The next stop in `stops` strictly after `from` (or strictly before, going
-/// back). `None` when there is none — the caller decides whether that means
-/// "stay put" or "wrap", and both callers so far mean stay put: silently
-/// wrapping to the top of a 400-file review reads as a scroll glitch.
+/// back). `None` when there is none, and what to do about that is the caller's
+/// call: its one caller, `App::jump`, stays put going forward — silently
+/// wrapping to the top of a 400-file review reads as a scroll glitch — and
+/// going back falls through to the first stop, so `[` from inside the first
+/// file lands on that file's header rather than refusing to move.
 pub fn next_stop(stops: &[usize], from: usize, forward: bool) -> Option<usize> {
     if forward {
         stops.iter().copied().find(|&s| s > from)
@@ -166,6 +168,9 @@ pub fn gutter_width(files: &[FileDiff]) -> usize {
         .iter()
         .flat_map(|f| &f.hunks)
         .flat_map(|h| &h.lines)
+        // `Option::max`, not a numeric one: `None` sorts below `Some` in
+        // Option's derived Ord, so a one-sided line still contributes the
+        // number it does have.
         .filter_map(|l| l.old_line.max(l.new_line))
         .max()
         .unwrap_or(1);
@@ -174,13 +179,10 @@ pub fn gutter_width(files: &[FileDiff]) -> usize {
 
 /// `+N −M` for a file's header.
 pub fn stat_label(file: &FileDiff) -> String {
-    // Sigils, not just color: this has to survive NO_COLOR and a monochrome
-    // terminal, where a green number and a red number are the same number.
-    format!("+{} −{}", file.additions(), file.deletions())
+    format!("+{} −{}", file.additions, file.deletions)
 }
 
-/// The marker column for a diff line — the one piece of a code row that must
-/// never be color-only.
+/// The marker column for a diff line.
 pub fn line_marker(kind: LineKind) -> char {
     match kind {
         LineKind::Addition => '+',

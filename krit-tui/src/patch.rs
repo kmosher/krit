@@ -24,8 +24,8 @@ pub enum ChangeKind {
 }
 
 impl ChangeKind {
-    /// A distinct *shape* per change type, not a distinct color — every state
-    /// that means something has to survive `NO_COLOR` and an 8-color terminal.
+    /// A distinct *shape* per change type, not a distinct color — see the rule
+    /// at the head of `ui`.
     pub fn sigil(self) -> char {
         match self {
             ChangeKind::Added => 'A',
@@ -78,23 +78,26 @@ pub struct FileDiff {
     /// Binary files carry no hunks — git says only that they differ.
     pub binary: bool,
     pub hunks: Vec<Hunk>,
+    /// Counted once, here, because the header and every file row ask for them
+    /// and the draw loop runs ten times a second: as methods they walked every
+    /// line of every hunk per frame, which scales with the review rather than
+    /// with the window.
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 impl FileDiff {
-    pub fn additions(&self) -> usize {
-        self.count(LineKind::Addition)
-    }
-
-    pub fn deletions(&self) -> usize {
-        self.count(LineKind::Deletion)
-    }
-
     fn count(&self, kind: LineKind) -> usize {
         self.hunks
             .iter()
             .flat_map(|h| &h.lines)
             .filter(|l| l.kind == kind)
             .count()
+    }
+
+    fn tally(&mut self) {
+        self.additions = self.count(LineKind::Addition);
+        self.deletions = self.count(LineKind::Deletion);
     }
 }
 
@@ -124,9 +127,11 @@ fn parse_range(spec: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// Parse a whole patch. `untracked` refines a new file to `Untracked` — the
-/// same distinction the server draws in `binaryFiles`, and worth keeping
-/// because "I have not added this yet" reads differently from "I added it".
+/// Parse a whole patch. `untracked` is the payload's `untrackedFiles`, and it
+/// refines a new file to `Untracked` — the server draws the same added-vs-
+/// untracked distinction for binaries in `binaryFiles`, and it is worth
+/// keeping because "I have not added this yet" reads differently from "I added
+/// it".
 pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
     let lines: Vec<&str> = patch.split('\n').collect();
     let mut files: Vec<FileDiff> = Vec::new();
@@ -146,6 +151,8 @@ pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
             kind: ChangeKind::Modified,
             binary: false,
             hunks: Vec::new(),
+            additions: 0,
+            deletions: 0,
         };
 
         // The preamble: mode lines, rename pair, index, ---/+++, and the
@@ -196,6 +203,7 @@ pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
             }
         }
 
+        file.tally();
         files.push(file);
     }
 
@@ -251,21 +259,21 @@ fn parse_hunk_body(
         let (old_line, new_line) = match kind {
             LineKind::Context => {
                 let pair = (Some(old_no), Some(new_no));
-                old_no += 1;
-                new_no += 1;
+                old_no = old_no.saturating_add(1);
+                new_no = new_no.saturating_add(1);
                 old_left = old_left.saturating_sub(1);
                 new_left = new_left.saturating_sub(1);
                 pair
             }
             LineKind::Addition => {
                 let pair = (None, Some(new_no));
-                new_no += 1;
+                new_no = new_no.saturating_add(1);
                 new_left = new_left.saturating_sub(1);
                 pair
             }
             LineKind::Deletion => {
                 let pair = (Some(old_no), None);
-                old_no += 1;
+                old_no = old_no.saturating_add(1);
                 old_left = old_left.saturating_sub(1);
                 pair
             }
@@ -315,8 +323,8 @@ mod tests {
         let f = &files[0];
         assert_eq!(f.path, "src/a.rs");
         assert_eq!(f.kind, ChangeKind::Modified);
-        assert_eq!(f.additions(), 2);
-        assert_eq!(f.deletions(), 1);
+        assert_eq!(f.additions, 2);
+        assert_eq!(f.deletions, 1);
 
         let h = &f.hunks[0];
         assert_eq!(

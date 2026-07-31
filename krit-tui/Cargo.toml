@@ -11,6 +11,11 @@ serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
 ratatui = "0.30"
+# For `kill(pid, 0)` and SIGTERM: asking whether the server we recorded is
+# still alive, and stopping one we started politely before resorting to
+# SIGKILL. Already in the tree via signal-hook; named directly because we use
+# it directly.
+libc = "0.2"
 # crossterm is not a direct dependency on purpose: ratatui re-exports the exact
 # version it was built against, and two crossterm majors in one tree compile
 # fine while silently disagreeing about what an Event is.

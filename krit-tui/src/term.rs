@@ -20,11 +20,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
+/// Take the terminal, or leave it exactly as it was found.
+///
+/// Each step is fallible and the first one is the one with teeth, so a failure
+/// in a later step has to undo it: raw mode set and then abandoned is the
+/// shell-stops-echoing outcome this whole module exists to prevent, and it is
+/// reachable — `enable_raw_mode` works through `/dev/tty` while the escape
+/// sequences go to stdout, so `krit-tui | head` succeeds at the first and gets
+/// EPIPE on the second.
 fn enter_screen(mouse: bool) -> io::Result<()> {
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
-    if mouse {
-        execute!(stdout(), EnableMouseCapture)?;
+    if let Err(err) = execute!(stdout(), EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(err);
+    }
+    if mouse && let Err(err) = execute!(stdout(), EnableMouseCapture) {
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+        return Err(err);
     }
     Ok(())
 }
@@ -112,6 +125,11 @@ impl Session {
         leave_screen()?;
         self.restored = true;
         let _ = signal_hook::low_level::emulate_default_handler(signal_hook::consts::SIGTSTP);
+        // `restored` stays true across the re-entry and is cleared only once
+        // it succeeds. That is the truth in both outcomes, because
+        // `enter_screen` unwinds its own partial failure: if this returns Err,
+        // the terminal really is still the shell's, and `finish` is right to
+        // do nothing.
         enter_screen(self.mouse)?;
         self.restored = false;
 
@@ -146,27 +164,49 @@ impl Drop for Session {
     }
 }
 
-/// A `kill -TSTP` from outside the terminal.
+/// The signals that must not be allowed to kill us where they land.
 ///
-/// Ctrl+Z does *not* arrive here: raw mode turns off ISIG, so the key never
-/// becomes a signal and reaches the app as an ordinary Ctrl+Z key event. Both
-/// paths have to end up calling `Session::suspend`, and forgetting either one
-/// is a suspend that leaves the screen in raw mode.
-pub struct SuspendSignal {
-    flag: Arc<AtomicBool>,
+/// Every one of these has a default disposition that ends the process without
+/// unwinding — no panic hook, no `Drop`, so no `leave_screen` — and the
+/// terminal is left in raw mode with the alternate screen up and the mouse
+/// captured. Handling them turns each into an ordinary request the loop
+/// answers on its own terms.
+///
+/// Note which signals do *not* arrive here. Ctrl+Z and Ctrl+C are keys, not
+/// signals: raw mode turns off ISIG, so the terminal never generates SIGTSTP
+/// or SIGINT from them and `app::action_for` maps both directly. That makes
+/// these the *external* paths — `kill`, a supervisor, a closed terminal — and
+/// they are exactly the ones a reviewer reaches for when the viewer looks
+/// stuck. Forgetting either half is a suspend or a quit that strands the
+/// shell.
+pub struct Signals {
+    suspend: Arc<AtomicBool>,
+    quit: Arc<AtomicBool>,
 }
 
-impl SuspendSignal {
+impl Signals {
     pub fn register() -> io::Result<Self> {
-        let flag = Arc::new(AtomicBool::new(false));
-        // A flag rather than a handler thread: setting an atomic is one of the
+        let suspend = Arc::new(AtomicBool::new(false));
+        let quit = Arc::new(AtomicBool::new(false));
+        // Flags rather than a handler thread: setting an atomic is one of the
         // few things that is safe to do inside a signal handler.
-        signal_hook::flag::register(signal_hook::consts::SIGTSTP, Arc::clone(&flag))?;
-        Ok(Self { flag })
+        signal_hook::flag::register(signal_hook::consts::SIGTSTP, Arc::clone(&suspend))?;
+        for signal in [
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGHUP,
+        ] {
+            signal_hook::flag::register(signal, Arc::clone(&quit))?;
+        }
+        Ok(Self { suspend, quit })
     }
 
     /// True once per signal received.
-    pub fn take(&self) -> bool {
-        self.flag.swap(false, Ordering::Relaxed)
+    pub fn suspend_requested(&self) -> bool {
+        self.suspend.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        self.quit.swap(false, Ordering::Relaxed)
     }
 }

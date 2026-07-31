@@ -216,7 +216,9 @@ file — or starts one, forwarding anything after `--` as its git diff range, so
 diff with a file list, navigation by line, page, file and hunk, folding, and
 SSE for live updates. Mouse capture came with it (wheel scrolls without moving
 the cursor, click moves it, `m` hands the mouse back to the terminal), and
-`f` hides the file list. The row model, width handling, virtualization and
+`f` hides the file list. It reads the reviewer's `staged`/`untracked`/tab-width
+settings and sends the first two to `/api/diff` — the route defaults them to
+`false`, so a client that omits them shows only unstaged work. The row model, width handling, virtualization and
 terminal setup/teardown are the part that carried the risk, and they are the
 part that landed.
 

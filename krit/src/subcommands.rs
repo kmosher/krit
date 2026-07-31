@@ -9,7 +9,7 @@
 //! covered: the socket loop, `default_state_path`'s env-var resolution, and
 //! every `process::exit` path still need a running server to exercise.
 
-use crate::state::{KritState, default_state_path, read_state_at};
+use crate::state::{KritState, client_base_url, default_state_path, read_state_at};
 use serde_json::{Value, json};
 use std::io::Read;
 
@@ -38,12 +38,6 @@ fn require_state() -> KritState {
             std::process::exit(1);
         }
     }
-}
-
-fn base_url(state: &KritState) -> String {
-    // 127.0.0.1 → localhost so sandbox host allowlists (which only accept
-    // the name) don't block the loopback connection.
-    state.url.replace("://127.0.0.1", "://localhost")
 }
 
 /// One request a verb makes. Naming the request as data is what lets a test
@@ -129,7 +123,7 @@ fn call_api(base: &str, call: &ApiCall) -> Result<Value, ApiError> {
 
 fn api(call: ApiCall) -> Value {
     let state = require_state();
-    match call_api(&base_url(&state), &call) {
+    match call_api(&client_base_url(&state), &call) {
         Ok(value) => value,
         Err(err) => {
             for line in err.lines() {
@@ -267,7 +261,7 @@ fn scan_for_submit(buf: &mut Vec<u8>) -> Option<Value> {
 /// /api/events-ws directly (see the skill).
 pub fn cmd_wait_for_submit() -> ! {
     let state = require_state();
-    let url = format!("{}/api/events?role=cli", base_url(&state));
+    let url = format!("{}/api/events?role=cli", client_base_url(&state));
     eprintln!("wait-for-submit: connected — review, then click Done reviewing in the browser.");
 
     let res = match ureq::get(&url).set("Accept", "text/event-stream").call() {
@@ -308,54 +302,6 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::TcpListener;
-
-    fn state_with_url(url: &str) -> KritState {
-        KritState {
-            port: 1234,
-            pid: 42,
-            cwd: "/x".into(),
-            host: "127.0.0.1".into(),
-            url: url.into(),
-            started_at: 1,
-            v: 2,
-        }
-    }
-
-    // --- URL construction ---------------------------------------------
-
-    #[test]
-    fn loopback_is_rewritten_to_localhost_but_the_port_survives() {
-        // Sandbox host allowlists match on the name only; the rewrite exists
-        // for that and must not disturb the port or the scheme.
-        assert_eq!(
-            base_url(&state_with_url("http://127.0.0.1:5173")),
-            "http://localhost:5173"
-        );
-        assert_eq!(
-            base_url(&state_with_url("https://127.0.0.1:443")),
-            "https://localhost:443"
-        );
-    }
-
-    #[test]
-    fn a_non_loopback_host_is_left_alone() {
-        // A 0.0.0.0 bind advertises a real host; rewriting it would point the
-        // subcommand at the wrong machine.
-        assert_eq!(
-            base_url(&state_with_url("http://192.168.1.9:5173")),
-            "http://192.168.1.9:5173"
-        );
-        assert_eq!(
-            base_url(&state_with_url("http://localhost:8080")),
-            "http://localhost:8080"
-        );
-        // Only the scheme-anchored form is a loopback authority — a host that
-        // merely contains the digits keeps them.
-        assert_eq!(
-            base_url(&state_with_url("http://my127.0.0.1host:1")),
-            "http://my127.0.0.1host:1"
-        );
-    }
 
     // --- request shapes -----------------------------------------------
 

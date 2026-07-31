@@ -177,13 +177,48 @@ skill together when you do.
   If a WS test "sees no events", check this before debugging the watcher.
 - **`krit-tui` starts a server when there isn't one, and never stops it.**
   Killing it on exit would be wrong whenever a browser tab is also attached,
-  and unnecessary either way: the idle timeout already counts subscribers, so
-  a server nobody is watching goes away on its own. The adopt path probes
-  `/api/settings` before trusting the state file — a crashed server leaves one
-  behind, and believing it means reporting "cannot reach krit" when the honest
-  answer is that we should have started one. A server that *is* running keeps
-  its own diff range; `-- <args>` passed to a viewer that adopts one is
-  reported in the status strip rather than silently ignored.
+  and unnecessary either way: it is started with an explicit `--idle-timeout`
+  (rather than krit's default, which `KRIT_IDLE_TIMEOUT_MS` in the reviewer's
+  environment would silently override) so a server nobody is watching goes away
+  on its own. A server that *is* running keeps its own diff range; `-- <args>`
+  passed to a viewer that adopts one is reported in the status strip rather
+  than silently ignored. Three things guard the adopt-or-start decision, and
+  each covers a case the others don't:
+  - **Probe before trusting the state file.** A crashed server leaves one
+    behind, and believing it means reporting "cannot reach krit" when the
+    honest answer is that we should have started one.
+  - **A live pid that isn't answering means stop, not start.** Two servers
+    share one comment store, and `store::persist` rewrites the whole file from
+    its own memory — so whichever saves last silently drops the other's
+    comments. That is the worst outcome available here, which is why an
+    ambiguous state is reported rather than guessed at.
+  - **A start lock**, because the pid check cannot see a server that does not
+    exist yet: two viewers launched together both find no state file and both
+    spawn. `create_new` on `<state>.start-lock` settles it; the loser waits for
+    the winner's server instead.
+- **Both clients must ask `/api/diff` for the same thing.** The route reads a
+  missing `staged`/`untracked` as **false** — a view no client ever chose,
+  since the shipped settings are both true and the browser forwards them
+  explicitly. `krit-tui` omitting them showed only unstaged changes: staged
+  work invisible, untracked files absent entirely, and no error anywhere. It
+  now reads the reviewer's settings from `/api/settings` (the same request
+  that probes for liveness) and sends them, which is also where its tab width
+  comes from. If you add a client, send the parameters.
+- **Nothing that can block goes in the draw loop.** The diff fetch runs on its
+  own thread and answers through the same channel the event stream uses. It was
+  inline once, and a slow `git diff` froze everything: no redraw, no key read,
+  and — because raw mode clears ISIG — no Ctrl+C either, leaving an external
+  `kill` as the only way out and the terminal wrecked afterwards.
+  `nothing_outside_the_draw_loop_waits_for_input` is the guard, and it is the
+  terminal analogue of `nativeDialogs.test.tsx`: the rule is not "no
+  `confirm()`" but "the program never stops redrawing while it waits".
+  Relatedly, SIGTERM/SIGINT/SIGHUP are handled rather than fatal, since their
+  default disposition skips the panic hook and the `Drop` guard both.
+- **The loop redraws when something changed, not every tick.** Several
+  aggregates scale with the review rather than the window; they are cached in
+  `App::rebuild` and the frame is skipped when nothing marked it dirty. A
+  forced redraw once a second is the backstop, so a future path that forgets to
+  mark it costs a stale frame rather than a viewer that never repaints again.
 - **`krit-tui` subscribes as `role=ui`, not `role=cli`.** It is a human's
   client, so it has to hold the server open the way a browser tab does; a `cli`
   subscription would let the idle timeout fire with the review still on screen.
@@ -191,7 +226,12 @@ skill together when you do.
   which is correct — it is a UI — but means "browsers: 1" no longer implies a
   browser. The other half of the same choice: `/api/events` is unfiltered on
   purpose, so the TUI debounces its refetches itself rather than asking the
-  server to coalesce.
+  server to coalesce — with a maximum wait, because a trailing-edge debounce
+  alone can be starved by a change stream that never goes quiet, and the
+  symptom is a diff that silently stops updating. It also reconnects the stream
+  with backoff: a dropped subscription is not a dead server, and since the TUI
+  is what holds `role=ui`, letting one drop stand would arm the server's idle
+  shutdown and make its own "krit crashed" message come true.
 - **The comment poll sets `refetchIntervalInBackground: true`** (`useComments`),
   overriding react-query's default of pausing an interval while the page is
   unfocused. An automated browser reports itself hidden the whole time it is

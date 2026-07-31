@@ -37,8 +37,8 @@ krit-tui                    # the working tree
 krit-tui -- --staged        # anything after -- goes to git, as with krit
 ```
 
-`j`/`k` move, `n`/`p` jump by hunk, `]`/`[` by file, `z` folds a file, `f`
-hides the file list, `r` refetches, `?` lists the keys. The wheel scrolls and a
+`j`/`k` move, `n`/`p` jump by hunk, `]`/`[` by file, `z` collapses a file,
+`f` hides the file list, `r` refetches, `?` lists the keys. The wheel scrolls and a
 click moves the cursor; `m` hands the mouse back to the terminal when you want
 to select text the ordinary way. It follows the same live event stream the
 browser does, so edits show up as they land. Reading only for now — comments
