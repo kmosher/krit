@@ -19,6 +19,14 @@ export function useViewed() {
   const viewedFiles = useMemo(() => new Set(viewedList), [viewedList])
 
   const setViewed = useCallback(async (filePath: string, viewed: boolean) => {
+    // Cancel any list load already in flight before touching the cache. A GET
+    // that started before this tick answers with a list that predates it, and
+    // react-query installs that answer over the optimistic write — the
+    // checkbox clears itself a moment after the reviewer set it, with no error
+    // and a PUT that succeeded. The window is every page still loading its
+    // first list, which is exactly when a reviewer is marking files off.
+    await queryClient.cancelQueries({ queryKey: VIEWED_KEY })
+
     // Optimistic update
     queryClient.setQueryData<string[]>(VIEWED_KEY, (prev = []) => {
       if (viewed) {

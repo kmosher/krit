@@ -158,6 +158,44 @@ describe('useViewed', () => {
     expect(result.current.viewedFiles.has('a.rs')).toBe(true)
   })
 
+  it('a list load already in flight cannot undo a tick made while it was outstanding', async () => {
+    // The tick is written into the query cache, so a list load that answers
+    // afterwards installs its own (older) list over it and the checkbox clears
+    // itself with nothing to show for it.
+    //
+    // What is held open here is the *body*, not the response: `fetchViewed`
+    // awaits `res.json()`, so the query stays mid-flight for several microtasks
+    // after the response lands, and a tick in that window is the race. On a
+    // loaded machine that window opens on its own — this test file flaked
+    // exactly here, twice, before anyone went looking — so holding `json` is
+    // only making the ordinary case reproducible.
+    let resolveJson: (paths: string[]) => void = () => {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: { method?: string }) =>
+        init?.method === 'PUT'
+          ? new Promise(() => {}) // held open, like the shared stub
+          : Promise.resolve({
+              json: () => new Promise<string[]>((r) => { resolveJson = r }),
+            }),
+      ),
+    )
+    const { result } = renderHook(() => useViewed(), { wrapper })
+    await act(async () => {})
+    void result.current.setViewed('a.rs', true)
+    await waitFor(() => expect(result.current.viewedFiles.has('a.rs')).toBe(true))
+
+    // The list the server was already assembling arrives, and predates the tick.
+    await act(async () => {
+      resolveJson([])
+      // Long enough for react-query to install the response and re-render.
+      // A microtask or two is not: the clobber lands several ticks later, and
+      // asserting too early passes whether or not the bug is present.
+      await new Promise((r) => setTimeout(r, 20))
+    })
+    expect(result.current.viewedFiles.has('a.rs')).toBe(true)
+  })
+
   it('a server refresh replaces the optimistic list', async () => {
     // Another tab (or the CLI) can mark files viewed; the fetched list is the
     // source of truth once it lands.
