@@ -14,7 +14,7 @@ use crate::comments::{CommentAnchor, CommentLine};
 use crate::compose::Composer;
 use crate::patch::{ChangeKind, LineKind};
 use crate::rows::{
-    MARKER_COLS, Note, Row, comments_in, line_marker, row_window, scroll_to_show, split_half_width,
+    MARKER_COLS, Note, Row, comments_in, line_marker, row_window, split_half_width,
     split_side_prefix, stat_label,
 };
 use crate::text::{display_width, expand_tabs, fit_columns, slice_columns};
@@ -381,17 +381,14 @@ fn file_pane<'a>(app: &App, theme: &Theme, area: Rect) -> (Paragraph<'a>, Rect, 
     let current = app.current_file();
     let text_cols = FILE_PANE_WIDTH.saturating_sub(2) as usize;
     let visible = area.height.saturating_sub(2) as usize;
-    // The same least-movement rule the diff pane scrolls by, fed the start the
-    // last frame reported. Deriving a start from the current file alone can
-    // only pin it to one edge — the previous version pinned it to the *last*
-    // visible row, so no file below the cursor was ever on screen once the
-    // review outgrew the pane.
-    let start = scroll_to_show(
-        app.panes.files_top,
-        visible,
-        current.unwrap_or(0),
-        app.files.len(),
-    );
+    // `App` owns this, and the pane only clamps it. Recomputing it here from
+    // the current file — which is what this did — meant the wheel could not
+    // move the list at all: whatever a scroll set, the next frame put straight
+    // back, so a review with more files than rows had no way to show the rest
+    // short of walking the cursor into them.
+    let start = app
+        .files_offset
+        .min(app.files.len().saturating_sub(visible));
     let rows = Rect {
         x: area.x + 1,
         y: area.y + 1,
@@ -537,6 +534,10 @@ fn render_row<'a>(
                     format!("   renamed from {}", f.old_path.as_deref().unwrap_or("?"))
                 }
                 Note::Binary => "   binary file — not shown".to_string(),
+                Note::Mode => match &f.mode {
+                    Some((from, to)) => format!("   mode {from} → {to}"),
+                    None => "   mode changed".to_string(),
+                },
                 Note::Collapsed => {
                     let n = f.hunks.len();
                     // The comments go with the body, so the note says how many

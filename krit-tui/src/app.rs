@@ -118,6 +118,11 @@ pub enum Action {
     /// `scroll_to_show` from immediately undoing it.
     ScrollViewDown(usize),
     ScrollViewUp(usize),
+    /// The same, for the file list. A separate action because the two panes
+    /// scroll independently — the wheel belongs to whichever one the pointer
+    /// is over, which is the only thing that says which the reviewer meant.
+    ScrollFilesDown(usize),
+    ScrollFilesUp(usize),
     /// Side-by-side, or unified. A preference: on a pane too narrow to carry
     /// two code columns it is remembered and not obeyed.
     ToggleSplit,
@@ -285,6 +290,12 @@ pub struct App {
     /// same predicate, spelled `watcherCount > 0 || agentCount > 0`.
     pub listeners: usize,
     pub should_quit: bool,
+    /// First file drawn in the list. Owned rather than derived from the cursor,
+    /// for the same reason the diff's `offset` is: a position recomputed from
+    /// the cursor every frame cannot be moved by a wheel, because the next
+    /// frame puts it back. The list follows the cursor when the cursor changes
+    /// file, and otherwise stays where it was put.
+    pub files_offset: usize,
     /// The new side of every file, by path, so the space between hunks can be
     /// opened without another request. Bundled in every `/api/diff` response.
     pub file_text: HashMap<String, Vec<String>>,
@@ -344,6 +355,7 @@ impl Default for App {
             tab_size: 4,
             listeners: 0,
             should_quit: false,
+            files_offset: 0,
             file_text: HashMap::new(),
             file_text_refusal: HashMap::new(),
             gaps: HashMap::new(),
@@ -680,6 +692,7 @@ impl App {
     pub fn apply(&mut self, action: Action, viewport: usize) {
         let last = self.rows.len().saturating_sub(1);
         let before = self.cursor;
+        let file_before = self.current_file();
 
         // Wheel scrolling moves the view out from under the cursor on purpose,
         // so it must not fall through to the `scroll_to_show` below — that
@@ -695,6 +708,15 @@ impl App {
             }
             Action::ScrollViewUp(n) => {
                 self.offset = self.offset.saturating_sub(n);
+                return;
+            }
+            Action::ScrollFilesDown(n) => {
+                let max = self.files.len().saturating_sub(self.files_viewport());
+                self.files_offset = (self.files_offset + n).min(max);
+                return;
+            }
+            Action::ScrollFilesUp(n) => {
+                self.files_offset = self.files_offset.saturating_sub(n);
                 return;
             }
             _ => {}
@@ -842,7 +864,10 @@ impl App {
                 self.focus = Focus::Files;
             }
             // Returned above.
-            Action::ScrollViewDown(_) | Action::ScrollViewUp(_) => {}
+            Action::ScrollViewDown(_)
+            | Action::ScrollViewUp(_)
+            | Action::ScrollFilesDown(_)
+            | Action::ScrollFilesUp(_) => {}
             // Handled by the caller, which owns the socket and the terminal.
             // Everything that talks to the server is in that group: `App` is
             // the model, and a model that could post a comment would need to
@@ -857,6 +882,17 @@ impl App {
         }
 
         self.reconcile_selection(action, before);
+        // The file list follows the cursor across a *file* boundary, not on
+        // every movement: within one file there is nothing for it to do, and
+        // doing it anyway would undo a wheel scroll on the next keystroke.
+        if self.current_file() != file_before {
+            self.files_offset = scroll_to_show(
+                self.files_offset,
+                self.files_viewport(),
+                self.current_file().unwrap_or(0),
+                self.files.len(),
+            );
+        }
         // Follow the cursor only when the cursor moved. `?`, `f` and `m` change
         // what is on screen without moving it, and dragging the view back for
         // them threw away a wheel scroll the instant the reviewer pressed
@@ -1163,7 +1199,11 @@ impl App {
         let (col, row) = (event.column, event.row);
         match event.kind {
             // Three lines a notch, the same as most pagers. The wheel is for
-            // reading ahead, so it does not disturb the cursor.
+            // reading ahead, so it does not disturb the cursor — and it scrolls
+            // whichever pane the pointer is over, since that is the only thing
+            // in the gesture that says which one the reviewer meant.
+            MouseEventKind::ScrollDown if self.over_files(col, row) => Action::ScrollFilesDown(3),
+            MouseEventKind::ScrollUp if self.over_files(col, row) => Action::ScrollFilesUp(3),
             MouseEventKind::ScrollDown => Action::ScrollViewDown(3),
             MouseEventKind::ScrollUp => Action::ScrollViewUp(3),
             // Terminals that report horizontal wheels (or shift+wheel) send
@@ -1211,6 +1251,18 @@ impl App {
             }
             _ => Action::None,
         }
+    }
+
+    fn over_files(&self, col: u16, row: u16) -> bool {
+        self.panes
+            .files
+            .is_some_and(|area| contains(area, col, row))
+    }
+
+    /// How many files the list can show, from the last frame. 1 until one has
+    /// been drawn, which only bounds a scroll that cannot have happened yet.
+    fn files_viewport(&self) -> usize {
+        self.panes.files.map_or(1, |a| (a.height as usize).max(1))
     }
 
     fn files_pane_hit(&self, col: u16, row: u16) -> Option<Action> {
@@ -1815,6 +1867,80 @@ mod tests {
             app.rows.len().saturating_sub(5),
             "the redraw left the view at the end"
         );
+    }
+
+    /// An app with more files than the list can show at once.
+    fn many_files() -> App {
+        let mut patch = String::new();
+        for i in 0..40 {
+            patch.push_str(&format!(
+                "diff --git a/f{i:02}.rs b/f{i:02}.rs\n@@ -1 +1 @@\n-old{i}\n+new{i}\n"
+            ));
+        }
+        let mut app = App::default();
+        app.load(&payload(&patch), 20);
+        app.set_panes(Panes {
+            diff: Rect::new(34, 1, 66, 20),
+            diff_top_row: 0,
+            files: Some(Rect::new(1, 2, 32, 10)),
+            files_top: 0,
+        });
+        assert_eq!(app.files.len(), 40);
+        app
+    }
+
+    #[test]
+    fn the_wheel_scrolls_whichever_pane_it_is_over() {
+        // The file list is a scrollable pane; pointing at it and scrolling has
+        // to scroll *it*. Sending both to the diff left a review with more
+        // files than rows no way to show the rest short of walking the cursor
+        // into them.
+        let mut app = many_files();
+        let over_files = mouse(MouseEventKind::ScrollDown, 10, 5);
+        let over_diff = mouse(MouseEventKind::ScrollDown, 60, 5);
+        assert_eq!(app.mouse_action(over_files), Action::ScrollFilesDown(3));
+        assert_eq!(app.mouse_action(over_diff), Action::ScrollViewDown(3));
+
+        let diff_before = app.offset;
+        app.apply(Action::ScrollFilesDown(3), 20);
+        assert_eq!(app.files_offset, 3, "the list moved");
+        assert_eq!(app.offset, diff_before, "and the diff did not");
+    }
+
+    #[test]
+    fn a_scrolled_file_list_stays_put_until_the_cursor_changes_file() {
+        // Same rule as the diff: the wheel is for looking ahead, so nothing but
+        // a move to another file may pull the list back.
+        let mut app = many_files();
+        app.apply(Action::ScrollFilesDown(6), 20);
+        assert_eq!(app.files_offset, 6);
+
+        // Moving within the first file leaves it alone...
+        app.apply(Action::Down(1), 20);
+        assert_eq!(app.files_offset, 6, "still where the wheel put it");
+
+        // ...and stepping to another file brings it back into view.
+        app.apply(Action::NextFile, 20);
+        let current = app.current_file().expect("on a file");
+        assert!(
+            (app.files_offset..app.files_offset + 10).contains(&current),
+            "file {current} outside {}..{}",
+            app.files_offset,
+            app.files_offset + 10
+        );
+    }
+
+    #[test]
+    fn the_file_list_does_not_scroll_past_its_end() {
+        let mut app = many_files();
+        for _ in 0..50 {
+            app.apply(Action::ScrollFilesDown(3), 20);
+        }
+        assert_eq!(app.files_offset, 40 - 10);
+        for _ in 0..50 {
+            app.apply(Action::ScrollFilesUp(3), 20);
+        }
+        assert_eq!(app.files_offset, 0);
     }
 
     #[test]

@@ -77,6 +77,10 @@ pub struct FileDiff {
     pub kind: ChangeKind,
     /// Binary files carry no hunks — git says only that they differ.
     pub binary: bool,
+    /// The executable bit changing, and nothing else. `git diff` reports it as
+    /// a bare `old mode`/`new mode` pair with no hunks, so without this the file
+    /// renders `+0 −0` with nothing anywhere saying why it is in the review.
+    pub mode: Option<(String, String)>,
     pub hunks: Vec<Hunk>,
     /// Counted once, here, because the header and every file row ask for them
     /// and the draw loop runs ten times a second: as methods they walked every
@@ -150,6 +154,7 @@ pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
             old_path: None,
             kind: ChangeKind::Modified,
             binary: false,
+            mode: None,
             hunks: Vec::new(),
             additions: 0,
             deletions: 0,
@@ -157,6 +162,7 @@ pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
 
         // The preamble: mode lines, rename pair, index, ---/+++, and the
         // binary notice. Ends at the first hunk or the next file.
+        let (mut old_mode, mut new_mode) = (None, None);
         while i < lines.len() {
             let l = lines[i];
             if l.starts_with("@@ ") || diff_header_path(l).is_some() {
@@ -170,6 +176,13 @@ pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
                 };
             } else if l.starts_with("deleted file mode") {
                 file.kind = ChangeKind::Deleted;
+            } else if let Some(m) = l.strip_prefix("old mode ") {
+                // Recorded as a pair so the row can show both. `new file mode`
+                // and `deleted file mode` are matched above and do not reach
+                // here — those files have content to explain themselves.
+                old_mode = Some(m.trim().to_string());
+            } else if let Some(m) = l.strip_prefix("new mode ") {
+                new_mode = Some(m.trim().to_string());
             } else if let Some(from) = l.strip_prefix("rename from ") {
                 file.kind = ChangeKind::Renamed;
                 file.old_path = Some(from.to_string());
@@ -203,6 +216,14 @@ pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
             }
         }
 
+        // Only when *both* halves arrived and they differ: git emits the pair
+        // on a rename too, where the modes usually match and the rename is the
+        // story worth telling.
+        if let (Some(from), Some(to)) = (old_mode, new_mode)
+            && from != to
+        {
+            file.mode = Some((from, to));
+        }
         file.tally();
         files.push(file);
     }
@@ -458,5 +479,48 @@ mod tests {
     fn an_empty_patch_is_no_files_rather_than_one_empty_file() {
         assert!(parse_patch("", &[]).is_empty());
         assert!(parse_patch("\n\n", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_mode_only_change_is_kept_because_nothing_else_explains_it() {
+        // `chmod +x` produces this and nothing else — no index line, no hunks.
+        // Dropped, the file renders `+0 −0` and the reviewer has no way to tell
+        // why it is in the review at all.
+        let files = parse_patch(
+            "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755\n",
+            &[],
+        );
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].mode,
+            Some(("100644".to_string(), "100755".to_string()))
+        );
+        assert!(files[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn an_added_file_does_not_report_a_mode_change() {
+        // `new file mode` is matched as the change *kind*; only the `old`/`new`
+        // pair means a mode-only change, and a file with content explains
+        // itself without one.
+        let files = parse_patch(
+            "diff --git a/new.txt b/new.txt\nnew file mode 100644\n@@ -0,0 +1 @@\n+hello",
+            &[],
+        );
+        assert_eq!(files[0].mode, None);
+        assert_eq!(files[0].kind, ChangeKind::Added);
+    }
+
+    #[test]
+    fn a_rename_that_kept_its_mode_says_nothing_about_modes() {
+        // git emits the pair on a rename too. Equal halves are not a change,
+        // and the rename is the story worth telling.
+        let files = parse_patch(
+            "diff --git a/a.txt b/b.txt\nold mode 100644\nnew mode 100644\n\
+             rename from a.txt\nrename to b.txt\n",
+            &[],
+        );
+        assert_eq!(files[0].mode, None);
+        assert_eq!(files[0].kind, ChangeKind::Renamed);
     }
 }

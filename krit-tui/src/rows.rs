@@ -201,6 +201,10 @@ pub enum Note {
     RenamedFrom,
     Binary,
     Collapsed,
+    /// The executable bit changed. Its own note because such a file has no
+    /// hunks at all — without it the header reads `+0 −0` and the reviewer has
+    /// no way to tell why the file is in the review.
+    Mode,
 }
 
 impl Row {
@@ -269,6 +273,12 @@ pub fn build_rows(
             rows.push(Row::Meta {
                 file: fi,
                 note: Note::RenamedFrom,
+            });
+        }
+        if file.mode.is_some() {
+            rows.push(Row::Meta {
+                file: fi,
+                note: Note::Mode,
             });
         }
         if collapsed.contains(&file.path) {
