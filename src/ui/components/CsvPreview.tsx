@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { parseDelimited } from '../utils/csvPreview'
+import { parseDelimited } from '../utils/csvParse'
 import { rangesIntersect } from '../utils/previewFormat'
 
 // Delimited data as a table. The first row is treated as a header — nothing in

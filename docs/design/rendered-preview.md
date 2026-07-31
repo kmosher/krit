@@ -262,36 +262,25 @@ fuzzy matching via `diff-match-patch` degrades badly on short quotes in long
 documents ([client#3919](https://github.com/hypothesis/client/issues/3919)) —
 prefer exact match plus a bounded window before reaching for fuzz.
 
-## Other formats worth fitting in
+## Other formats
 
-Ranked by value over effort. All of them reduce to the same question — does
-the format give us a source position?
+All of these shipped. The plan's argument for each is left out here; what
+survived contact is recorded in "What changed in the building" below.
 
-**`.ipynb` — built.** A notebook diff in raw JSON is
-unreadable, which is why every tool in the space renders cells and why
-[ReviewNB](https://blog.reviewnb.com/commenting-and-discussion-on-jupyter-notebook/)
-exists as a paid product wrapping exactly this gap. Anchoring is
-straightforward with a position-tracking JSON parser: cell index → source line
-range, and markdown cells reuse the entire Markdown path above. Cell outputs
-render as-is; images already have a home in `BinaryFileDiff`.
+- **`.ipynb`** — cells, not JSON. Markdown cells reuse the Markdown path;
+  anchoring goes through a position-tracking JSON parser, because a cell's text
+  is a string literal and escapes make the offsets non-linear.
+- **`.csv` / `.tsv`** — a table whose cells carry their own file offsets.
+- **`.svg`** — rendered inline through an allowlist, anchored off each
+  element's own offsets. GitHub's rich diff covers SVG for the same reason.
+- **Mermaid** — `.mmd` files and fenced ` ```mermaid ` blocks, which is where
+  agents actually put diagrams. Anchoring is the quote tier, not per-node.
+- **Graphviz `.dot`** — the same shape, via a wasm build.
 
-**`.csv` / `.tsv` — built.** Table render, and anchoring is
-*exactly* line/column with no escape wrinkle at all (modulo quoted fields).
-Almost free once the preview scaffolding exists.
+Both diagram engines are lazy-loaded; each is large enough to matter and most
+reviews open neither.
 
-**`.svg` — built.** Rendered inline through an allowlist; anchored off each
-element's own source offsets. GitHub's rich diff covers SVG for the same
-reason.
-
-**Mermaid — built.** Both `.mmd` files and fenced
-` ```mermaid ` blocks inside Markdown, which is where agents actually put
-them. Mermaid emits node ids derived from node names, so per-node anchoring is
-plausible; whole-diagram anchoring is fine for v1. It is a large dependency —
-lazy-load it separately from the Markdown module.
-
-**Graphviz `.dot` — built**, same shape as Mermaid via a wasm build.
-
-Not worth it: **AsciiDoc** and **reStructuredText** (weak or absent JS
+Still not worth it: **AsciiDoc** and **reStructuredText** (weak or absent JS
 tooling, and nothing agent-written targets them); **PDF** (not a thing that
 gets diffed in a repo); **JSON/YAML** (the source diff already reads fine —
 rendering would be strictly worse).
@@ -397,13 +386,10 @@ contract to build everything on.
 
 **The floor heuristic had a hole, and diagrams are what found it.** The
 locate-by-value search starts at the count of rendered characters preceding the
-text node, justified by "markup only ever adds characters, so a source position
-is never earlier than its rendered position". Mermaid emits ~5 kB of generated
-CSS in a `<style>` inside the stamped element — more text than most reviewed
-files contain — which pushed the floor past the end of the source and made
-*every* diagram selection snap to the whole file. `renderedOffsetOf` now skips
-elements whose text is never painted. The same hole was reachable from a
-`<style>` block in a Markdown document's raw HTML; nothing had hit it.
+text node, justified by "markup only ever adds characters". A `<style>` block
+breaks that, and made *every* diagram selection snap to the whole file;
+`renderedOffsetOf` now skips elements whose text is never painted. The same
+hole was reachable from a `<style>` in a Markdown document's raw HTML.
 
 **Inline SVG is markup in this page's origin, so it is rebuilt, not injected.**
 `parse5` was not needed here either: `xmlPositions.ts` parses with offsets, and

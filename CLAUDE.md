@@ -316,8 +316,11 @@ skill together when you do.
   emits carries `"<startOffset>-<endOffset>"` into the *file*, and
   `previewAnchor.ts` needs nothing else — which is why Markdown, `.ipynb` and
   `.csv` share one selection path, one highlight path and one comment path.
-  Adding a format is a renderer plus an entry in `previewFormatFor`; anything
-  that reaches for a second mechanism has taken a wrong turn.
+  Adding a format is a renderer, an entry in `previewFormatFor`, and an entry
+  in `PreviewPane`'s `RENDERERS` table — which is a `Record` keyed by the
+  format, so the type checker is what notices a format with nowhere to render.
+  Anything that reaches for a second *anchoring* mechanism has taken a wrong
+  turn.
   - **A notebook is the one format where a rendered offset is not a file
     offset.** Cell text lives in JSON string literals, and an escape is more
     source characters than decoded ones, so `jsonPositions.ts` keeps a
@@ -339,29 +342,34 @@ skill together when you do.
     reviewing — `buildSvgDom`'s `stampOffsets: false`. One wrapper span is
     enough, because the locate-by-value rule then finds the selected label in
     the diagram's real source and anchors on the line that declared it.
-  - **`renderedOffsetOf` must not count text that never paints.** The search
-    floor is justified by "markup only adds characters", and a `<style>` block
-    breaks that outright: Mermaid puts ~5 kB of generated CSS inside the
-    stamped element, which is more text than most reviewed files hold. Counted,
-    the floor lands past the end of the source, every lookup fails, and every
-    selection snaps to the whole file — a plausible-looking anchor, no error.
-    Reachable from a `<style>` in raw HTML in a Markdown file too.
+  - **`renderedOffsetOf` must not count text that never paints** — a `<style>`
+    block is more generated text than most reviewed files hold, and counting it
+    puts the search floor past the end of the source, so every selection in
+    that element snaps to the whole file with no error. The full argument is on
+    `NON_RENDERED_TEXT` in `previewAnchor.ts`.
   - **Mermaid must be initialized with `htmlLabels: false`.** Its default
     labels are `<foreignObject>`, which the SVG allowlist drops as arbitrary
     HTML — so the diagram renders with every caption missing and nothing says
     why. It also splits each label into one `<tspan>` per word, so a text node
     in the picture is a word, not a caption; that costs nothing, since a word
     still occurs verbatim in the source.
-- **Inline SVG is rebuilt element by element, never `innerHTML`.** It is live
-  markup in this page's origin — `<script>`, `on*`, `<foreignObject>` and any
-  external reference are script or network from a file under review — so
-  `svgPreview.ts` reconstructs an allowlisted tree with `createElementNS`.
-  `innerHTML` would hand the browser the original markup and make the allowlist
-  the only thing standing between a reviewed file and this origin. What the
-  allowlist removed is named on screen, because a picture missing its `<image>`
-  looks exactly like one that never had it. The HTML artifact preview keeps the
-  opaque-origin iframe instead, deliberately: an artifact has to keep its
-  scripts to be worth previewing, an SVG does not.
+- **Inline SVG is rebuilt element by element, never `innerHTML`** — it is live
+  markup in this page's origin, so `svgSanitize.ts` reconstructs an allowlisted
+  tree with `createElementNS` and the reasoning lives there. Three consequences
+  worth knowing from outside that file:
+  - **`<style>` survives only for SVG krit generated itself** (Mermaid's and
+    Graphviz's, which is engine output scoped to the diagram's id). A reviewed
+    file loses it, because CSS cannot be filtered by pattern — escapes make
+    `@import` and `url()` unmatchable as substrings — and an inline `<style>`
+    is not scoped to the picture, so it can restyle krit's own controls.
+  - **The file may not supply its own `data-*`.** The renderer owns `data-src`;
+    a file that stamps itself could point a comment at a range the reviewer
+    never selected.
+  - What the allowlist removed is **named on screen**, because a picture
+    missing its `<image>` looks exactly like one that never had it.
+  The HTML artifact preview keeps the opaque-origin iframe instead,
+  deliberately: an artifact has to keep its scripts to be worth previewing, an
+  SVG does not.
 - **A file-level annotation (`lineNumber: 0`) is how the rendered preview
   replaces a diff**, and three things have to line up or it silently renders
   nothing:

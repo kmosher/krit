@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { parseXml } from './xmlPositions'
-import { buildSvgDom, isSafeStylesheet, safeAttributeValue } from './svgPreview'
+import { buildSvgDom, safeAttributeValue, type BuildOptions } from './svgSanitize'
 
-const build = (src: string, options?: { stampOffsets?: boolean }) => {
+const build = (src: string, options?: BuildOptions) => {
   const tree = parseXml(src)
   if (!tree) throw new Error(`unparseable: ${src}`)
   return buildSvgDom(tree, document, options)
@@ -34,17 +34,6 @@ describe('safeAttributeValue', () => {
   it('leaves ordinary presentation attributes alone', () => {
     expect(safeAttributeValue('stroke-width', '2')).toBe('2')
     expect(safeAttributeValue('transform', 'translate(4, 8)')).toBe('translate(4, 8)')
-  })
-})
-
-describe('isSafeStylesheet', () => {
-  it('rejects a stylesheet that can fetch', () => {
-    expect(isSafeStylesheet('@import url(x.css);')).toBe(false)
-    expect(isSafeStylesheet('.a { background: url(http://x/y.png) }')).toBe(false)
-  })
-
-  it('keeps one that only styles', () => {
-    expect(isSafeStylesheet('.node { fill: #eee; stroke: black }')).toBe(true)
   })
 })
 
@@ -94,15 +83,59 @@ describe('buildSvgDom', () => {
     expect(root!.querySelector('text')!.getAttribute('data-src')).toBeNull()
   })
 
-  it('keeps a stylesheet that only styles and drops one that reaches out', () => {
-    const kept = build('<svg><style>.a { fill: red }</style></svg>')
-    expect(kept.root!.querySelector('style')!.textContent).toContain('fill: red')
-    const dropped = build('<svg><style>@import url(evil.css);</style></svg>')
-    expect(dropped.root!.querySelector('style')!.textContent).toBe('')
-  })
-
   it('refuses a document whose root is not an svg', () => {
     expect(build('<html><body/></html>').root).toBeNull()
+  })
+
+  it('renders a namespace-prefixed document instead of calling it malformed', () => {
+    const { root } = build('<svg:svg xmlns:svg="http://www.w3.org/2000/svg"><svg:rect/></svg:svg>')
+    expect(root).not.toBeNull()
+    expect(root!.querySelector('rect')).not.toBeNull()
+  })
+
+  it('drops a stylesheet from a reviewed file, and says it did', () => {
+    // CSS cannot be filtered by pattern and an inline <style> is not scoped to
+    // the picture — see `allowStylesheets`.
+    const { root, removed } = build('<svg><style>.a{fill:red}</style><rect/></svg>')
+    expect(root!.querySelector('style')).toBeNull()
+    expect(removed).toContain('style')
+  })
+
+  it('keeps the stylesheet a diagram engine generated', () => {
+    const { root } = build('<svg><style>.a{fill:red}</style><rect/></svg>', {
+      allowStylesheets: true,
+    })
+    expect(root!.querySelector('style')!.textContent).toContain('fill: red'.replace(' ', ''))
+  })
+
+  it('never lets the file supply its own data-src or data-changed', () => {
+    // The anchoring contract is that the renderer owns the stamp. A file that
+    // stamps itself could point a comment at a range nobody selected.
+    const src = '<svg data-src="9999-9999"><title data-src="1-2">t</title><rect data-changed="true" data-src="7-7"/></svg>'
+    for (const stampOffsets of [true, false]) {
+      const { root } = build(src, { stampOffsets })
+      expect(root!.querySelector('title')!.getAttribute('data-src')).toBeNull()
+      const rect = root!.querySelector('rect')!
+      expect(rect.getAttribute('data-changed')).toBeNull()
+      if (stampOffsets) {
+        // The renderer's own stamp, which slices back to the element itself —
+        // not the `7-7` the file asked for.
+        expect(src.slice(...spanOf(rect))).toBe('<rect data-changed="true" data-src="7-7"/>')
+      } else {
+        expect(rect.getAttribute('data-src')).toBeNull()
+      }
+    }
+  })
+
+  it('drops xml:base, which would re-point every fragment reference', () => {
+    expect(safeAttributeValue('xml:base', 'https://evil.example/')).toBeNull()
+    const { root } = build('<svg xml:base="https://evil.example/"><use href="#a"/></svg>')
+    expect(root!.getAttribute('xml:base')).toBeNull()
+  })
+
+  it('gates a reference bound to a non-xlink prefix the same way', () => {
+    expect(safeAttributeValue('xl:href', 'https://evil.example/x.svg')).toBeNull()
+    expect(safeAttributeValue('XLINK:HREF', '#frag')).toBe('#frag')
   })
 })
 

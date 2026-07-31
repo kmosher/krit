@@ -5,8 +5,8 @@
 // whole point: `previewAnchor.ts` anchors a comment by reading a `data-src`
 // stamp off the element a selection landed in. It also hands back a live tree
 // that would have to be adopted into the page, which is exactly the thing the
-// renderer avoids doing — see `SvgPreview`, which builds React elements from
-// this tree through an allowlist instead.
+// renderer avoids doing — see `svgSanitize.ts`, which rebuilds the tree
+// imperatively with `createElementNS` through an allowlist instead.
 
 export interface XmlElement {
   kind: 'element'
@@ -157,7 +157,12 @@ function decodeEntities(text: string): string {
         body[1] === 'x' || body[1] === 'X'
           ? parseInt(body.slice(2), 16)
           : parseInt(body.slice(1), 10)
-      return Number.isFinite(code) ? String.fromCodePoint(code) : whole
+      // Range-checked, not just finite: `String.fromCodePoint` throws a
+      // RangeError above U+10FFFF, and `parseXml` runs inside a `useMemo`
+      // during render, so `&#xFFFFFFF;` in a reviewed file would take the page
+      // down instead of showing the not-well-formed message.
+      const inRange = Number.isInteger(code) && code >= 0 && code <= 0x10ffff
+      return inRange ? String.fromCodePoint(code) : whole
     }
     const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
     return named[body] ?? whole

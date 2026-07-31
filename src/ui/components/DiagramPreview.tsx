@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { parseXml } from '../utils/xmlPositions'
-import { buildSvgDom, isSvgRoot } from '../utils/svgPreview'
+import { buildSvgDom, isSvgRoot } from '../utils/svgSanitize'
 
 // A diagram rendered from text — Mermaid, Graphviz — as a commentable surface.
 //
@@ -31,16 +31,19 @@ interface Props {
 export function DiagramPreview({ source, span, changed, render, label, className }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const [error, setError] = useState<string | null>(null)
+  // Distinguishes two panes from each other; the span distinguishes two
+  // diagrams within one document. Both are needed — two whole-file diagrams
+  // have the same span (`0..length`) whenever the files are the same length,
+  // and Mermaid keys its gradient and marker defs on this id, so a collision
+  // makes the second to mount silently repaint the first.
+  const instanceId = useId().replace(/:/g, '')
 
   useEffect(() => {
     let cancelled = false
+    setError(null)
     const host = hostRef.current
     if (!host) return
-    setError(null)
-    // The id has to be unique per render: Mermaid keys internal defs on it, so
-    // two diagrams sharing one id share gradient and marker definitions, and
-    // the second to mount silently repaints the first.
-    const id = `krit-diagram-${span.start}-${span.end}`
+    const id = `krit-diagram-${instanceId}-${span.start}-${span.end}`
     render(source, id)
       .then((markup) => {
         if (cancelled) return
@@ -49,7 +52,13 @@ export function DiagramPreview({ source, span, changed, render, label, className
           setError(`${label} produced output krit could not read as SVG.`)
           return
         }
-        const { root } = buildSvgDom(tree, host.ownerDocument, { stampOffsets: false })
+        const { root } = buildSvgDom(tree, host.ownerDocument, {
+          stampOffsets: false,
+          // The engine's own stylesheet, scoped to the id above — not markup
+          // from the file under review, which is why a `.svg` file's is not
+          // allowed through the same call.
+          allowStylesheets: true,
+        })
         host.replaceChildren()
         if (root) host.appendChild(root)
       })
@@ -60,29 +69,29 @@ export function DiagramPreview({ source, span, changed, render, label, className
       cancelled = true
       host.replaceChildren()
     }
-  }, [source, span.start, span.end, render, label])
+  }, [source, span.start, span.end, render, label, instanceId])
 
-  if (error) {
-    // The source, not an apology: a diagram that won't draw is usually a
-    // diagram with a syntax error, and the reader still needs to comment on
-    // the line that has it.
-    return (
-      <div className={`diagram-preview ${className ?? ''}`}>
-        <p className="diagram-preview-error">{error}</p>
-        <pre data-src={`${span.start}-${span.end}`} data-changed={changed ? 'true' : undefined}>
-          {source}
-        </pre>
-      </div>
-    )
-  }
-
+  // One tree for both states, because the canvas must keep its ref even while
+  // the error is showing: rendering an error-only branch leaves `hostRef`
+  // null, the next effect run returns at the host lookup before it can clear
+  // the error, and the diagram never comes back. Fixing a syntax error and
+  // saving — the loop live refresh exists for — is exactly when that bites.
   return (
     <div
       className={`diagram-preview ${className ?? ''}`}
       data-src={`${span.start}-${span.end}`}
       data-changed={changed ? 'true' : undefined}
     >
-      <div className="diagram-preview-canvas" ref={hostRef} />
+      {/* The source, not an apology: a diagram that won't draw is usually a
+          diagram with a syntax error, and the reader still needs to comment on
+          the line that has it. */}
+      {error && (
+        <>
+          <p className="diagram-preview-error">{error}</p>
+          <pre>{source}</pre>
+        </>
+      )}
+      <div className="diagram-preview-canvas" ref={hostRef} hidden={error != null} />
     </div>
   )
 }

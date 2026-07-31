@@ -35,7 +35,11 @@ export function parseDelimited(source: string, delimiter: string): CsvRow[] {
   let fieldPending = false
 
   const endRow = () => {
-    rows.push({ cells, startLine: rowStartLine, endLine: line })
+    // A blank line is a separator, not a row of one empty field — rendered as
+    // a row it is a ragged one-column `<tr>` that breaks the table's alignment
+    // for everything below it.
+    const blank = cells.length === 1 && cells[0].text === '' && cells[0].start === cells[0].end
+    if (!blank) rows.push({ cells, startLine: rowStartLine, endLine: line })
     cells = []
   }
 
@@ -67,14 +71,20 @@ export function parseDelimited(source: string, delimiter: string): CsvRow[] {
         text += source[i]
         i++
       }
-    } else {
-      while (i < source.length && source[i] !== delimiter && source[i] !== '\n') {
-        text += source[i]
-        i++
-      }
-      // A CRLF file would otherwise carry the CR into the last field of a row.
-      if (text.endsWith('\r')) text = text.slice(0, -1)
     }
+    // Runs to the terminator for both field kinds. For an unquoted field that
+    // is the whole field; for a quoted one it picks up anything written after
+    // the closing quote — malformed, but real, and keeping it here rather than
+    // in a branch of its own is what stops the terminator being consumed
+    // twice. It was consumed twice, and every CRLF row whose last field was
+    // quoted gained an empty trailing cell.
+    while (i < source.length && source[i] !== delimiter && source[i] !== '\n') {
+      text += source[i]
+      i++
+    }
+    // CR before the row's newline is line separator, not data — true of the
+    // last field of every CRLF row, quoted or not.
+    if (source[i] === '\n' && text.endsWith('\r')) text = text.slice(0, -1)
     cells.push({ text, start, end: i })
 
     if (i < source.length && source[i] === delimiter) {
@@ -92,17 +102,8 @@ export function parseDelimited(source: string, delimiter: string): CsvRow[] {
       if (i === source.length) break
       continue
     }
-    if (i >= source.length) {
-      endRow()
-      break
-    }
-    // A quoted field followed by stray text before the delimiter: consume it
-    // into the same cell rather than losing it.
-    while (i < source.length && source[i] !== delimiter && source[i] !== '\n') {
-      text += source[i]
-      i++
-    }
-    cells[cells.length - 1] = { text, start, end: i }
+    endRow()
+    break
   }
 
   return rows

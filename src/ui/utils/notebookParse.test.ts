@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseNotebook, toFileOffset } from './notebookPreview'
+import { parseNotebook, toFileOffset } from './notebookParse'
 
 const NOTEBOOK = JSON.stringify(
   {

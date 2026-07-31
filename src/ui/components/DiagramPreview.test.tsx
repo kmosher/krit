@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
 import { DiagramPreview } from './DiagramPreview'
-import { buildLineIndex, lineColToOffset, previewRangeToAnchor } from '../utils/previewAnchor'
+import { buildLineIndex, previewRangeToAnchor } from '../utils/previewAnchor'
+import { anchorForSelection, textNode } from '../utils/previewTestHelpers'
 
 // Mermaid and Graphviz both need real layout to draw, so neither engine runs
 // here. What these cover is the part that is ours: the wrapper's stamp, the
@@ -22,20 +23,6 @@ const LABELS_SVG =
   '<g><text>Worker pool</text></g>' +
   '</svg>'
 
-function textNode(root: Node, value: string): Text {
-  const walk = (n: Node): Text | null => {
-    if (n.nodeType === 3 && n.nodeValue === value) return n as Text
-    for (let c = n.firstChild; c; c = c.nextSibling) {
-      const hit = walk(c)
-      if (hit) return hit
-    }
-    return null
-  }
-  const found = walk(root)
-  if (!found) throw new Error(`no text node ${JSON.stringify(value)}`)
-  return found
-}
-
 describe('DiagramPreview', () => {
   it('anchors a label selected in the picture to the line that declared it', async () => {
     const { container } = render(
@@ -49,18 +36,14 @@ describe('DiagramPreview', () => {
     await waitFor(() => expect(container.querySelector('text')).not.toBeNull())
 
     const root = container.querySelector('.diagram-preview')!
-    const node = textNode(root, 'Worker pool')
-    const range = document.createRange()
-    range.setStart(node, 0)
-    range.setEnd(node, 11)
-    const anchor = previewRangeToAnchor(range, root, SOURCE, buildLineIndex(SOURCE))!
-    const starts = buildLineIndex(SOURCE)
-    expect(
-      SOURCE.slice(
-        lineColToOffset(starts, anchor.startLine, anchor.startColumn),
-        lineColToOffset(starts, anchor.endLine, anchor.endColumn),
-      ),
-    ).toBe('Worker pool')
+    const { anchor, slice } = anchorForSelection(
+      root,
+      textNode(root, 'Worker pool'),
+      0,
+      11,
+      SOURCE,
+    )
+    expect(slice).toBe('Worker pool')
     expect(anchor.startLine).toBe(2)
   })
 
@@ -84,11 +67,7 @@ describe('DiagramPreview', () => {
     await waitFor(() => expect(container.querySelector('text')).not.toBeNull())
 
     const root = container.querySelector('.diagram-preview')!
-    const node = textNode(root, 'Worker pool')
-    const range = document.createRange()
-    range.setStart(node, 0)
-    range.setEnd(node, 11)
-    const anchor = previewRangeToAnchor(range, root, SOURCE, buildLineIndex(SOURCE))!
+    const { anchor } = anchorForSelection(root, textNode(root, 'Worker pool'), 0, 11, SOURCE)
     expect(anchor.startLine).toBe(2)
     expect(anchor.endLine).toBe(2)
   })
@@ -147,7 +126,57 @@ describe('DiagramPreview', () => {
     )
     const pre = container.querySelector('pre')!
     expect(pre.textContent).toBe(SOURCE)
-    expect(pre.getAttribute('data-src')).toBe(`0-${SOURCE.length}`)
+    // The wrapper carries the span in both states, so the shown source is
+    // still anchorable — a reviewer can comment on the line that failed.
+    expect(pre.closest('[data-src]')!.getAttribute('data-src')).toBe(`0-${SOURCE.length}`)
+  })
+
+  it('draws again once the source that failed is fixed', async () => {
+    // The error branch used to render without the canvas, so hostRef went null
+    // and every later effect run bailed before it could clear the error — the
+    // diagram never returned for the life of the mount, which is precisely the
+    // save-and-retry loop live refresh exists for.
+    const failing = () => Promise.reject(new Error('Parse error on line 2'))
+    const { container, rerender } = render(
+      <DiagramPreview
+        source={SOURCE}
+        span={{ start: 0, end: SOURCE.length }}
+        render={failing}
+        label="Mermaid"
+      />,
+    )
+    await waitFor(() => expect(container.querySelector('.diagram-preview-error')).not.toBeNull())
+
+    const fixed = `${SOURCE}  C --> D\n`
+    rerender(
+      <DiagramPreview
+        source={fixed}
+        span={{ start: 0, end: fixed.length }}
+        render={drawn(LABELS_SVG)}
+        label="Mermaid"
+      />,
+    )
+    await waitFor(() => expect(container.querySelector('text')).not.toBeNull())
+    expect(container.querySelector('.diagram-preview-error')).toBeNull()
+  })
+
+  it('gives two diagrams of the same length different ids', async () => {
+    // Mermaid keys its gradient and marker defs on the id, so a collision has
+    // the second mount silently repaint the first.
+    const seen: string[] = []
+    const capture = (_src: string, id: string) => {
+      seen.push(id)
+      return Promise.resolve(LABELS_SVG)
+    }
+    const props = { source: SOURCE, span: { start: 0, end: SOURCE.length }, label: 'Mermaid' }
+    render(
+      <>
+        <DiagramPreview {...props} render={capture} />
+        <DiagramPreview {...props} render={capture} />
+      </>,
+    )
+    await waitFor(() => expect(seen.length).toBe(2))
+    expect(seen[0]).not.toBe(seen[1])
   })
 
   it('reports output it cannot read rather than rendering an empty box', async () => {
