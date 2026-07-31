@@ -102,8 +102,9 @@ impl Settings {
 pub enum ServerEvent {
     /// The diff may have changed. Deliberately not "which file": the TUI
     /// refetches the whole diff, so several of these collapse into one
-    /// request — see `QUIET` and `refetch_at` in `main.rs`, which own the
-    /// quiet window.
+    /// request — see `Refetch` in `main.rs`, which owns the quiet window, and
+    /// `MAX_REFETCH_WAIT`, which is what stops a stream that never goes quiet
+    /// from postponing the refetch forever.
     Changed,
     /// A comment was added, edited, resolved, re-anchored, or replied to. Like
     /// `Changed`, it names no id: the viewer refetches the list, which is one
@@ -111,7 +112,7 @@ pub enum ServerEvent {
     CommentsChanged,
     /// Who else is on this review. The count is what gates Done reviewing —
     /// finishing with nobody listening posts a `submitted` nothing receives.
-    Watchers {
+    Listeners {
         count: usize,
     },
     Submitted {
@@ -140,10 +141,12 @@ pub enum Incoming {
     /// makes it visible is driven by the server's own broadcast, not by this.
     Done {
         result: Box<Result<String, String>>,
-        /// Whether this came out of the open composer, so a failure can leave
-        /// the form up with the reviewer's text still in it — and an unrelated
-        /// write finishing cannot close a form it has nothing to do with.
-        composed: bool,
+        /// Which composer sent this, if one did — so a failure can leave that
+        /// form up with the reviewer's text still in it, and an answer meant
+        /// for a form the reviewer has already left cannot close the one they
+        /// are typing in now. `None` for a write with no form behind it
+        /// (resolve, post-queued).
+        composer: Option<u64>,
     },
 }
 
@@ -667,15 +670,6 @@ impl Write {
         }
     }
 
-    /// Whether this write came out of the composer — that is, whether there is
-    /// text on screen that has to survive a failure.
-    fn composed(&self) -> bool {
-        matches!(
-            self,
-            Write::Comment { .. } | Write::Reply { .. } | Write::Submit { .. }
-        )
-    }
-
     /// What to say in the strip when it worked.
     fn note(&self, response: &Value) -> String {
         match self {
@@ -701,24 +695,25 @@ impl Write {
 /// write — and putting them behind the fetcher would make posting a comment
 /// wait out whatever `git diff` was doing. Two writes racing is two things the
 /// reviewer asked for, and the server orders them.
-pub fn spawn_write(base: String, write: Write, tx: Sender<Incoming>) {
+pub fn spawn_write(base: String, write: Write, composer: Option<u64>, tx: Sender<Incoming>) {
     std::thread::spawn(move || {
-        let composed = write.composed();
         let _ = tx.send(Incoming::Done {
             result: Box::new(send(&base, &write)),
-            composed,
+            composer,
         });
     });
 }
 
 fn send(base: &str, write: &Write) -> Result<String, String> {
     let (url, payload) = write.request(base);
-    let request = agent(REQUEST_TIMEOUT).post(&url);
-    // PUT and POST are not interchangeable here; the status route is a PUT.
-    let response = match write {
-        Write::Status { .. } => agent(REQUEST_TIMEOUT).put(&url).send_json(payload),
-        _ => request.send_json(payload),
+    // The verb is decided here rather than by amending a request already built
+    // as a POST: the status route is a PUT, and two of these are not
+    // interchangeable.
+    let request = match write {
+        Write::Status { .. } => agent(REQUEST_TIMEOUT).put(&url),
+        _ => agent(REQUEST_TIMEOUT).post(&url),
     };
+    let response = request.send_json(payload);
     match response {
         Ok(res) => {
             let value: Value = res.into_json().unwrap_or(Value::Null);
@@ -789,7 +784,7 @@ fn classify(value: &Value) -> Option<ServerEvent> {
         // viewer is one of them), while `state` separates them from agents.
         // Done reviewing needs *someone listening on the agent side*, which
         // only `state` can answer.
-        "state" => Some(ServerEvent::Watchers {
+        "state" => Some(ServerEvent::Listeners {
             count: (value["watcherCount"].as_u64().unwrap_or(0)
                 + value["agentCount"].as_u64().unwrap_or(0)) as usize,
         }),
@@ -990,7 +985,7 @@ mod tests {
             frames(
                 "data: {\"type\":\"state\",\"watcherCount\":1,\"uiCount\":3,\"agentCount\":2}\n\n"
             ),
-            vec![ServerEvent::Watchers { count: 3 }],
+            vec![ServerEvent::Listeners { count: 3 }],
             "watchers plus agents, and never the UI count — this client is one"
         );
         assert!(frames("data: {\"type\":\"clients\",\"browsers\":2}\n\n").is_empty());
@@ -1088,7 +1083,7 @@ mod tests {
                     ui_count: 1,
                     agent_count: 1,
                 },
-                Some(ServerEvent::Watchers { count: 2 }),
+                Some(ServerEvent::Listeners { count: 2 }),
             ),
             (Event::Clients { browsers: 1 }, None),
             (

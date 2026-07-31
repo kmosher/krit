@@ -147,9 +147,23 @@ fn header<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
         1 => "  1 comment".to_string(),
         n => format!("  {n} comments"),
     };
-    let queued = match app.comments.iter().filter(|c| c.status == "queued").count() {
-        0 => String::new(),
-        n => format!(" ({n} queued)"),
+    // Two counts, because the header's number would otherwise be a promise the
+    // screen does not keep: a comment on a file this range no longer carries is
+    // in `app.comments` and in no row, so `}` steps past it and nothing says it
+    // is there. Saying how many is the least that keeps the two honest.
+    let mut aside = Vec::new();
+    match app.comments.iter().filter(|c| c.status == "queued").count() {
+        0 => {}
+        n => aside.push(format!("{n} queued")),
+    }
+    match app.comment_rows.elsewhere {
+        0 => {}
+        n => aside.push(format!("{n} elsewhere")),
+    }
+    let aside = if aside.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", aside.join(", "))
     };
     let text = format!(
         " krit  {}  {}{}   {} file{}  +{} −{}{}{}",
@@ -161,7 +175,7 @@ fn header<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
         adds,
         dels,
         comments,
-        queued,
+        aside,
     );
     Paragraph::new(Line::from(Span::styled(
         text,
@@ -213,13 +227,33 @@ fn footer<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     Paragraph::new(Line::from(Span::styled(text, style)))
 }
 
+/// Everything in the composer pane that is not the reviewer's text: two border
+/// rows and the line of keys under it. Named because four places subtract it —
+/// the height, the pane, the scroll window and `run`'s key handler — and a
+/// chrome row added without finding all four draws the caret one row off, which
+/// is a picture rather than an error.
+const COMPOSE_CHROME_ROWS: u16 = 3;
+/// The composer's left and right border columns, subtracted to get the width
+/// text wraps to. The same width has to be used to draw and to move the caret,
+/// or up and down land somewhere the reviewer did not put them.
+const COMPOSE_BORDER_COLS: u16 = 2;
+
 /// Rows the composer needs: its border, what it holds, and a line for the
 /// keys — but never more than half the pane, since the point of putting it
 /// below the diff is that the diff stays readable.
 fn compose_height(composer: &Composer, area: Rect) -> u16 {
-    let text_width = area.width.saturating_sub(2).max(1) as usize;
+    let text_width = compose_text_width(area);
     let wrapped = composer.editor.layout(text_width).0.len() as u16;
-    (wrapped + 3).clamp(5, (area.height / 2).max(5))
+    // The trailing `max` is not a second floor: it stops `clamp` from panicking
+    // when the computed ceiling falls below the floor, which any diff pane
+    // under ten rows produces. A panic here wrecks the terminal — the panic
+    // path is what restores it — so this is load-bearing rather than redundant.
+    (wrapped + COMPOSE_CHROME_ROWS).clamp(5, (area.height / 2).max(5))
+}
+
+/// The width the composer's text wraps to inside `area`.
+pub fn compose_text_width(area: Rect) -> usize {
+    area.width.saturating_sub(COMPOSE_BORDER_COLS).max(1) as usize
 }
 
 /// The form, and where the terminal's own caret goes.
@@ -233,9 +267,9 @@ fn compose_pane<'a>(
     area: Rect,
     enhanced: bool,
 ) -> (Paragraph<'a>, (u16, u16)) {
-    let text_width = area.width.saturating_sub(2).max(1) as usize;
+    let text_width = compose_text_width(area);
     let (mut lines, (caret_row, caret_col)) = composer.editor.layout(text_width);
-    let visible = area.height.saturating_sub(3) as usize;
+    let visible = area.height.saturating_sub(COMPOSE_CHROME_ROWS) as usize;
     // Scroll the buffer, not the caret: a comment longer than the pane still
     // has to be typeable, and the line being typed is the one to keep.
     let top = caret_row.saturating_sub(visible.saturating_sub(1));
@@ -292,6 +326,12 @@ fn compose_pane<'a>(
 ///
 /// The selected text itself for a short character range, because that is the
 /// thing being asked about and it fits; the line count otherwise.
+/// Longest selected text quoted back in a label, in **display cells** — this
+/// one shares a footer with the key hints, so what matters is the space it
+/// takes rather than how many characters it is. Past it the label says
+/// "(part)". `main::TITLE_CHARS` is a different budget in a different unit.
+const QUOTED_LABEL_CELLS: usize = 40;
+
 pub fn selection_label(anchor: &CommentAnchor) -> String {
     let lines = (anchor.end_line - anchor.start_line + 1) as usize;
     let where_ = if lines == 1 {
@@ -303,7 +343,9 @@ pub fn selection_label(anchor: &CommentAnchor) -> String {
         )
     };
     match &anchor.columns {
-        Some((_, _, text)) if lines == 1 && display_width(text) <= 40 && !text.is_empty() => {
+        Some((_, _, text))
+            if lines == 1 && display_width(text) <= QUOTED_LABEL_CELLS && !text.is_empty() =>
+        {
             format!("{where_}  “{text}”")
         }
         Some(_) => format!("{where_}  (part)"),
@@ -461,6 +503,12 @@ fn render_row<'a>(
         Row::Comment {
             comment, line: at, ..
         } => {
+            // Unreachable while the two agree: `build_rows` emits exactly
+            // `comment_rows.height(comment)` of these, from the same layout
+            // this reads. A miss therefore means they have drifted, and a blank
+            // row keeps the scroll arithmetic — which counts rows, not
+            // comments — intact rather than panicking mid-frame and taking the
+            // terminal's cooked mode with it.
             let Some(line) = app.comment_rows.line(comment, at) else {
                 return Line::from(Span::styled(
                     fit_columns("", pane_width),
@@ -1119,6 +1167,21 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_on_a_file_outside_the_review_is_counted_in_the_header() {
+        // It occupies no row — there is no file to hang it off — so the header
+        // is the only place it can be said to exist. The total counts it either
+        // way, and a number nothing on screen accounts for is what sends a
+        // reviewer hunting for a comment that is not there.
+        let mut app = app();
+        let mut gone = comment(3, "on a file this range dropped");
+        gone.file_path = "vanished.rs".into();
+        app.set_comments(vec![comment(12, "here"), gone], 10);
+        let header = render(&app, 100, 20)[0].clone();
+        assert!(header.contains("2 comments"), "{header:?}");
+        assert!(header.contains("(1 elsewhere)"), "{header:?}");
+    }
+
+    #[test]
     fn folding_a_file_says_how_much_conversation_went_with_it() {
         let mut app = app();
         app.set_comments(vec![comment(12, "a note")], 10);
@@ -1152,7 +1215,17 @@ mod tests {
 
         let (screen, panes) = render_with_panes(&app, 100, 20);
         assert!(panes.diff.height < before.diff.height, "the diff shrank");
-        assert!(app.set_panes(panes) || app.cursor >= app.offset);
+        // The claim the comment above makes, asserted directly: after the loop
+        // reconciles the smaller pane, the cursor is inside it. Written as a
+        // disjunction with `set_panes`'s return value it could not fail for
+        // that reason — the invalidated flag satisfied it on its own.
+        app.set_panes(panes);
+        let visible = app.offset..app.offset + panes.diff.height as usize;
+        assert!(
+            visible.contains(&app.cursor),
+            "cursor {} outside {visible:?}",
+            app.cursor
+        );
         let all = screen.join("\n");
         assert!(all.contains("this name is doing two jobs"), "{all}");
         assert!(all.contains("ctrl-s post"), "{all}");

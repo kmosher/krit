@@ -73,7 +73,8 @@ pub enum Anchor {
     File { file: usize },
     /// The file itself is not in this review — an agent deleted it, or the
     /// range moved. Nothing to attach to, so these are counted rather than
-    /// placed.
+    /// placed, and the header reports the count beside the total. Silently
+    /// dropping them would make the header's number unreachable by any key.
     Elsewhere,
 }
 
@@ -84,7 +85,10 @@ pub struct CommentRows {
     blocks: Vec<Vec<CommentLine>>,
     at_line: HashMap<(usize, usize, usize), Vec<usize>>,
     at_file: HashMap<usize, Vec<usize>>,
-    /// How many comments anchor to a file this review does not contain.
+    /// How many comments anchor to a file this review does not contain, and so
+    /// occupy no row. Reported in the header next to the total, which counts
+    /// them: without it the two numbers disagree and the difference is
+    /// reachable by no key.
     pub elsewhere: usize,
 }
 
@@ -141,15 +145,23 @@ pub fn layout(comments: &[ReviewComment], files: &[FileDiff], width: usize) -> C
 struct LineIndex {
     /// (file, side-is-additions, line number) → (hunk, line)
     lines: HashMap<(usize, bool, u32), (usize, usize)>,
-    paths: HashMap<String, usize>,
+    /// Path → every file index carrying it, in patch order. Not one index: the
+    /// server concatenates `git diff` and `git diff --staged` (both are on by
+    /// default), so a file edited in the index *and* the working tree arrives
+    /// as two `diff --git` headers under one path. Keeping only the last meant
+    /// every comment on such a file resolved against the staged section — one
+    /// made on an unstaged line either fell out of the diff entirely or, worse,
+    /// matched a line number that exists on both and attached to code the
+    /// reviewer never pointed at.
+    paths: HashMap<String, Vec<usize>>,
 }
 
 impl LineIndex {
     fn build(files: &[FileDiff]) -> Self {
         let mut lines = HashMap::new();
-        let mut paths = HashMap::new();
+        let mut paths: HashMap<String, Vec<usize>> = HashMap::new();
         for (fi, file) in files.iter().enumerate() {
-            paths.insert(file.path.clone(), fi);
+            paths.entry(file.path.clone()).or_default().push(fi);
             for (hi, hunk) in file.hunks.iter().enumerate() {
                 for (li, line) in hunk.lines.iter().enumerate() {
                     if let Some(n) = line.new_line {
@@ -165,23 +177,34 @@ impl LineIndex {
     }
 
     fn anchor(&self, comment: &ReviewComment) -> Anchor {
-        let Some(&file) = self.paths.get(&comment.file_path) else {
+        let Some(candidates) = self.paths.get(&comment.file_path) else {
             return Anchor::Elsewhere;
         };
         // The *last* anchored line, so a multi-line comment sits under the
         // range it covers rather than in the middle of it.
         let additions = comment.side != "deletions";
-        let line = comment.end_line_or_start();
-        match self.lines.get(&(file, additions, line)) {
-            Some(&(hunk, line)) => Anchor::Line { file, hunk, line },
-            None => Anchor::File { file },
+        let at = comment.end_line_or_start();
+        // Whichever section of the patch actually carries the line, rather than
+        // whichever one the path happened to name last.
+        for &file in candidates {
+            if let Some(&(hunk, line)) = self.lines.get(&(file, additions, at)) {
+                return Anchor::Line { file, hunk, line };
+            }
+        }
+        match candidates.first() {
+            Some(&file) => Anchor::File { file },
+            None => Anchor::Elsewhere,
         }
     }
 }
 
 /// The rail every comment line hangs off, so a block reads as an annotation
-/// rather than as more diff. Two cells of indent puts it clear of the `+`/`-`
-/// column without losing the code's alignment.
+/// rather than as more diff.
+///
+/// Three cells of indent, which is a shape rather than an alignment: the change
+/// marker sits at `gutter * 2 + 2` and the gutter grows with the file's line
+/// count, so nothing fixed can line up with it. Indented enough to read as
+/// hanging off the code, short enough to leave the body room in a narrow pane.
 const HEAD_RAIL: &str = "   ┌ ";
 const BODY_RAIL: &str = "   │ ";
 
@@ -276,6 +299,43 @@ mod tests {
                          -was\n\
                          +is\n\
                          +also";
+
+    /// The same file twice, which is what `git diff` and `git diff --staged`
+    /// concatenated look like when a file is edited in both.
+    const TWICE: &str = "diff --git a/a.rs b/a.rs\n\
+                         @@ -10,2 +10,3 @@\n\
+                         \x20keep\n\
+                         -was\n\
+                         +is\n\
+                         +also\n\
+                         diff --git a/a.rs b/a.rs\n\
+                         @@ -50,1 +50,2 @@\n\
+                         \x20ctx\n\
+                         +staged";
+
+    #[test]
+    fn a_file_in_the_patch_twice_anchors_each_comment_in_its_own_section() {
+        let files = parse_patch(TWICE, &[]);
+        assert_eq!(files.len(), 2, "two sections, one path");
+        let index = LineIndex::build(&files);
+
+        // Line 12 lives only in the first section, 51 only in the second.
+        // Keyed on the path alone, both resolved against whichever section came
+        // last and one of them silently lost its line.
+        assert!(matches!(
+            index.anchor(&comment(12, "unstaged")),
+            Anchor::Line { file: 0, .. }
+        ));
+        assert!(matches!(
+            index.anchor(&comment(51, "staged")),
+            Anchor::Line { file: 1, .. }
+        ));
+        // A line in neither still lands under a header rather than nowhere.
+        assert_eq!(
+            index.anchor(&comment(900, "gone")),
+            Anchor::File { file: 0 }
+        );
+    }
 
     fn comment(line: u32, body: &str) -> ReviewComment {
         ReviewComment {

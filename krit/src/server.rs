@@ -1124,6 +1124,17 @@ async fn api_comment_put(
         state.hub.broadcast(Event::CommentAdded {
             comment: updated.clone(),
         });
+    } else if new_status.is_some() || payload["body"].is_string() {
+        // Everything else this route does — an agent resolving, a reviewer
+        // reopening, a queued body rewritten — announced nothing at all, so a
+        // client that only listens showed the other one's work as nothing
+        // happening. The browser hides that behind `useComments`'s poll; the
+        // TUI has none, and an agent's resolves simply never arrived there.
+        // `agent_visible` drops this variant, so an agent still does not hear
+        // itself work.
+        state.hub.broadcast(Event::CommentUpdated {
+            comment: updated.clone(),
+        });
     }
     axum::Json(updated).into_response()
 }
@@ -1186,13 +1197,16 @@ async fn api_reply_post(
         )
             .into_response();
     };
-    if source_ui {
-        state.hub.broadcast(Event::ReplyAdded {
-            comment_id: id,
-            reply,
-            comment_status: updated.status.clone(),
-        });
-    }
+    // Broadcast either way. Suppressing the agent's own reply by not sending it
+    // at all also hid it from the reviewer's clients, and `krit-tui` is one that
+    // only listens — so the agent's half of the conversation never appeared in
+    // the terminal. `agent_visible` drops an agent-authored reply from the agent
+    // stream, which is the one place that suppression belongs.
+    state.hub.broadcast(Event::ReplyAdded {
+        comment_id: id,
+        reply,
+        comment_status: updated.status.clone(),
+    });
     axum::Json(updated).into_response()
 }
 
@@ -1322,6 +1336,13 @@ fn agent_visible(event: &Event) -> bool {
         Event::FilesChanged { .. } => false,
         Event::FileWritten { path: None } => false, // agent's own refresh
         Event::CommentUpdated { .. } => false,
+        // The agent's own reply, echoed back. Filtered here rather than at the
+        // broadcast so the reviewer's clients still hear it: the TUI has no
+        // poll to fall back on, and a reply it never hears about is an answer
+        // the reviewer never sees.
+        // A missing author is 'agent', the same convention every other consumer
+        // of the field uses.
+        Event::ReplyAdded { reply, .. } => !matches!(reply.author.as_deref(), None | Some("agent")),
         // file-written{path} = krit editor save; user-edit = direct
         // delete/undo. Human by convention, not proof: only the browser UI
         // calls those routes today, but they're ordinary HTTP endpoints — an
@@ -1673,6 +1694,25 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn an_agent_hears_the_reviewer_and_not_itself() {
+        let reply = |author: Option<&str>| Event::ReplyAdded {
+            comment_id: "c1".into(),
+            reply: CommentReply {
+                id: "r1".into(),
+                body: "noted".into(),
+                created_at: 0,
+                author: author.map(str::to_string),
+            },
+            comment_status: "open".into(),
+        };
+        assert!(agent_visible(&reply(Some("user"))));
+        assert!(!agent_visible(&reply(Some("agent"))));
+        // Pre-field persisted data reads as the agent, matching every other
+        // consumer of `author`.
+        assert!(!agent_visible(&reply(None)));
     }
 
     #[test]

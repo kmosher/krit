@@ -103,10 +103,17 @@ impl Refetch {
 
     /// The kinds to ask for now, if the window has closed or been starved.
     fn take(&mut self, now: Instant) -> Vec<Fetch> {
+        // Destructured rather than folded into a negated `is_some_and`: this
+        // predicate is the whole debounce policy, and getting the de Morgan
+        // wrong in either direction is either a viewer that hammers the server
+        // or one that silently stops updating.
+        let Some(due) = self.due else {
+            return Vec::new();
+        };
         let starved = self
             .since
             .is_some_and(|s| now.duration_since(s) >= MAX_REFETCH_WAIT);
-        if !self.due.is_some_and(|d| now >= d || starved) {
+        if now < due && !starved {
             return Vec::new();
         }
         let mut kinds = Vec::new();
@@ -281,6 +288,7 @@ fn act(app: &mut App, action: Action, viewport: usize, w: &mut Wiring) -> Result
                         id: comment.id.clone(),
                         status,
                     },
+                    None,
                     w.tx.clone(),
                 );
             }
@@ -294,13 +302,13 @@ fn act(app: &mut App, action: Action, viewport: usize, w: &mut Wiring) -> Result
             if queued == 0 {
                 app.status = Status::Note("Nothing queued.".into());
             } else {
-                client::spawn_write(w.server.to_string(), Write::PostQueued, w.tx.clone());
+                client::spawn_write(w.server.to_string(), Write::PostQueued, None, w.tx.clone());
             }
         }
         Action::Submit => {
             // The same gate the browser's button has, for the same reason: a
             // `submitted` nobody is subscribed to is a review handed to no one.
-            if app.watchers == 0 {
+            if app.listeners == 0 {
                 app.status = Status::Note(
                     "No watcher — nothing is listening for this review. Attach an agent first."
                         .into(),
@@ -314,20 +322,37 @@ fn act(app: &mut App, action: Action, viewport: usize, w: &mut Wiring) -> Result
     Ok(true)
 }
 
+/// How much of a comment's first line fits in a form's title, in **characters**
+/// — not cells. A title is elided rather than laid out, so this bounds how much
+/// is quoted, and the pane truncates whatever that comes to on screen.
+/// `ui::selection_label` has its own budget in its own unit; the two are
+/// separate numbers that happen to be near each other.
+const TITLE_CHARS: usize = 40;
+
 /// A comment's first line, short enough to name it in a title.
 fn first_line(body: &str) -> String {
     let line = body.lines().next().unwrap_or("").trim();
-    match line.char_indices().nth(40) {
+    match line.char_indices().nth(TITLE_CHARS) {
         Some((at, _)) => format!("{}…", &line[..at]),
         None => line.to_string(),
     }
 }
 
+/// Whether a finished write came from the form that is open right now.
+///
+/// Not "did some form send it": the reviewer can Esc out of an in-flight post
+/// and open another before the answer lands, and closing whatever happens to be
+/// up would take that second form's text with it — text which, until it is
+/// posted, exists nowhere else.
+fn from_open_form(app: &App, composer: Option<u64>) -> bool {
+    matches!((composer, &app.compose), (Some(id), Some(open)) if open.id == id)
+}
+
 /// Apply one keystroke to the open composer.
 ///
 /// Returns whether to redraw. Nothing here blocks: a post goes out on its own
-/// thread and the answer arrives as an `Incoming::Done`, so the form closes
-/// immediately and the strip reports what became of it.
+/// thread and the answer arrives as an `Incoming::Done`. The form stays up
+/// until then, with `sending` set — see the comment on that write below.
 fn act_compose(app: &mut App, intent: Intent, server: &str, tx: &Sender<Incoming>) -> bool {
     let Some(composer) = &mut app.compose else {
         return false;
@@ -388,7 +413,7 @@ fn act_compose(app: &mut App, intent: Intent, server: &str, tx: &Sender<Incoming
             // point it exists nowhere else — the same reason the browser's
             // queued-comment editor keeps its text on a refused save.
             composer.sending = true;
-            client::spawn_write(server.to_string(), write, tx.clone());
+            client::spawn_write(server.to_string(), write, Some(composer.id), tx.clone());
             true
         }
     }
@@ -503,9 +528,11 @@ fn run(diff_args: &[String]) -> Result<(), String> {
                     // between a form and a modal dialog.
                     Event::Key(key) if app.compose.is_some() => {
                         // The composer sits under the diff and shares its
-                        // width, less the two columns of border. Up and down
-                        // are movements on the screen, so they need it.
-                        let width = (app.panes.diff.width.saturating_sub(2) as usize).max(1);
+                        // width, less its border. Up and down are movements on
+                        // the screen, so they need the same width the pane drew
+                        // with — hence `ui`'s own helper rather than a second
+                        // copy of the arithmetic.
+                        let width = ui::compose_text_width(app.panes.diff);
                         let intent = compose::key(app.compose.as_mut().unwrap(), key, width);
                         dirty |= act_compose(&mut app, intent, &server, &tx);
                     }
@@ -545,7 +572,7 @@ fn run(diff_args: &[String]) -> Result<(), String> {
                     Incoming::Event(ServerEvent::CommentsChanged) => {
                         refetch.want(Fetch::Comments, Instant::now())
                     }
-                    Incoming::Event(ServerEvent::Watchers { count }) => app.watchers = count,
+                    Incoming::Event(ServerEvent::Listeners { count }) => app.listeners = count,
                     Incoming::Event(ServerEvent::Submitted { summary }) => {
                         app.status = Status::Note(match summary {
                             Some(s) if !s.is_empty() => format!("Review submitted — {s}"),
@@ -600,20 +627,19 @@ fn run(diff_args: &[String]) -> Result<(), String> {
                             }
                         }
                     },
-                    Incoming::Done { result, composed } => match *result {
+                    Incoming::Done { result, composer } => match *result {
                         Ok(note) => {
-                            app.status = Status::Note(note);
-                            if composed {
+                            if !matches!(app.status, Status::Ended(_)) {
+                                app.status = Status::Note(note);
+                            }
+                            if from_open_form(&app, composer) {
                                 app.compose = None;
                                 app.selection = None;
                             }
-                            // Ask, rather than waiting to be told. Two of the
-                            // writes here broadcast nothing at all: a queued
+                            // Ask, rather than waiting to be told. A queued
                             // comment is suppressed from every broadcast until
-                            // it is posted, and `PUT /api/comments/{id}`
-                            // announces only the catch-up when a queued one
-                            // goes open. Listening alone, queueing and
-                            // resolving both look like keys that do nothing.
+                            // it is posted, so listening alone would show
+                            // queueing as a key that does nothing.
                             refetch.want(Fetch::Comments, Instant::now());
                         }
                         // The form stays up with the text in it: at this point
@@ -622,11 +648,18 @@ fn run(diff_args: &[String]) -> Result<(), String> {
                         // has already been thrown away.
                         Err(message) => {
                             app.status = Status::Error(message);
-                            if let Some(composer) = &mut app.compose
-                                && composed
+                            if from_open_form(&app, composer)
+                                && let Some(open) = &mut app.compose
                             {
-                                composer.sending = false;
+                                open.sending = false;
                             }
+                            // A refusal is the best evidence available that the
+                            // list is wrong. `DELETE /api/comments/{id}`
+                            // broadcasts nothing at all, so a comment deleted in
+                            // the browser stays on screen here and every `R` or
+                            // `X` on it 404s — identically, forever, since
+                            // nothing else would refresh it.
+                            refetch.want(Fetch::Comments, Instant::now());
                         }
                     },
                 }
@@ -785,11 +818,19 @@ mod tests {
                 // terminal session entirely and blocks with the screen frozen.
                 let blocking = code.contains("stdin()")
                     // `event::read` blocks until a key arrives. main.rs calls
-                    // it once, guarded by a `poll` that times out.
-                    || (code.contains("event::read") && name != "main.rs")
+                    // it once, guarded by a `poll` that times out. Matched
+                    // unqualified as well, since `use ...event::read` makes the
+                    // call site a bare `read(` — a spelling the qualified
+                    // pattern alone would wave straight through.
+                    || ((code.contains("event::read") || code.contains("read()"))
+                        && name != "main.rs")
                     // A blocking channel receive in the viewer would park the
                     // loop on a thread that may never answer. Worker threads
-                    // own their own `recv`; client.rs is where they live.
+                    // own their own `recv` and all of them live in client.rs,
+                    // which is why that file is exempt — wholesale, so a `recv`
+                    // added there outside a spawned closure would pass. Nothing
+                    // short of tracking scope closes that, and this guard is
+                    // worth more simple than exhaustive.
                     || (code.contains(".recv()") && name != "client.rs");
                 if blocking {
                     offenders.push(format!("{name}:{}: {}", n + 1, code.trim()));

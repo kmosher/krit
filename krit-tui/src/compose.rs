@@ -13,6 +13,7 @@ use crate::comments::CommentAnchor;
 use crate::text::{cluster_width, display_width, wrap_spans};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// A text buffer and where the caret is in it.
@@ -278,6 +279,12 @@ pub enum Target {
 /// stays live, and the loop never stops redrawing while it is up.
 #[derive(Clone, Debug)]
 pub struct Composer {
+    /// Which form this is, so a write can be matched back to the one that sent
+    /// it. `sending` stops one form submitting twice; it cannot stop a *later*
+    /// form being closed by an earlier form's answer, and the reviewer can
+    /// produce exactly that — Esc out of an in-flight post, open another, and
+    /// the first reply lands on the second form and takes its text with it.
+    pub id: u64,
     pub target: Target,
     pub editor: Editor,
     /// Esc was pressed on a form with text in it. The strip asks and the next
@@ -289,9 +296,14 @@ pub struct Composer {
     pub sending: bool,
 }
 
+/// Handed out by `Composer::new`. Wrapping is not a concern: at one form per
+/// keystroke it outlasts the heat death of the review.
+static NEXT_COMPOSER_ID: AtomicU64 = AtomicU64::new(1);
+
 impl Composer {
     pub fn new(target: Target, body: &str) -> Self {
         Composer {
+            id: NEXT_COMPOSER_ID.fetch_add(1, Ordering::Relaxed),
             target,
             editor: Editor::new(body),
             confirm_discard: false,
@@ -365,6 +377,14 @@ pub fn key(composer: &mut Composer, key: KeyEvent, width: usize) -> Intent {
         (KeyCode::Char('q'), true, _) if composer.can_queue() => Intent::Queue,
         (KeyCode::Enter, false, true) if composer.can_queue() => Intent::Queue,
         (KeyCode::Esc, _, _) => Intent::Cancel,
+        // Raw mode cleared ISIG, so this is a key like any other and reaching
+        // the catch-all would drop it silently — the one key everybody presses
+        // when a program looks stuck, doing nothing, in the state most likely
+        // to look stuck (`Sending…` against a server that is not answering).
+        // It means the same thing Esc does rather than quitting outright:
+        // getting out of a form must not be a way to throw away text that
+        // exists nowhere else, and the discard question is what asks.
+        (KeyCode::Char('c'), true, _) => Intent::Cancel,
         (KeyCode::Char('w'), true, _) => {
             composer.editor.delete_word_back();
             Intent::Edited
@@ -688,18 +708,37 @@ mod tests {
 
     #[test]
     fn a_control_chord_with_no_meaning_here_is_not_typed_into_the_body() {
-        // Ctrl+C landing in the buffer as a `c` would be a surprise on the one
-        // key everybody expects to interrupt.
+        // A chord landing in the buffer as its bare letter is a surprise the
+        // reviewer only finds later, in the posted comment.
         let mut c = composer();
+        assert_eq!(
+            key(
+                &mut c,
+                key_of(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                WIDE
+            ),
+            Intent::None
+        );
+        assert_eq!(c.editor.text(), "");
+    }
+
+    #[test]
+    fn ctrl_c_asks_the_discard_question_rather_than_doing_nothing() {
+        // ISIG is off in raw mode, so this is an ordinary key here. Dropping it
+        // meant the one key everybody presses when a program looks stuck did
+        // nothing at all for as long as a form was up. It gets Esc's meaning,
+        // not the program's: leaving a form must not be a way to lose text.
+        let mut c = composer();
+        c.editor.insert("half a thought");
         assert_eq!(
             key(
                 &mut c,
                 key_of(KeyCode::Char('c'), KeyModifiers::CONTROL),
                 WIDE
             ),
-            Intent::None
+            Intent::Cancel
         );
-        assert_eq!(c.editor.text(), "");
+        assert_eq!(c.editor.text(), "half a thought", "nothing thrown away yet");
     }
 
     #[test]

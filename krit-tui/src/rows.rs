@@ -239,8 +239,9 @@ pub fn gutter_width(files: &[FileDiff]) -> usize {
     widest.to_string().len().max(2)
 }
 
-/// The columns between the gutters and the code: one separator space, the
-/// change marker, and one more space.
+/// The columns between the gutters and the code: the space after the old-line
+/// gutter, the space after the new-line one, the change marker, and one more
+/// space. Four, so a code row is `gutter * 2 + MARKER_COLS` cells of prefix.
 ///
 /// Here rather than in `ui` because two modules have to agree on it. `ui`
 /// draws it; `App` subtracts it to turn a mouse column into a column of the

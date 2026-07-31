@@ -309,13 +309,18 @@ only if the honesty problem above can be solved in the UI.
 - ~~**Drafts do not survive a client restart.**~~ Closed server-side: unsent
   comment text persists through `/api/pending-drafts`. The TUI does not use it
   yet — see the note under phase 1.
-- **A resolve is invisible to the other client for as long as its poll takes.**
-  `PUT /api/comments/{id}` broadcasts nothing but the catch-up when a queued
-  comment goes open, so neither client learns of the other's status changes
-  from the stream. The browser polls; the TUI refetches after its own writes
-  and would otherwise never notice. Giving that route a `comment-updated`
-  broadcast is the real fix, and `CLAUDE.md` already names it as the
-  prerequisite for making open comments editable.
+- ~~**A resolve is invisible to the other client for as long as its poll
+  takes.**~~ Closed. `PUT /api/comments/{id}` now broadcasts `comment-updated`,
+  and the reply route broadcasts whatever its source — the agent's own reply is
+  filtered out of the agent stream in `agent_visible` rather than never sent,
+  which is what had made an agent's entire half of the conversation invisible in
+  the terminal. This was also the prerequisite `CLAUDE.md` named for making open
+  comments editable; that is now one change away rather than two.
+- **`DELETE /api/comments/{id}` still broadcasts nothing.** A comment deleted in
+  the browser stays on the TUI's screen, and `R` or `X` on it 404s. The TUI
+  refetches on a refused write, so it corrects itself on the first attempt to
+  use one — but a `comment-deleted` event is the honest fix, and it is the last
+  mutation with no announcement that is not silent on purpose.
 - **The SSE stream carries everything, deliberately.** Unlike
   `/api/events-ws`, `/api/events` does not filter `files-changed` or reanchor
   fallout (`server.rs`, `agent_visible`). That is correct for the TUI — it is a

@@ -126,7 +126,12 @@ pub enum Action {
 ///
 /// Two ends and no ordering: `anchor` is where it started and `head` is where
 /// it is now, so dragging back past the start reverses without the range ever
-/// being empty. Everything downstream reads it through `range`, which sorts.
+/// being empty. Ordering is imposed by the two accessors rather than by the
+/// field — `rows()` for the row pair, `columns_in_order()` for the columns —
+/// and they are separate because rows and columns do not order together: a
+/// backwards drag within one line reverses only the columns. The case neither
+/// can settle is a multi-row drag that collapses onto a single anchored line,
+/// which is `narrow`'s to fix and is documented there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     pub anchor: usize,
@@ -217,12 +222,22 @@ pub struct App {
     /// reviewer can copy a line the ordinary way.
     pub mouse: bool,
     pub tab_size: usize,
-    /// Watchers and agents subscribed to the server, from the `state` event.
-    /// Done reviewing means nothing with nobody listening — the browser greys
-    /// the button out for the same reason.
-    pub watchers: usize,
+    /// How many subscribers could receive a `submitted` — the `state` event's
+    /// `watcherCount` **and** `agentCount` added together. Deliberately not
+    /// named `watchers`: that is a narrower field on the same frame (the
+    /// `role=cli` count alone), and a reader grepping for it in the server or
+    /// the browser would conclude agents are not counted. Done reviewing means
+    /// nothing with nobody listening; the browser greys its button out on the
+    /// same predicate, spelled `watcherCount > 0 || agentCount > 0`.
+    pub listeners: usize,
     pub should_quit: bool,
     pub panes: Panes,
+    /// Height of the last diff pane that was actually drawn — the basis
+    /// `set_panes` compares against to decide whether the viewport resized.
+    /// Not `panes.diff.height`, which the help overlay zeroes so that clicks
+    /// cannot reach through it; taking that at face value would make closing
+    /// the overlay look like a resize and jerk the view back to the cursor.
+    pub reconciled_height: u16,
     /// Aggregates over the whole review, recomputed in `rebuild` rather than
     /// per frame. The draw loop runs ten times a second and each of these
     /// walks every line of every hunk.
@@ -259,9 +274,10 @@ impl Default for App {
             show_files: true,
             mouse: true,
             tab_size: 4,
-            watchers: 0,
+            listeners: 0,
             should_quit: false,
             panes: Panes::default(),
+            reconciled_height: 0,
             gutter: 2,
             totals: (0, 0),
             widest_line: 0,
@@ -293,6 +309,12 @@ impl App {
         // answers that with an empty range — a blank pane, a valid cursor, and
         // nothing on screen to say what happened.
         self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
+        // A selection is row indices, and this path is the diff itself changing
+        // — an agent's edit can rewrite the marked text or move it to another
+        // hunk entirely. There is no re-anchoring to do: the marked range is a
+        // claim about lines that may no longer say what the reviewer read, and
+        // keeping it means `c` posts a character anchor into text nobody chose.
+        self.selection = None;
     }
 
     /// Replace the comment list, keeping the cursor on whatever it was on.
@@ -303,11 +325,26 @@ impl App {
     /// cursor down the file.
     pub fn set_comments(&mut self, comments: Vec<ReviewComment>, viewport: usize) {
         let at = self.rows.get(self.cursor).copied();
+        // The marked range shifts for exactly the same reason the cursor does,
+        // and it is the more expensive one to get wrong: the cursor merely
+        // looks wrong, while a stale selection is what `c` posts against. The
+        // diff has not changed here, so a `Row::Code` still means the same line
+        // of the same file and both ends can be re-found by identity.
+        let marked = self
+            .selection
+            .and_then(|sel| Some((sel, *self.rows.get(sel.anchor)?, *self.rows.get(sel.head)?)));
         self.comments = comments;
         self.rebuild();
         if let Some(row) = at.and_then(|r| self.rows.iter().position(|x| *x == r)) {
             self.cursor = row;
         }
+        self.selection = marked.and_then(|(sel, anchor, head)| {
+            Some(Selection {
+                anchor: self.rows.iter().position(|r| *r == anchor)?,
+                head: self.rows.iter().position(|r| *r == head)?,
+                ..sel
+            })
+        });
         self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
     }
 
@@ -358,10 +395,30 @@ impl App {
         // reviewer is commenting on must not be one of them. Nothing else
         // re-runs this: `apply` scrolls for actions, and a pane shrinking is
         // not one.
+        //
+        // Only when the height *changed*, though, and never against a height of
+        // zero. This runs after every frame, so pulling the view back to the
+        // cursor unconditionally would undo `ScrollViewDown`/`ScrollViewUp` on
+        // the very next frame and the view could never leave the cursor — which
+        // is the one thing a wheel is for. And zero is the help overlay saying
+        // it covered the diff, not a viewport with no room in it: reconciling
+        // against that sends `scroll_to_show` to 0, so `?` would silently lose
+        // the reviewer's place. Clamping is still every frame, because a
+        // refetch can shrink the review under a view that is already past its
+        // new end.
         let height = panes.diff.height as usize;
-        let scrolled = scroll_to_show(self.offset, height, self.cursor, self.rows.len());
-        let moved = scrolled != self.offset;
-        self.offset = scrolled;
+        let mut moved = false;
+        if height > 0 {
+            let clamped = self.offset.min(self.rows.len().saturating_sub(height));
+            let scrolled = if panes.diff.height == self.reconciled_height {
+                clamped
+            } else {
+                scroll_to_show(clamped, height, self.cursor, self.rows.len())
+            };
+            self.reconciled_height = panes.diff.height;
+            moved = scrolled != self.offset;
+            self.offset = scrolled;
+        }
 
         let width = panes.diff.width as usize;
         if width > 0 && width != self.wrap_width {
@@ -550,36 +607,55 @@ impl App {
             | Action::Submit => {}
         }
 
+        self.reconcile_selection(action, before);
+        // Follow the cursor only when the cursor moved. `?`, `f` and `m` change
+        // what is on screen without moving it, and dragging the view back for
+        // them threw away a wheel scroll the instant the reviewer pressed
+        // anything at all — the same "the view can never leave the cursor"
+        // failure `set_panes` had, reached by the other road. The clamp still
+        // runs either way: collapsing a file removes rows from under a view
+        // that may already be at the end.
+        self.offset = if self.cursor != before {
+            scroll_to_show(self.offset, viewport, self.cursor, self.rows.len())
+        } else {
+            self.offset.min(max_offset)
+        };
+    }
+
+    /// Bring the marked range back into agreement with the cursor, after an
+    /// action has moved one or the other.
+    ///
+    /// Three rules, and each of them is about the same thing: what is
+    /// highlighted must be what `c` would comment on, because the highlight is
+    /// the only thing the reviewer can check that against.
+    fn reconcile_selection(&mut self, action: Action, cursor_before: usize) {
         let dragging = matches!(
             action,
             Action::SelectStart { .. } | Action::SelectExtend { .. } | Action::SelectEnd { .. }
         );
-        match self.selection {
+        let moved = self.cursor != cursor_before;
+        let cursor = self.cursor;
+        match &mut self.selection {
             // Visual mode: the head follows the cursor, so every movement key
             // there is doubles as a way to extend — including `]`, `n` and
             // `G`, which is most of the value of doing it this way.
-            Some(sel) if sel.visual => {
-                if let Some(sel) = &mut self.selection {
-                    sel.head = self.cursor;
-                }
+            Some(sel) if sel.visual => sel.head = cursor,
+            // A mouse selection is dropped the moment the cursor leaves it.
+            // Letting it linger means the reviewer can be looking at one line
+            // and about to comment on another.
+            Some(_) if moved && !dragging => self.selection = None,
+            // A drag that never left its cell is a click, not a one-character
+            // selection: the two are the same pair of events, and a click is
+            // what the reviewer meant far more often.
+            Some(sel)
+                if matches!(action, Action::SelectEnd { .. })
+                    && sel.anchor == sel.head
+                    && sel.columns.map(|(a, h)| a == h) == Some(true) =>
+            {
+                self.selection = None;
             }
-            // A mouse selection is dropped the moment the cursor leaves it, so
-            // what is highlighted is always what `c` would comment on. Letting
-            // it linger means the reviewer can be looking at one line and
-            // about to comment on another.
-            Some(_) if self.cursor != before && !dragging => self.selection = None,
             _ => {}
         }
-        // A drag that never left its cell is a click, not a one-character
-        // selection: the two are the same pair of events, and a click is what
-        // the reviewer meant far more often.
-        if let (Action::SelectEnd { .. }, Some(sel)) = (action, self.selection)
-            && sel.anchor == sel.head
-            && sel.columns.map(|(a, h)| a == h) == Some(true)
-        {
-            self.selection = None;
-        }
-        self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
     }
 
     /// The display columns of `row` that are inside the selection, half-open.
@@ -626,24 +702,26 @@ impl App {
             Some(sel) => sel.rows(),
             None => (self.cursor, self.cursor),
         };
+        // Clamped once and reused below: two spellings of the same range invite
+        // the reader to work out whether they can differ, and the second would
+        // start underflowing the day this early return moves.
+        let marked = self
+            .rows
+            .get(first..=last.min(self.rows.len().saturating_sub(1)))?;
         // The side and the file come from the first line of code in range —
         // everything after it that disagrees is simply not part of the anchor.
         // A selection dragged across a deletion and its replacement can only
         // be one or the other: line numbers on the wire belong to a side.
-        let (file, additions) = self
-            .rows
-            .get(first..=last.min(self.rows.len().saturating_sub(1)))?
-            .iter()
-            .find_map(|row| match *row {
-                Row::Code { file, hunk, line } => {
-                    let l = &self.files[file].hunks[hunk].lines[line];
-                    Some((file, l.new_line.is_some()))
-                }
-                _ => None,
-            })?;
+        let (file, additions) = marked.iter().find_map(|row| match *row {
+            Row::Code { file, hunk, line } => {
+                let l = &self.files[file].hunks[hunk].lines[line];
+                Some((file, l.new_line.is_some()))
+            }
+            _ => None,
+        })?;
 
         let mut numbers: Vec<(u32, &str)> = Vec::new();
-        for row in &self.rows[first..=last.min(self.rows.len() - 1)] {
+        for row in marked {
             let Row::Code {
                 file: f,
                 hunk,
@@ -688,15 +766,31 @@ impl App {
     /// deletion and its replacement keeps only one side. Applying them to the
     /// first and last line that *did* survive is the answer that stays inside
     /// the range the reviewer marked.
+    ///
+    /// That collapse is also the only thing `columns_in_order` cannot settle,
+    /// and why the pair is ordered here rather than there: it orders by *row*,
+    /// which decides nothing once two rows have become one line. A drag that
+    /// went down and to the left then arrives still in gesture order, and an
+    /// unswapped pair is stored durably — the server clamps `endLine` and never
+    /// the columns, and the browser normalises the same case in
+    /// `mapRangeToAnchor`, so the two clients would disagree about an invariant
+    /// only one of them keeps. Ordered before the lookup, never after: swapping
+    /// resolved endpoints would move each to the far side of its own character
+    /// and exclude both.
     fn narrow(&self, texts: &[&str], start: usize, end: usize) -> (u32, u32, String) {
         let first = texts.first().copied().unwrap_or_default();
         let last = texts.last().copied().unwrap_or_default();
+        let (start, end) = if texts.len() == 1 && end < start {
+            (end, start)
+        } else {
+            (start, end)
+        };
         let from = cluster_at_column(first, self.tab_size, start).0;
         // Inclusive of the cell the pointer was over, so the end is the far
         // side of that character.
         let to = cluster_at_column(last, self.tab_size, end).1;
         let selected = if texts.len() == 1 {
-            first[from.byte.min(to.byte)..to.byte.max(from.byte)].to_string()
+            first[from.byte..to.byte].to_string()
         } else {
             let mut out = vec![first[from.byte..].to_string()];
             out.extend(texts[1..texts.len() - 1].iter().map(|t| t.to_string()));
@@ -1264,14 +1358,24 @@ mod tests {
     // ---- mouse ---------------------------------------------------------
 
     fn with_panes(app: &mut App) {
+        frame_of(app, 20);
+    }
+
+    /// Report a frame the way the draw loop does — through `set_panes`, not by
+    /// assigning `app.panes`. Anything that asserts about the offset has to go
+    /// this way: the loop reconciles after *every* draw, so a test that skips
+    /// it is testing a program nobody runs.
+    fn frame_of(app: &mut App, height: u16) -> Panes {
         // A plausible frame: header on row 0, footer on the last row, file
         // list 34 wide on the left.
-        app.panes = Panes {
-            diff: Rect::new(34, 1, 66, 20),
+        let panes = Panes {
+            diff: Rect::new(34, 1, 66, height),
             diff_top_row: 0,
-            files: Some(Rect::new(1, 2, 32, 18)),
+            files: Some(Rect::new(1, 2, 32, height.saturating_sub(2))),
             files_top: 0,
         };
+        app.set_panes(panes);
+        panes
     }
 
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
@@ -1292,7 +1396,7 @@ mod tests {
         // Reading ahead without losing your place is the whole point of a
         // wheel; a wheel that dragged the cursor would be a slow `j`.
         let mut app = app();
-        with_panes(&mut app);
+        frame_of(&mut app, 5);
         let before = app.cursor;
         app.apply(
             app.mouse_action(mouse(MouseEventKind::ScrollDown, 40, 5)),
@@ -1301,7 +1405,13 @@ mod tests {
         assert_eq!(app.offset, 3);
         assert_eq!(app.cursor, before, "the cursor stayed put");
 
-        // And the next movement key snaps the view back to the cursor.
+        // And it has to survive the next frame. The loop reconciles panes after
+        // every draw, so a scroll that only lasts until the redraw is a scroll
+        // the reviewer never sees.
+        frame_of(&mut app, 5);
+        assert_eq!(app.offset, 3, "the redraw did not drag the view back");
+
+        // A movement key is what snaps the view back to the cursor.
         app.apply(Action::Down(1), 5);
         assert!(app.offset <= app.cursor);
     }
@@ -1309,13 +1419,55 @@ mod tests {
     #[test]
     fn the_view_does_not_scroll_past_either_end() {
         let mut app = app();
-        with_panes(&mut app);
+        frame_of(&mut app, 5);
         app.apply(Action::ScrollViewUp(3), 5);
         assert_eq!(app.offset, 0);
         for _ in 0..50 {
             app.apply(Action::ScrollViewDown(3), 5);
         }
         assert_eq!(app.offset, app.rows.len().saturating_sub(5));
+        frame_of(&mut app, 5);
+        assert_eq!(
+            app.offset,
+            app.rows.len().saturating_sub(5),
+            "the redraw left the view at the end"
+        );
+    }
+
+    #[test]
+    fn the_help_overlay_does_not_move_the_view() {
+        // Driven the way the loop drives it — action, then the frame that
+        // action produced — because the two roads back to the cursor are in
+        // different functions and a test that takes only one of them passes
+        // with the other fully broken. This one did: reported through
+        // `set_panes` alone it was green while `?` still snapped the view home.
+        let mut app = app();
+        frame_of(&mut app, 5);
+        app.apply(Action::ScrollViewDown(3), 5);
+        assert_eq!(app.offset, 3);
+
+        // `ui::draw` reports a zero-height diff pane while the overlay is up,
+        // so a click cannot reach through it. That is not a viewport.
+        app.apply(Action::ToggleHelp, 5);
+        app.set_panes(Panes::default());
+        assert_eq!(app.offset, 3, "the overlay kept the reviewer's place");
+
+        app.apply(Action::ToggleHelp, 5);
+        frame_of(&mut app, 5);
+        assert_eq!(app.offset, 3, "and closing it did not move them either");
+    }
+
+    #[test]
+    fn a_key_that_moves_nothing_leaves_the_view_where_it_was() {
+        // Hiding the file list, taking the mouse back — neither is a movement,
+        // and neither should cost the reviewer the place they scrolled to.
+        for action in [Action::ToggleFiles, Action::ToggleMouse] {
+            let mut app = app();
+            frame_of(&mut app, 5);
+            app.apply(Action::ScrollViewDown(3), 5);
+            app.apply(action, 5);
+            assert_eq!(app.offset, 3, "{action:?} moved the view");
+        }
     }
 
     #[test]
@@ -1573,6 +1725,85 @@ mod tests {
         assert_eq!(anchor.side, "deletions");
         assert_eq!((anchor.start_line, anchor.end_line), (2, 2));
         assert_eq!(anchor.columns.unwrap().2, "charlie");
+    }
+
+    fn note_on(line: u32) -> ReviewComment {
+        ReviewComment {
+            id: format!("c{line}"),
+            file_path: "a.rs".into(),
+            side: "additions".into(),
+            line_number: line,
+            end_line: None,
+            line_content: String::new(),
+            body: "a note".into(),
+            status: "open".into(),
+            created_at: 0,
+            replies: Vec::new(),
+            outdated: None,
+            suggestion: None,
+            start_column: None,
+            end_column: None,
+            selected_text: None,
+        }
+    }
+
+    #[test]
+    fn a_comment_arriving_above_the_marked_range_does_not_move_it() {
+        // The reviewer's marked range is what `c` posts against, so a shift it
+        // cannot see is worse than a cursor that jumps: the comment lands on
+        // lines nobody chose, and nothing about it looks wrong afterwards.
+        let mut app = texty();
+        let text_x = 8u16;
+        drag(&mut app, (text_x, 4), (text_x + 6, 4));
+        let before = app.comment_anchor().expect("a line of code was marked");
+
+        // Anchored on " alpha bravo", one line above — its rows push every
+        // index below it down.
+        app.set_comments(vec![note_on(1)], 20);
+
+        let after = app.comment_anchor().expect("the marked range survived");
+        assert_eq!(
+            (after.start_line, after.end_line),
+            (before.start_line, before.end_line)
+        );
+        assert_eq!(after.line_content, before.line_content);
+        assert_eq!(after.columns, before.columns);
+    }
+
+    #[test]
+    fn a_diff_that_changed_underneath_drops_the_marked_range() {
+        // The other half: here the rows themselves mean something new, so
+        // re-finding them by identity would be re-anchoring onto text the
+        // reviewer never read.
+        let mut app = texty();
+        drag(&mut app, (8, 4), (14, 4));
+        assert!(app.selection.is_some(), "the drag marked something");
+        app.load(&payload(TEXTY), 20);
+        assert_eq!(
+            app.selection, None,
+            "a reload drops it rather than moving it"
+        );
+    }
+
+    #[test]
+    fn a_drag_down_and_left_onto_a_dropped_side_still_reads_left_to_right() {
+        // The one case row order cannot settle. Starting on the deletion picks
+        // that side, so the addition row below contributes no line number and
+        // the range collapses to a single line — with the two columns still in
+        // the order the gesture produced them. Stored unswapped, `startColumn >
+        // endColumn` survives on the wire (the server clamps `endLine` and
+        // never the columns) and slices to nothing wherever it is read.
+        let mut app = texty();
+        let text_x = 8u16;
+        // "-charlie delta" column 10, down and left to "+echo foxtrot" column 2.
+        drag(&mut app, (text_x + 10, 4), (text_x + 2, 5));
+        let anchor = app.comment_anchor().unwrap();
+        assert_eq!(anchor.side, "deletions");
+        assert_eq!((anchor.start_line, anchor.end_line), (2, 2));
+        let (start, end, text) = anchor.columns.unwrap();
+        assert!(start <= end, "columns came back as {start}..{end}");
+        assert_eq!((start, end), (2, 11));
+        assert_eq!(text, "arlie del");
     }
 
     #[test]

@@ -311,15 +311,46 @@ is a guarantee — the residual race is the length of a fold:
   and reports back to the loop as "the frame you just drew is stale". Hiding
   the file list is the case that makes this non-obvious: it widens the pane
   without resizing the terminal, so a resize handler alone would miss it.
+  - **`set_panes` runs after every draw, so what it reconciles must be chosen
+    with that in mind.** Pulling the view back to the cursor is right when the
+    viewport *resized* (the composer opening must not hide the line being
+    commented on) and wrong on every other frame — it undid each wheel notch
+    one frame later, and no test could see it because the wheel tests drove
+    `apply` without ever reporting a frame. Clamping the view inside the
+    document is the opposite: that belongs on every frame, since a refetch can
+    shrink the review under a view already past its new end. The comparison is
+    against `reconciled_height` rather than `panes.diff.height`, because the
+    help overlay reports a zero-height diff pane so clicks cannot reach
+    through it, and reading that as a resize made `?` lose the reviewer's place.
   Comments whose line is in no hunk render under the file header rather than
   nowhere — a comment that exists, is listed by `krit comments`, and cannot be
   seen is worse than one in an approximate place.
-- **`krit-tui` refetches comments after its own writes, on purpose.** Two of
-  the mutations broadcast nothing: a queued comment is suppressed from every
-  broadcast until posted, and `PUT /api/comments/{id}` announces only the
-  catch-up when a queued one goes open. A client that only listened would show
-  queueing and resolving as keys that do nothing — no error, no change. The
-  browser is covered by `useComments`'s poll; the TUI has none, so it asks.
+- **A mutation nobody broadcasts is invisible to any client that only
+  listens**, and the browser's 3s `useComments` poll is what hid that for a
+  long time. `krit-tui` has no poll, so every gap showed up there as a key that
+  did nothing — no error, no change. Two are closed and two remain, and the
+  distinction is worth keeping straight:
+  - `PUT /api/comments/{id}` now broadcasts `comment-updated` for a status or
+    body change, and the reply route broadcasts `reply-added` whatever the
+    source. **The agent's own reply is filtered in `agent_visible`, not by
+    declining to send it** — suppressing it at the broadcast also hid it from
+    the reviewer, which is how an agent could answer a comment and have the
+    terminal show nothing. `comment-updated` was already filtered there.
+  - Still silent by design: a **queued** comment (suppressed from every
+    broadcast until posted) and **pending drafts** (see below). Still silent by
+    omission: `DELETE /api/comments/{id}`, which is why the TUI refetches on a
+    refused write as well as a successful one — a 404 on a comment the browser
+    deleted is the only evidence it will ever get.
+- **A comment's side is derived differently by the two clients, and neither is
+  wrong.** `krit-tui` takes it from the first code row in the marked range,
+  which it can do because it knows what it drew. The browser takes it from the
+  last hovered line and defaults to `additions`, because Pierre renders no side
+  attribute and hover is the only signal there is (`selectionMapping.ts`). So a
+  drag from a deleted line onto its replacement posts `deletions` from the
+  terminal and `additions` from the browser. It matters because
+  `reanchor_file_comments` tracks only the additions side — a deletions-side
+  comment stays pinned to text that is gone, which is the right answer for a
+  line that was deleted and a surprising one for a line that was replaced.
 - **The terminal and the browser mean different things by a column, and both
   are right.** The wire counts UTF-16 units into the *source* line, because
   that is what `Range.toString().length` measures and what `edits.rs` converts
@@ -339,9 +370,11 @@ is a guarantee — the residual race is the length of a fold:
   - **The form stays up until the server answers**, with `sending` set. Closing
     it on submit throws the reviewer's text away on any failure, and at that
     point it exists nowhere else — the same reason the browser's queued-comment
-    editor keeps its text on a refused save. `Incoming::Done` carries whether
-    the write came from the composer, so an unrelated write finishing cannot
-    close a form it has nothing to do with.
+    editor keeps its text on a refused save. `Incoming::Done` carries the *id*
+    of the composer that sent the write, not merely that one did: `sending`
+    stops a form submitting twice but cannot stop a later form being closed by
+    an earlier form's answer, and Esc-ing out of an in-flight post and starting
+    another produces exactly that.
   - **Submit is `Ctrl+S`, never `Enter`.** A terminal without the Kitty
     keyboard protocol reports `Ctrl+Enter` and `Shift+Enter` as a bare `\r`,
     indistinguishable from `Enter` — so binding submit there makes a two-line
@@ -352,6 +385,12 @@ is a guarantee — the residual race is the length of a fold:
     form is full of prose and most rows on screen are wrapped ones. That is why
     `Editor` is one string and one offset rather than a vector of lines, and
     why those four methods take the width.
+  - **`Ctrl+C` is an ordinary key here**, since raw mode cleared ISIG, and it
+    means what Esc means. Left unmapped it fell through to the catch-all and did
+    nothing at all — the one key everyone presses when a program looks stuck,
+    inert in the state most likely to look stuck (`Sending…` against a server
+    that is not answering). It is not a quit: leaving a form must never be a way
+    to discard text without being asked.
 - **The comment poll sets `refetchIntervalInBackground: true`** (`useComments`),
   overriding react-query's default of pausing an interval while the page is
   unfocused. An automated browser reports itself hidden the whole time it is
