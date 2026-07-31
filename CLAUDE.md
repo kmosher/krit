@@ -112,9 +112,15 @@ is a guarantee — the residual race is the length of a fold:
     run's set — and a diff rendered for six anchors you forgot about looks
     nothing like one rendered for the one anchor you just added.
   - **Three ways to misread what rendered**, each of which yields a confident
-    wrong answer rather than an error. `shadowRoot.textContent` does not
-    contain annotations — they are slotted light DOM (see the `SlotPortals`
-    note below), so a comment can be on screen and absent from that string.
+    wrong answer rather than an error. `shadowRoot.textContent` contains
+    **nothing krit renders itself** — every `render*` callback's output is
+    slotted light DOM (see the `SlotPortals` note below), so a comment, a
+    header prefix or the header metadata can all be on screen and absent from
+    that string. Reading a file header back that way reported a bare
+    `script.sh-0+0` while a screenshot of the same frame showed the Modified
+    pill and the mode change beside it — upstream's own header text is there,
+    krit's additions to it are not, which is exactly the shape that reads as
+    "my renderer isn't running".
     Rows and hunk separators are **virtualized**, so any count, or any "is this
     still collapsed" check, is really a question about where the surface
     happens to be scrolled. And a scroll loop is only as good as its scroller:
