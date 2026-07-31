@@ -325,6 +325,25 @@ is a guarantee — the residual race is the length of a fold:
   Comments whose line is in no hunk render under the file header rather than
   nowhere — a comment that exists, is listed by `krit comments`, and cannot be
   seen is worse than one in an approximate place.
+- **A gap is what the patch does not carry, so its text comes from
+  `fileContents`** — bundled in every `/api/diff` response, which is what makes
+  expanding one a local operation rather than a request per gap. Three things
+  about `krit-tui`'s version are load-bearing:
+  - **Expansions survive a refetch.** They are keyed by path and gap *index*,
+    like `collapsed`, because the TUI refetches on every write and on every file
+    the agent touches — an expansion cleared on load would fold up under a
+    reviewer mid-sentence. The row model rebuilds against the new gaps either
+    way, so an expansion wider than a gap that shrank is clamped, not dangling.
+  - **Both edges open together**, and the `⋯` row stays between them until the
+    gap is fully open. That is what makes stepping in from either side legible,
+    and it is why the two counts are clamped against each other rather than only
+    against the length: two edges creeping toward the middle must meet exactly
+    once, or a line renders twice and the diff quietly disagrees with itself.
+  - **A refused side still gets its gaps.** An oversize or binary file computes
+    its interior gaps anyway so the row can say *why* it will not open — told
+    nothing, a reviewer cannot tell a file too large to expand from a key that
+    does not work. Only the interior ones: the run after the last hunk is
+    bounded by the file's length, which is exactly what a refusal withholds.
 - **A mutation nobody broadcasts is invisible to any client that only
   listens**, and the browser's 3s `useComments` poll is what hid that for a
   long time. `krit-tui` has no poll, so every gap showed up there as a key that
