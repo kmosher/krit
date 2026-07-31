@@ -454,6 +454,19 @@ fn marked() -> Style {
     Style::default().add_modifier(Modifier::UNDERLINED)
 }
 
+/// Code columns available to *one* side of a split row.
+///
+/// Each side spends `gutter` on its line number and three more on the space,
+/// marker and space; one column between them is the divider. Shared with
+/// `App::text_column_at`, which turns a mouse column back into a column of the
+/// text — the two have to agree exactly or a drag in the right-hand pane
+/// anchors at an offset, which reads as a plausible selection rather than an
+/// error.
+pub fn split_half_width(pane_width: usize, gutter: usize) -> usize {
+    let chrome = 2 * (gutter + MARKER_COLS - 1) + 1;
+    pane_width.saturating_sub(chrome) / 2
+}
+
 fn render_row<'a>(
     app: &App,
     theme: &Theme,
@@ -626,6 +639,53 @@ fn render_row<'a>(
             ));
             Line::from(spans)
         }
+        Row::Split { file, hunk, pair } => {
+            let h = &app.files[file].hunks[hunk];
+            let half = split_half_width(pane_width, gutter);
+            // A character drag belongs to the column it happened in, so only
+            // that column is underlined. A line-wise selection has no side and
+            // marks both, which is what it means. Marking both for a drag would
+            // claim the reviewer had selected text they never pointed at.
+            let dragged = app.selection.and_then(|s| s.side);
+            let side = |which: Option<usize>, additions: bool| -> Vec<Span<'a>> {
+                let marks = match dragged {
+                    Some(s) if s != additions => None,
+                    _ => marks,
+                };
+                let Some(li) = which else {
+                    // An absent side is padded, not skipped. A blank column is
+                    // what says "nothing here was added" — a short row would
+                    // just look like the end of the file.
+                    return vec![Span::styled(
+                        fit_columns("", gutter + MARKER_COLS - 1 + half),
+                        Style::default().patch(cursor),
+                    )];
+                };
+                let l = &h.lines[li];
+                let number = if additions { l.new_line } else { l.old_line };
+                let style = match l.kind {
+                    LineKind::Addition => theme.fg(Color::Green),
+                    LineKind::Deletion => theme.fg(Color::Red),
+                    LineKind::Context => Style::default(),
+                }
+                .patch(cursor);
+                let body = expand_tabs(&l.text, app.tab_size);
+                let visible = slice_columns(&body, app.h_scroll, half);
+                let mut spans = vec![
+                    Span::styled(fit_columns(&num(number), gutter), theme.dim().patch(cursor)),
+                    Span::styled(format!(" {} ", line_marker(l.kind)), style),
+                ];
+                spans.extend(marked_spans(&visible, style, app.h_scroll, half, marks));
+                spans
+            };
+            let mut spans = side(pair.left, false);
+            // A divider rather than a space: two code columns with nothing
+            // between them read as one wrapped line, which is the whole failure
+            // mode split view exists to avoid.
+            spans.push(Span::styled("│", theme.dim().patch(cursor)));
+            spans.extend(side(pair.right, true));
+            Line::from(spans)
+        }
         Row::Expand { file, gap } => {
             let (hidden, refusal) = app.gap_state(file, gap).unwrap_or((0, None));
             let text = match refusal {
@@ -726,6 +786,7 @@ fn help<'a>() -> (Paragraph<'a>, u16, u16) {
         Line::from("  + / -             open / close a gap between hunks"),
         Line::from("  tab               move between panes"),
         Line::from("  f                 show / hide the file list"),
+        Line::from("  s                 split / unified (needs a wide pane)"),
         Line::from("  m                 release the mouse to the terminal"),
         Line::from("  wheel, click      scroll / put the cursor there"),
         Line::from(""),

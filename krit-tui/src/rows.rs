@@ -40,6 +40,14 @@ pub enum Row {
         comment: usize,
         line: usize,
     },
+    /// One row of a hunk drawn side by side. Carries both sides rather than
+    /// one, which is what makes it a different row type from `Code` — every
+    /// scroll and hit-test still counts it as exactly one row.
+    Split {
+        file: usize,
+        hunk: usize,
+        pair: Pair,
+    },
     /// An unchanged line the reviewer opened out of the space between two
     /// hunks. `line` is its **new-file** number, which is the only number the
     /// gap knows for certain; the old-file one comes from the gap's `delta`.
@@ -121,6 +129,61 @@ pub fn gaps_of(file: &FileDiff, total_lines: u32) -> Vec<GapRange> {
     gaps
 }
 
+/// One row of a side-by-side hunk: the old line on the left, the new one on the
+/// right, either of which may be absent.
+///
+/// Both indices are into the hunk's own `lines`, so a pair claims nothing the
+/// unified model does not already say — it only decides what sits beside what.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pair {
+    pub left: Option<usize>,
+    pub right: Option<usize>,
+}
+
+/// Lay a hunk out side by side.
+///
+/// A unified hunk is runs: some context, then deletions, then additions, then
+/// context again. Split view pairs each run of deletions with the run of
+/// additions that replaced it, index by index, and pads the shorter one with
+/// blanks — so a line and its replacement sit on the same row and can be read
+/// against each other, which is the entire reason to want this view.
+///
+/// Pairing is per *run*, not per hunk: a hunk with two separate edits in it
+/// would otherwise pair the first deletion with an addition from the second
+/// edit, several lines away, and the two columns would describe changes that
+/// have nothing to do with each other. Context is what ends a run, because
+/// context is the only thing both sides agree on.
+pub fn pair_hunk(hunk: &crate::patch::Hunk) -> Vec<Pair> {
+    let mut pairs = Vec::new();
+    let mut dels: Vec<usize> = Vec::new();
+    let mut adds: Vec<usize> = Vec::new();
+    let flush = |pairs: &mut Vec<Pair>, dels: &mut Vec<usize>, adds: &mut Vec<usize>| {
+        for i in 0..dels.len().max(adds.len()) {
+            pairs.push(Pair {
+                left: dels.get(i).copied(),
+                right: adds.get(i).copied(),
+            });
+        }
+        dels.clear();
+        adds.clear();
+    };
+    for (i, line) in hunk.lines.iter().enumerate() {
+        match line.kind {
+            LineKind::Deletion => dels.push(i),
+            LineKind::Addition => adds.push(i),
+            LineKind::Context => {
+                flush(&mut pairs, &mut dels, &mut adds);
+                pairs.push(Pair {
+                    left: Some(i),
+                    right: Some(i),
+                });
+            }
+        }
+    }
+    flush(&mut pairs, &mut dels, &mut adds);
+    pairs
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Note {
     RenamedFrom,
@@ -138,6 +201,7 @@ impl Row {
             | Row::Hunk { file, .. }
             | Row::Code { file, .. }
             | Row::Comment { file, .. }
+            | Row::Split { file, .. }
             | Row::Context { file, .. }
             | Row::Expand { file, .. } => Some(file),
             Row::Gap => None,
@@ -163,6 +227,7 @@ pub fn build_rows(
     comments: &CommentRows,
     gaps: &HashMap<String, Vec<GapRange>>,
     expanded: &HashMap<(String, usize), Opened>,
+    split: bool,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     let push_comments = |rows: &mut Vec<Row>, file: usize, which: &[usize]| {
@@ -225,13 +290,29 @@ pub fn build_rows(
                 gi += 1;
             }
             rows.push(Row::Hunk { file: fi, hunk: hi });
-            for li in 0..hunk.lines.len() {
-                rows.push(Row::Code {
-                    file: fi,
-                    hunk: hi,
-                    line: li,
-                });
-                push_comments(&mut rows, fi, comments.after_line(fi, hi, li));
+            if split {
+                // One row per pair, and a pair's comments are whichever side's
+                // comments those lines carry — anchored by line, as always, so
+                // the same comment lands in the same place in either view.
+                for pair in pair_hunk(hunk) {
+                    rows.push(Row::Split {
+                        file: fi,
+                        hunk: hi,
+                        pair,
+                    });
+                    for li in [pair.right, pair.left].into_iter().flatten() {
+                        push_comments(&mut rows, fi, comments.after_line(fi, hi, li));
+                    }
+                }
+            } else {
+                for li in 0..hunk.lines.len() {
+                    rows.push(Row::Code {
+                        file: fi,
+                        hunk: hi,
+                        line: li,
+                    });
+                    push_comments(&mut rows, fi, comments.after_line(fi, hi, li));
+                }
             }
             next_line = hunk.new_start + hunk.new_len;
         }
@@ -434,6 +515,7 @@ mod tests {
             &CommentRows::default(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         (files, rows)
     }
@@ -511,6 +593,7 @@ mod tests {
             &comments,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         let at = rows
             .iter()
@@ -540,6 +623,7 @@ mod tests {
             &comments,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         let at = rows
             .iter()
@@ -562,6 +646,7 @@ mod tests {
             &comments,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert!(!rows.iter().any(|r| r.comment().is_some()));
         assert_eq!(comments_in(&files, 0, &comments), 1);
@@ -578,6 +663,7 @@ mod tests {
             &CommentRows::default(),
             &HashMap::new(),
             &HashMap::new(),
+            false,
         );
         assert_eq!(rows[0], Row::File { file: 0 });
         assert_eq!(
@@ -703,6 +789,98 @@ mod tests {
                           -was\n\
                           +is";
 
+    /// Two separate edits inside one hunk, with context between them, and an
+    /// uneven replacement — the shapes that a naive whole-hunk pairing gets
+    /// wrong.
+    const RUNS: &str = "diff --git a/a.rs b/a.rs\n\
+                        @@ -1,7 +1,6 @@\n\
+                        \x20head\n\
+                        -one\n\
+                        -two\n\
+                        +uno\n\
+                        \x20middle\n\
+                        -three\n\
+                        +tres\n\
+                        +cuatro\n\
+                        \x20tail";
+
+    #[test]
+    fn a_split_row_pairs_each_edit_with_its_own_replacement() {
+        let files = parse_patch(RUNS, &[]);
+        let pairs = pair_hunk(&files[0].hunks[0]);
+        let kinds: Vec<(Option<usize>, Option<usize>)> =
+            pairs.iter().map(|p| (p.left, p.right)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (Some(0), Some(0)), // context "head"
+                (Some(1), Some(3)), // -one / +uno
+                (Some(2), None),    // -two, nothing replaced it
+                (Some(4), Some(4)), // context "middle"
+                (Some(5), Some(6)), // -three / +tres
+                (None, Some(7)),    // +cuatro, nothing it replaced
+                (Some(8), Some(8)), // context "tail"
+            ],
+            "each run pairs with its own replacement, not across the context"
+        );
+    }
+
+    #[test]
+    fn every_hunk_line_appears_exactly_once_in_the_split() {
+        // The pairing decides what sits beside what; it must not lose a line or
+        // show one twice. Either failure is a diff that disagrees with the
+        // patch it came from, and reads as a plausible diff.
+        for patch in [RUNS, TWO_FILES, SPACED] {
+            for file in parse_patch(patch, &[]) {
+                for hunk in &file.hunks {
+                    let mut seen: Vec<usize> = pair_hunk(hunk)
+                        .iter()
+                        .flat_map(|p| {
+                            // Context appears on both sides as the same index;
+                            // count it once.
+                            match (p.left, p.right) {
+                                (Some(l), Some(r)) if l == r => vec![l],
+                                (l, r) => l.into_iter().chain(r).collect(),
+                            }
+                        })
+                        .collect();
+                    seen.sort_unstable();
+                    let before = seen.len();
+                    seen.dedup();
+                    assert_eq!(before, seen.len(), "a line paired twice");
+                    assert_eq!(
+                        seen,
+                        (0..hunk.lines.len()).collect::<Vec<_>>(),
+                        "every line exactly once"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn split_rows_replace_the_unified_ones_rather_than_joining_them() {
+        let files = parse_patch(RUNS, &[]);
+        let rows = build_rows(
+            &files,
+            &HashSet::new(),
+            &CommentRows::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+        );
+        assert!(
+            !rows.iter().any(|r| matches!(r, Row::Code { .. })),
+            "split view draws no unified rows"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches!(r, Row::Split { .. }))
+                .count(),
+            pair_hunk(&files[0].hunks[0]).len()
+        );
+    }
+
     #[test]
     fn a_files_gaps_are_the_lines_no_hunk_covers() {
         let files = parse_patch(SPACED, &[]);
@@ -753,6 +931,7 @@ mod tests {
                 &CommentRows::default(),
                 &gaps,
                 &expanded,
+                false,
             );
             let mut shown: Vec<u32> = rows
                 .iter()
@@ -792,6 +971,7 @@ mod tests {
             &CommentRows::default(),
             &gaps,
             &expanded,
+            false,
         );
         let shown: Vec<Row> = rows
             .iter()
