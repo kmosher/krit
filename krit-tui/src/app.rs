@@ -68,6 +68,11 @@ pub enum Action {
     PrevHunk,
     ScrollLeft(usize),
     ScrollRight(usize),
+    /// One notch of a *horizontal* wheel, which is a different thing from
+    /// `ScrollLeft`/`ScrollRight` and must stay one: a key is intent, a
+    /// horizontal wheel notch usually is not. See `H_WHEEL_INTENT`.
+    WheelLeft,
+    WheelRight,
     ResetHScroll,
     ToggleFocus,
     ToggleCollapse,
@@ -334,7 +339,29 @@ pub struct App {
     /// see. Without it `h_scroll` runs off into blank space with no way back
     /// but a key the footer never mentions.
     pub widest_line: usize,
+    /// Horizontal wheel notches seen in a row, signed by direction and zeroed
+    /// by any vertical notch. See `H_WHEEL_INTENT`.
+    pub h_wheel: i32,
 }
+
+/// How many horizontal wheel notches in a row mean the reviewer wants to
+/// scroll sideways.
+///
+/// A trackpad cannot emit a pure vertical scroll: a two-finger swipe carries
+/// some sideways component the whole way, and the terminal reports every bit
+/// of it as a horizontal wheel. Acting on each one — four columns a notch —
+/// walked the diff off the left of the pane during ordinary reading, leaving a
+/// screen of bare line numbers and `+`/`-` markers with the code gone and
+/// nothing on screen to say why or how to get back. The gutters keep drawing
+/// because they are not scrolled, which makes it read as a rendering bug
+/// rather than as a scroll position.
+///
+/// So a run is required, and any vertical notch resets it: real sideways
+/// intent is a run of horizontal notches and nothing else, while the noise is
+/// always interleaved with the vertical scrolling that produced it. Once the
+/// run is established every further notch scrolls, so a deliberate swipe stays
+/// smooth after its first few.
+const H_WHEEL_INTENT: i32 = 3;
 
 impl Default for App {
     fn default() -> Self {
@@ -351,6 +378,7 @@ impl Default for App {
             selection: None,
             offset: 0,
             h_scroll: 0,
+            h_wheel: 0,
             focus: Focus::Diff,
             repo: String::new(),
             branch: String::new(),
@@ -729,20 +757,42 @@ impl App {
         let max_offset = self.rows.len().saturating_sub(viewport);
         match action {
             Action::ScrollViewDown(n) => {
+                self.h_wheel = 0;
                 self.offset = (self.offset + n).min(max_offset);
                 return;
             }
             Action::ScrollViewUp(n) => {
+                self.h_wheel = 0;
                 self.offset = self.offset.saturating_sub(n);
                 return;
             }
             Action::ScrollFilesDown(n) => {
+                self.h_wheel = 0;
                 let max = self.files.len().saturating_sub(self.files_viewport());
                 self.files_offset = (self.files_offset + n).min(max);
                 return;
             }
             Action::ScrollFilesUp(n) => {
+                self.h_wheel = 0;
                 self.files_offset = self.files_offset.saturating_sub(n);
+                return;
+            }
+            // Counted rather than acted on until the run is long enough to be
+            // intent. `max(0)`/`min(0)` is what makes a reversal start its own
+            // run instead of walking back down through the other direction's
+            // count.
+            Action::WheelRight => {
+                self.h_wheel = self.h_wheel.max(0) + 1;
+                if self.h_wheel >= H_WHEEL_INTENT {
+                    self.h_scroll = (self.h_scroll + 4).min(self.widest_line.saturating_sub(1));
+                }
+                return;
+            }
+            Action::WheelLeft => {
+                self.h_wheel = self.h_wheel.min(0) - 1;
+                if self.h_wheel <= -H_WHEEL_INTENT {
+                    self.h_scroll = self.h_scroll.saturating_sub(4);
+                }
                 return;
             }
             _ => {}
@@ -893,7 +943,9 @@ impl App {
             Action::ScrollViewDown(_)
             | Action::ScrollViewUp(_)
             | Action::ScrollFilesDown(_)
-            | Action::ScrollFilesUp(_) => {}
+            | Action::ScrollFilesUp(_)
+            | Action::WheelLeft
+            | Action::WheelRight => {}
             // Handled by the caller, which owns the socket and the terminal.
             // Everything that talks to the server is in that group: `App` is
             // the model, and a model that could post a comment would need to
@@ -1237,9 +1289,11 @@ impl App {
             MouseEventKind::ScrollDown => Action::ScrollViewDown(3),
             MouseEventKind::ScrollUp => Action::ScrollViewUp(3),
             // Terminals that report horizontal wheels (or shift+wheel) send
-            // these; the diff is the only thing that scrolls sideways.
-            MouseEventKind::ScrollRight => Action::ScrollRight(4),
-            MouseEventKind::ScrollLeft => Action::ScrollLeft(4),
+            // these; the diff is the only thing that scrolls sideways. They do
+            // not scroll on their own — a trackpad emits them as a by-product
+            // of scrolling vertically, so `apply` waits for a run of them.
+            MouseEventKind::ScrollRight => Action::WheelRight,
+            MouseEventKind::ScrollLeft => Action::WheelLeft,
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(files) = self.files_pane_hit(col, row) {
                     return files;
@@ -1782,6 +1836,69 @@ mod tests {
 
         app.apply(Action::ResetHScroll, 10);
         assert_eq!(app.h_scroll, 0);
+    }
+
+    /// A review with one line long enough to have somewhere to scroll to.
+    fn wide_app() -> App {
+        let long = "x".repeat(200);
+        let patch = format!("diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-short\n+{long}");
+        let mut app = App::default();
+        app.load(&payload(&patch), 10);
+        app
+    }
+
+    #[test]
+    fn a_trackpad_scrolling_vertically_never_walks_the_diff_sideways() {
+        // The reported bug. A two-finger swipe is never purely vertical, so the
+        // terminal reports horizontal notches the whole way down; four columns
+        // apiece walked the code off the left of the pane during ordinary
+        // reading, leaving gutters and markers drawing over nothing.
+        //
+        // Interleaving is what tells that apart from a swipe, so this asserts
+        // the interleaved shape rather than a fixed count: what matters is that
+        // horizontal notches arriving *among* vertical ones never accumulate.
+        let mut app = wide_app();
+        for _ in 0..50 {
+            app.apply(Action::ScrollViewDown(3), 10);
+            app.apply(Action::WheelRight, 10);
+            app.apply(Action::WheelRight, 10);
+            app.apply(Action::ScrollViewUp(3), 10);
+            app.apply(Action::WheelRight, 10);
+        }
+        assert_eq!(app.h_scroll, 0, "the code never left the pane");
+    }
+
+    #[test]
+    fn a_sideways_swipe_scrolls_once_it_is_long_enough_to_be_meant() {
+        let mut app = wide_app();
+        app.apply(Action::WheelRight, 10);
+        app.apply(Action::WheelRight, 10);
+        assert_eq!(app.h_scroll, 0, "not yet a run");
+        app.apply(Action::WheelRight, 10);
+        assert_eq!(app.h_scroll, 4, "the third notch is the one that means it");
+        app.apply(Action::WheelRight, 10);
+        assert_eq!(
+            app.h_scroll, 8,
+            "and every one after it, so it stays smooth"
+        );
+
+        // Turning round starts a new run rather than unwinding the old one's
+        // count, which would make the first three notches back do nothing
+        // visible and then jump.
+        app.apply(Action::WheelLeft, 10);
+        app.apply(Action::WheelLeft, 10);
+        assert_eq!(app.h_scroll, 8);
+        app.apply(Action::WheelLeft, 10);
+        assert_eq!(app.h_scroll, 4);
+    }
+
+    #[test]
+    fn the_keyboard_scrolls_sideways_on_the_first_press() {
+        // `h`/`l` are intent in a way a wheel notch is not, so they are a
+        // different action and skip the run entirely.
+        let mut app = wide_app();
+        app.apply(Action::ScrollRight(4), 10);
+        assert_eq!(app.h_scroll, 4);
     }
 
     #[test]

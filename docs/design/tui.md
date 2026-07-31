@@ -77,11 +77,19 @@ bug in the whole design.
 **Keyboard disambiguation.** The web UI uses `Cmd+Enter` to submit a comment
 and `Shift+Enter` for a newline. A legacy terminal cannot distinguish either
 from plain `Enter` — they all arrive as `\r`. The Kitty keyboard protocol
-(`PushKeyboardEnhancementFlags` with
-`DISAMBIGUATE_ESCAPE_CODES | REPORT_ALL_KEYS_AS_ESCAPE_CODES`) fixes it where
-supported (kitty, foot, WezTerm, Ghostty, recent iTerm2). Where it isn't,
-`Enter` inserts a newline and `Ctrl+S` submits, and the footer says which mode
-is live. Do not pick the binding based on the developer's terminal.
+(`PushKeyboardEnhancementFlags` with `DISAMBIGUATE_ESCAPE_CODES`) fixes it
+where supported (kitty, foot, WezTerm, Ghostty, recent iTerm2).
+
+`Enter` submits, matching the web UI. Since the reviewer's newline chords are
+exactly the ones a legacy terminal cannot deliver, the composer needs a newline
+key that no terminal can fail to deliver, or a two-line comment is impossible
+to write on one. That key is `Ctrl+J`: raw mode leaves `0x0A` unmapped, so
+crossterm parses it as `Ctrl+J` rather than as `Enter` everywhere.
+`Shift+Enter`, `Option+Enter` and `Ctrl+S` are the other routes, each working
+wherever the terminal carries it. The footer names whichever newline key is
+real here, because naming an undeliverable one would advertise the key that
+posts a half-written comment as the key that breaks the line. Do not pick the
+binding based on the developer's terminal.
 
 **Mouse capture, and giving it back.** `EnableMouseCapture` buys click-to-focus,
 click-drag selection, and scroll. It also takes over the terminal's own

@@ -344,13 +344,27 @@ pub enum Intent {
 
 /// Route one key.
 ///
-/// Submit is `Ctrl+S` because it is the binding a legacy terminal can actually
-/// deliver: `Cmd+Enter` and `Shift+Enter` — what the web UI uses — both arrive
-/// as a bare `\r`, indistinguishable from `Enter`, unless the terminal speaks
-/// the Kitty keyboard protocol. Where it does, `Ctrl+Enter` works too, and the
-/// footer says so; where it does not, binding submit to Enter would make a
-/// two-line comment impossible to write. Do not pick this from the developer's
-/// own terminal.
+/// Enter posts. The newline is `Shift+Enter` or `Option+Enter` where the
+/// terminal can deliver them, and **`Ctrl+J` everywhere** — which is the only
+/// reason the first two are safe to offer. A terminal that does not speak the
+/// Kitty keyboard protocol reports `Shift+Enter` as a bare `\r`,
+/// indistinguishable from `Enter`, so there it posts rather than breaking the
+/// line; without a newline key that needs no protocol at all, that would make
+/// a two-line comment impossible to write. `Ctrl+J` is that key, and it is not
+/// a lucky accident: raw mode leaves `0x0A` unmapped, so crossterm parses it
+/// through the `\x01..=\x1A` arm as `Ctrl+J` rather than as `Enter`, in every
+/// terminal there is. `Option+Enter` survives a legacy terminal too whenever
+/// it is configured to send Meta as an `ESC` prefix, which is not the default
+/// on macOS — so it is an extra, never the fallback.
+///
+/// The footer therefore promises `Shift+Enter` only where the protocol is up,
+/// and `Ctrl+J` otherwise. Do not pick these from the developer's own terminal:
+/// the binding that matters is the one that works in the worst terminal, not
+/// the best.
+///
+/// Bracketed paste carries the whole clipboard as one event, which is what
+/// keeps a pasted multi-line comment from posting itself after its first line
+/// now that Enter submits. `enter_screen` asks for it unconditionally.
 ///
 /// `width` is the pane the text is wrapped to: up, down, home and end are
 /// movements on the screen, and a screen row is not a line of the buffer.
@@ -369,13 +383,29 @@ pub fn key(composer: &mut Composer, key: KeyEvent, width: usize) -> Intent {
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match (key.code, ctrl, alt) {
         (KeyCode::Char('s'), true, _) => Intent::Post,
-        // Only reachable under the Kitty protocol; a legacy terminal reports
-        // both of these as a bare Enter, which inserts a newline below.
         (KeyCode::Enter, true, _) => Intent::Post,
         (KeyCode::Char('q'), true, _) if composer.can_queue() => Intent::Queue,
-        (KeyCode::Enter, false, true) if composer.can_queue() => Intent::Queue,
+        // The newline keys, and they have to be matched ahead of the bare
+        // `Enter` arm further down rather than beside it, because that arm is
+        // what posts now. `Ctrl+J` is the one of the three that no terminal
+        // can fail to deliver; the other two are what a reviewer will reach
+        // for first, and are silently *not* newlines wherever the modifier
+        // never reaches us — see this function's doc.
+        (KeyCode::Char('j'), true, _) => {
+            composer.editor.insert("\n");
+            Intent::Edited
+        }
+        (KeyCode::Enter, false, true) => {
+            composer.editor.insert("\n");
+            Intent::Edited
+        }
+        (KeyCode::Enter, false, false) if shift => {
+            composer.editor.insert("\n");
+            Intent::Edited
+        }
         (KeyCode::Esc, _, _) => Intent::Cancel,
         // Raw mode cleared ISIG, so this is a key like any other and reaching
         // the catch-all would drop it silently — the one key everybody presses
@@ -401,10 +431,8 @@ pub fn key(composer: &mut Composer, key: KeyEvent, width: usize) -> Intent {
             composer.editor.end(width);
             Intent::Edited
         }
-        (KeyCode::Enter, _, _) => {
-            composer.editor.insert("\n");
-            Intent::Edited
-        }
+        // Every modified `Enter` was taken above, so this is a bare one.
+        (KeyCode::Enter, _, _) => Intent::Post,
         (KeyCode::Backspace, _, _) => {
             composer.editor.backspace();
             Intent::Edited
@@ -627,28 +655,62 @@ mod tests {
     // ---- the form -------------------------------------------------------
 
     #[test]
-    fn ctrl_s_posts_and_enter_makes_a_new_line() {
-        // Enter cannot be submit: a terminal that does not speak the Kitty
-        // protocol reports Shift+Enter as a bare Enter too, so binding submit
-        // there makes a two-line comment impossible to write.
+    fn enter_posts_and_three_other_keys_make_a_new_line() {
         let mut c = composer();
         assert_eq!(
             key(&mut c, key_of(KeyCode::Enter, KeyModifiers::NONE), WIDE),
-            Intent::Edited
+            Intent::Post,
+            "a bare Enter is the submit"
         );
-        assert_eq!(c.editor.text(), "\n");
+        assert_eq!(c.editor.text(), "", "and it typed nothing on the way");
+        for (name, event) in [
+            ("ctrl-j", key_of(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            ("alt-enter", key_of(KeyCode::Enter, KeyModifiers::ALT)),
+            ("shift-enter", key_of(KeyCode::Enter, KeyModifiers::SHIFT)),
+        ] {
+            let mut c = composer();
+            assert_eq!(key(&mut c, event, WIDE), Intent::Edited, "{name}");
+            assert_eq!(c.editor.text(), "\n", "{name}");
+        }
+        // Ctrl+S survives as the binding this form shipped with, and where the
+        // Kitty protocol is live the web UI's chord works too.
+        for chord in [
+            key_of(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            key_of(KeyCode::Enter, KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(key(&mut composer(), chord, WIDE), Intent::Post);
+        }
+    }
+
+    #[test]
+    fn ctrl_j_is_the_new_line_that_needs_no_keyboard_protocol() {
+        // The load-bearing one. A terminal that does not speak the Kitty
+        // protocol reports shift-enter and ctrl-enter alike as a bare `\r`,
+        // which now posts — so without a newline key that survives that, a
+        // two-line comment would be impossible to write there. Ctrl+J is it:
+        // raw mode leaves 0x0A unmapped, so crossterm parses it as Ctrl+J
+        // rather than as Enter. This asserts the *legacy* shape deliberately —
+        // a bare Enter standing in for the shift-enter that never arrived.
+        let mut c = composer();
+        key(&mut c, key_of(KeyCode::Char('o'), KeyModifiers::NONE), WIDE);
+        assert_eq!(
+            key(&mut c, key_of(KeyCode::Enter, KeyModifiers::NONE), WIDE),
+            Intent::Post,
+            "what shift-enter degrades to"
+        );
         assert_eq!(
             key(
                 &mut c,
-                key_of(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                key_of(KeyCode::Char('j'), KeyModifiers::CONTROL),
                 WIDE
             ),
-            Intent::Post
+            Intent::Edited
         );
-        // And where the protocol *is* live, the web UI's chord works too.
+        key(&mut c, key_of(KeyCode::Char('k'), KeyModifiers::NONE), WIDE);
         assert_eq!(
-            key(&mut c, key_of(KeyCode::Enter, KeyModifiers::CONTROL), WIDE),
-            Intent::Post
+            c.editor.text(),
+            "o\nk",
+            "two lines, on a terminal with no protocol at all"
         );
     }
 

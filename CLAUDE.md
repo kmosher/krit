@@ -331,6 +331,22 @@ is a guarantee — the residual race is the length of a fold:
   Comments whose line is in no hunk render under the file header rather than
   nowhere — a comment that exists, is listed by `krit comments`, and cannot be
   seen is worse than one in an approximate place.
+- **A horizontal wheel notch is not a request to scroll sideways.** A trackpad
+  cannot emit a pure vertical scroll — a two-finger swipe carries a sideways
+  component the whole way and the terminal reports every bit of it as a
+  horizontal wheel — so acting on each notch walked the diff off the left of
+  the pane during ordinary reading. What that leaves looks like a rendering
+  fault rather than a scroll position, which is what makes it expensive to
+  diagnose: the gutters and `+`/`-` markers are not scrolled, so they keep
+  drawing over blank code, and the file headers and `@@` lines render fine too.
+  `H_WHEEL_INTENT` requires a *run* of horizontal notches and any vertical
+  notch resets the count, because the noise is by construction interleaved with
+  the vertical scrolling that produced it while a deliberate swipe is not.
+  `h`/`l` stay a separate action and skip the run entirely — a key is intent in
+  a way a notch is not. The clamp is against the widest line in the *review*,
+  so it cannot save a screen of short lines on its own; the footer therefore
+  names the column whenever `h_scroll` is non-zero, and names it first, since
+  it is the only thing on screen that can explain a pane of bare gutters.
 - **A gap is what the patch does not carry, so its text comes from
   `fileContents`** — bundled in every `/api/diff` response, which is what makes
   expanding one a local operation rather than a request per gap. Three things
@@ -459,12 +475,22 @@ is a guarantee — the residual race is the length of a fold:
     stops a form submitting twice but cannot stop a later form being closed by
     an earlier form's answer, and Esc-ing out of an in-flight post and starting
     another produces exactly that.
-  - **Submit is `Ctrl+S`, never `Enter`.** A terminal without the Kitty
-    keyboard protocol reports `Ctrl+Enter` and `Shift+Enter` as a bare `\r`,
-    indistinguishable from `Enter` — so binding submit there makes a two-line
-    comment impossible to write. `Ctrl+Enter` is accepted *as well*, and the
-    footer promises it only where `supports_keyboard_enhancement()` said yes.
-    Do not pick this binding from the terminal you happen to use.
+  - **Enter submits, and `Ctrl+J` is the only reason that is safe.** A terminal
+    without the Kitty keyboard protocol reports `Shift+Enter` and `Ctrl+Enter`
+    as a bare `\r`, indistinguishable from `Enter` — so with Enter bound to
+    submit, *neither* chord a reviewer reaches for can be relied on to break a
+    line, and a two-line comment needs a newline key that depends on no
+    protocol at all. `Ctrl+J` is that key, and not by luck: raw mode leaves
+    `0x0A` unmapped, so crossterm parses it through its `\x01..=\x1A` arm as
+    `Ctrl+J` rather than as `Enter`, in every terminal there is.
+    `Shift+Enter` and `Option+Enter` insert a newline too wherever the
+    modifier survives the trip, and `Ctrl+S` still posts. The footer names
+    `Shift+Enter` only where `supports_keyboard_enhancement()` said yes and
+    `Ctrl+J` otherwise — naming the wrong one would tell the reviewer that the
+    key which *posts* their half-written comment breaks the line instead.
+    Do not pick these bindings from the terminal you happen to use.
+    Bracketed paste stops being a nicety here and becomes load-bearing: without
+    it a pasted three-line comment is three `Enter`s, and the first one posts.
   - Its up/down/home/end move by **screen** row, not by line of the buffer: the
     form is full of prose and most rows on screen are wrapped ones. That is why
     `Editor` is one string and one offset rather than a vector of lines, and

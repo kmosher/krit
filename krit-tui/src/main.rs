@@ -399,7 +399,7 @@ fn act_compose(app: &mut App, intent: Intent, server: &str, tx: &Sender<Incoming
             true
         }
         Intent::Post | Intent::Queue => {
-            // A second Ctrl+S while the first is on its way would post the
+            // A second Enter while the first is on its way would post the
             // comment twice, and nothing afterwards can tell the copies apart.
             if composer.sending {
                 return false;

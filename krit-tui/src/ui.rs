@@ -204,7 +204,17 @@ fn footer<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     let (text, style) = match &app.status {
         Status::Idle => (
             format!(
-                " j/k move · n/p hunk · ]/[ file · v select · c comment · z collapse · f files{} · ? keys · q quit",
+                " {}j/k move · n/p hunk · ]/[ file · v select · c comment · z collapse · f files{} · ? keys · q quit",
+                // First, and only when scrolled: a pane far enough to the
+                // right shows bare gutters and no code, which looks like a
+                // rendering fault rather than a position. This is the only
+                // thing on screen that can say otherwise, so it must not be
+                // the part that falls off the end of a narrow terminal.
+                if app.h_scroll > 0 {
+                    format!("col {} · 0 reset · ", app.h_scroll)
+                } else {
+                    String::new()
+                },
                 // Only worth a cell when it is off, because that is the state
                 // someone needs telling how to undo.
                 if app.mouse { "" } else { " · m mouse off" },
@@ -288,17 +298,22 @@ fn compose_pane<'a>(
     } else if composer.sending {
         " Sending…".to_string()
     } else {
-        let post = if enhanced {
-            "ctrl-s / ctrl-enter post"
+        // Name the newline key the terminal can actually deliver. Under the
+        // Kitty protocol that is shift-enter, which is what a reviewer tries
+        // first; without it shift-enter arrives as a bare Enter and *posts*,
+        // so promising it there would be promising the opposite of what it
+        // does. ctrl-j works in both and is the honest answer in the second.
+        let newline = if enhanced {
+            "shift-enter newline"
         } else {
-            "ctrl-s post"
+            "ctrl-j newline"
         };
         let queue = if composer.can_queue() {
             "  ·  ctrl-q queue"
         } else {
             ""
         };
-        format!(" {post}{queue}  ·  enter newline  ·  esc cancel")
+        format!(" enter post{queue}  ·  {newline}  ·  esc cancel")
     };
     let style = if composer.confirm_discard {
         theme
@@ -1241,6 +1256,20 @@ mod tests {
         assert!(screen[11].contains("m mouse off"), "{:?}", screen[11]);
     }
 
+    #[test]
+    fn the_footer_explains_a_pane_that_has_been_scrolled_off_its_code() {
+        // Scrolled far enough right, every code row is blank while the gutters
+        // keep drawing — which reads as a rendering fault, not a position. The
+        // footer is the only thing that can say otherwise, and it says it
+        // first so a narrow terminal cannot truncate the explanation away.
+        let mut app = app();
+        let screen = render(&app, 100, 12);
+        assert!(!screen[11].contains("0 reset"), "{:?}", screen[11]);
+        app.apply(Action::ScrollRight(4), 10);
+        let screen = render(&app, 100, 12);
+        assert!(screen[11].contains("col 4 · 0 reset"), "{:?}", screen[11]);
+    }
+
     fn comment(line: u32, body: &str) -> krit_core::types::ReviewComment {
         krit_core::types::ReviewComment {
             id: format!("c{line}"),
@@ -1408,22 +1437,25 @@ mod tests {
         );
         let all = screen.join("\n");
         assert!(all.contains("this name is doing two jobs"), "{all}");
-        assert!(all.contains("ctrl-s post"), "{all}");
+        assert!(all.contains("enter post"), "{all}");
         assert!(all.contains("Comment on src/a.rs"), "{all}");
         // And the diff is still there above it.
         assert!(all.contains("src/a.rs"), "{all}");
     }
 
     #[test]
-    fn the_footer_promises_ctrl_enter_only_where_the_terminal_can_deliver_it() {
-        // A legacy terminal reports Ctrl+Enter as a bare Enter, so promising
-        // the binding there would be promising a newline.
+    fn the_footer_names_a_newline_key_the_terminal_can_actually_deliver() {
+        // Enter posts, so the newline hint is the one thing here that must not
+        // be aspirational: a legacy terminal reports shift-enter as a bare
+        // Enter, and naming it there would tell the reviewer that the key
+        // which posts their half-written comment breaks the line instead.
         let mut app = app();
         app.apply(Action::Down(4), 10);
         composing(&mut app, "x");
         let plain = render(&app, 100, 20).join("\n");
-        assert!(plain.contains("ctrl-s post"), "{plain}");
-        assert!(!plain.contains("ctrl-enter"), "{plain}");
+        assert!(plain.contains("enter post"), "{plain}");
+        assert!(plain.contains("ctrl-j newline"), "{plain}");
+        assert!(!plain.contains("shift-enter"), "{plain}");
 
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         let theme = Theme { color: true };
@@ -1433,7 +1465,7 @@ mod tests {
             })
             .unwrap();
         let enhanced = rows_of(terminal.backend().buffer()).join("\n");
-        assert!(enhanced.contains("ctrl-s / ctrl-enter post"), "{enhanced}");
+        assert!(enhanced.contains("shift-enter newline"), "{enhanced}");
     }
 
     #[test]
