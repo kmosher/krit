@@ -12,7 +12,7 @@ use crate::compose::Composer;
 use crate::patch::{FileDiff, parse_patch};
 use crate::rows::{
     GapRange, MARKER_COLS, Opened, Row, build_rows, comment_rows, file_rows, gaps_of, gutter_width,
-    hunk_rows, next_stop, scroll_to_show,
+    hunk_rows, next_stop, scroll_to_show, split_half_width, split_side_prefix,
 };
 use crate::text::{cluster_at_column, display_width, expand_tabs};
 use krit_core::types::ReviewComment;
@@ -141,9 +141,9 @@ pub enum Action {
 /// not.
 pub const SPLIT_MIN_COLS: usize = 90;
 
-/// Lines opened per `+`, from each edge. Ten is about a screenful between the
-/// two, which is the amount of context a reader asks for when a hunk's own
-/// three lines were not enough.
+/// Lines opened per `+`, from each edge — so a press yields twice this many.
+/// Enough to see what a hunk's own three lines of context cut off, small enough
+/// that walking into a long gap takes deliberate presses rather than one.
 pub const EXPAND_STEP: u32 = 5;
 
 /// How far to open, or close, the gap under the cursor.
@@ -151,11 +151,16 @@ pub const EXPAND_STEP: u32 = 5;
 pub enum Step {
     /// A few lines in from each edge — the common case, reading around a hunk.
     More(u32),
+    /// Give a few lines back from each edge.
     Less(u32),
     /// The whole gap. Anchored at the top rather than split between the edges,
     /// because once it is all open there is no middle left to keep.
     All,
-    None,
+    /// Fold it all back up. Named for the *state* it leaves the gap in, not for
+    /// a step of zero — `Action::None` in this same module means do nothing,
+    /// and a reader who takes this for the same thing deletes the only way to
+    /// close a gap in one keystroke.
+    Closed,
 }
 
 /// What the reviewer has marked, and what a comment posted from it would be
@@ -435,7 +440,16 @@ impl App {
             let Some(sides) = payload.file_contents.get(&file.path) else {
                 continue;
             };
-            if let Some(why) = sides.new.refusal() {
+            // `refusal` answers for the shapes we know; anything else with no
+            // text is treated the same way rather than falling through to the
+            // `continue` below, which would drop the file's gap rows entirely —
+            // a diff whose hidden context has silently vanished, indistinguish-
+            // able from one that has none. The wire will grow more of these.
+            let refused = sides
+                .new
+                .refusal()
+                .or_else(|| sides.new.contents.is_none().then_some("text unavailable"));
+            if let Some(why) = refused {
                 self.file_text_refusal.insert(file.path.clone(), why);
                 // Gaps are still worked out, and still drawn — the row is where
                 // the reason gets said. Told nothing, the reviewer cannot tell a
@@ -466,7 +480,14 @@ impl App {
     pub fn context_line(&self, file: usize, gap: usize, line: u32) -> Option<(&str, Option<u32>)> {
         let path = &self.files.get(file)?.path;
         let range = self.gaps.get(path)?.get(gap)?;
-        let text = self.file_text.get(path)?.get(line as usize - 1)?;
+        // `checked_sub`, not `- 1`: a new-file line number is 1-based, and a
+        // zero would underflow to `usize::MAX` — a blank row in release, a
+        // panic in debug. `gaps_of` no longer emits one, and this is the second
+        // lock on that door rather than a reason to trust the first.
+        let text = self
+            .file_text
+            .get(path)?
+            .get((line as usize).checked_sub(1)?)?;
         Some((text.as_str(), range.old_line(line)))
     }
 
@@ -512,7 +533,7 @@ impl App {
         let (from_start, from_end) = *entry;
         *entry = match by {
             Step::All => (len, 0),
-            Step::None => (0, 0),
+            Step::Closed => (0, 0),
             Step::More(n) => (
                 (from_start + n).min(len),
                 (from_end + n).min(len.saturating_sub((from_start + n).min(len))),
@@ -604,7 +625,19 @@ impl App {
 
         let width = panes.diff.width as usize;
         if width > 0 && width != self.wrap_width {
+            let was_split = self.split();
             self.wrap_width = width;
+            // A width change can flip the *view*, not just the wrapping — the
+            // file list is 34 fixed columns, so `f` alone crosses
+            // `SPLIT_MIN_COLS` on an ordinary terminal. `ToggleSplit` drops the
+            // selection for this exact reason and the implicit path has to as
+            // well: its rows are indices into the other model, and its `side`
+            // was measured in the other column frame, so `c` would anchor
+            // against lines and characters the reviewer never marked. Only on
+            // a flip, so an ordinary resize inside one view keeps it.
+            if self.split() != was_split {
+                self.selection = None;
+            }
             self.rebuild();
             return true;
         }
@@ -710,12 +743,25 @@ impl App {
                 self.split_pref = !self.split_pref;
                 // The row model *is* the view here — a pair is one row and a
                 // unified line is one row, so the same file is a different
-                // number of rows in each. Re-find the cursor by identity the
-                // way a refetch does, or toggling walks the reviewer down the
-                // file by however much the hunks above them compressed.
-                let at = self.rows.get(self.cursor).copied();
+                // number of rows in each. The cursor therefore has to be
+                // re-found by what the row *says* rather than by what it is:
+                // `set_comments` can compare `Row`s because the diff has not
+                // changed under it, and a view toggle is precisely the case
+                // where that does not hold — a `Row::Code` never equals a
+                // `Row::Split`, so an identity lookup misses every code row and
+                // leaves the raw index pointing at a different line.
+                let at = self
+                    .rows
+                    .get(self.cursor)
+                    .copied()
+                    .and_then(|r| self.leading_line(r));
                 self.rebuild();
-                if let Some(row) = at.and_then(|r| self.rows.iter().position(|x| *x == r)) {
+                if let Some(target) = at
+                    && let Some(row) = self
+                        .rows
+                        .iter()
+                        .position(|r| self.leading_line(*r) == Some(target))
+                {
                     self.cursor = row;
                 }
                 self.selection = None;
@@ -894,30 +940,57 @@ impl App {
     /// does not fail, it anchors the comment a few characters off. Unified
     /// spends `gutter * 2 + MARKER_COLS` before the text; split spends
     /// `gutter + MARKER_COLS - 1` per side, twice, with one column of divider
-    /// between — which is why the half width comes from `ui::split_half_width`
-    /// rather than being worked out again here.
+    /// between — which is why both come from `rows::split_side_prefix` and
+    /// `rows::split_half_width` rather than being worked out again here.
     ///
-    /// The side is `None` in unified view, where a row *is* a side.
-    fn text_column_at(&self, col: u16) -> (usize, Option<bool>) {
+    /// The side is `None` in unified view, where a row *is* a side — and also
+    /// for a row that has no sides at all. `row` is what was pressed, so a
+    /// header, a comment or a gap answers "no side" rather than whichever half
+    /// of the pane it happened to land in: an accidental side overrides the one
+    /// `comment_anchor` would derive, and over an addition-only run it leaves
+    /// no line to anchor to at all, so `c` reports nothing to comment on where
+    /// unified would have worked.
+    ///
+    /// `held` is the side a drag has already committed to. Once a gesture has
+    /// one, a pointer that wanders across the divider is still selecting the
+    /// text it began in, so the column keeps being read in that half's frame —
+    /// otherwise it restarts from zero in the other half and the stored range
+    /// reverses, or collapses far enough to be taken for a click.
+    fn text_column_at(
+        &self,
+        col: u16,
+        row: Option<Row>,
+        held: Option<bool>,
+    ) -> (usize, Option<bool>) {
         let within = col.saturating_sub(self.panes.diff.x) as usize;
-        if !self.split() {
+        // Only a `Row::Split` is drawn in two columns. An expanded gap keeps the
+        // unified shape even in split view — its text is the same on both sides,
+        // so there is nothing to put beside it — and must therefore be decoded
+        // with the unified prefix, or a press on one resolves a gutter's width
+        // off and picks up a side it does not have.
+        let two_sided = matches!(row, Some(Row::Split { .. }));
+        if !self.split() || !(two_sided || held.is_some()) {
             return (
                 self.h_scroll + within.saturating_sub(self.gutter * 2 + MARKER_COLS),
                 None,
             );
         }
-        let prefix = self.gutter + MARKER_COLS - 1;
-        let half = crate::ui::split_half_width(self.wrap_width, self.gutter);
+        let prefix = split_side_prefix(self.gutter);
+        let half = split_half_width(self.wrap_width, self.gutter);
         let divider = prefix + half;
-        if within <= divider {
-            (self.h_scroll + within.saturating_sub(prefix), Some(false))
+        let side = held.unwrap_or(within > divider);
+        let into_side = if side {
+            within.saturating_sub(divider + 1)
         } else {
-            let into_right = within - divider - 1;
-            (
-                self.h_scroll + into_right.saturating_sub(prefix),
-                Some(true),
-            )
-        }
+            // Past the divider while holding the left column: the pointer has
+            // run off the end of this side, which means end of line — not
+            // column zero of the other one.
+            within.min(divider)
+        };
+        (
+            self.h_scroll + into_side.saturating_sub(prefix).min(half),
+            Some(side),
+        )
     }
 
     /// What a comment posted right now would be anchored to: the selection if
@@ -939,14 +1012,12 @@ impl App {
         let marked = self
             .rows
             .get(first..=last.min(self.rows.len().saturating_sub(1)))?;
-        // The side and the file come from the first line of code in range —
-        // everything after it that disagrees is simply not part of the anchor.
-        // A selection dragged across a deletion and its replacement can only
-        // be one or the other: line numbers on the wire belong to a side.
-        // A drag in split view already said which side it meant, by which of
-        // the two code columns it happened in. Deriving it from the row instead
-        // would read a drag over a deleted line as a comment on its
-        // replacement — the right line number for text nobody selected.
+        // The *file* comes from the first line of code in range. The **side**
+        // comes from the drag when there was one — see `Selection::side` — and
+        // from that same line otherwise. Either way it is one side: a selection
+        // across a deletion and its replacement can only be one or the other,
+        // because line numbers on the wire belong to a side, and everything in
+        // range that disagrees is simply not part of the anchor.
         let dragged_side = self.selection.and_then(|s| s.side);
         let (file, additions) = marked.iter().find_map(|row| {
             let (file, hunk, line) = self.leading_line(*row)?;
@@ -1105,7 +1176,8 @@ impl App {
                 }
                 match self.diff_row_at(col, row) {
                     Some(index) => {
-                        let (column, side) = self.text_column_at(col);
+                        let (column, side) =
+                            self.text_column_at(col, self.rows.get(index).copied(), None);
                         Action::SelectStart {
                             row: index,
                             column,
@@ -1125,11 +1197,12 @@ impl App {
                 let Some(index) = open.then(|| self.diff_row_clamped(row)).flatten() else {
                     return Action::None;
                 };
-                // The side is fixed by where the drag *started*: a pointer
-                // that wanders across the divider is still selecting the text
-                // it began in, and switching sides mid-drag would silently
-                // re-anchor the whole range onto a different line.
-                let (column, _) = self.text_column_at(col);
+                // The side is fixed by where the drag *started*, and handing it
+                // back in is what keeps the column in that side's frame: a
+                // pointer wandering across the divider is still selecting the
+                // text it began in.
+                let held = self.selection.and_then(|s| s.side);
+                let (column, _) = self.text_column_at(col, self.rows.get(index).copied(), held);
                 if matches!(event.kind, MouseEventKind::Up(_)) {
                     Action::SelectEnd { row: index, column }
                 } else {
@@ -1214,7 +1287,7 @@ impl App {
                 return;
             }
             Some(Row::Context { .. }) => {
-                self.expand_gap(Step::None);
+                self.expand_gap(Step::Closed);
                 return;
             }
             _ => {}
@@ -2194,6 +2267,62 @@ mod tests {
     }
 
     #[test]
+    fn toggling_the_view_keeps_the_cursor_on_the_same_line_of_code() {
+        // A Row::Code never equals a Row::Split, so identity cannot survive the
+        // toggle — the cursor has to be re-found by what the row says. Without
+        // that the raw index carries over into a list of a different length and
+        // silently lands on another line.
+        let mut app = split_texty();
+        app.apply(Action::Down(3), 20);
+        let before = app.leading_line(app.rows[app.cursor]);
+        assert!(before.is_some(), "parked on a line of code");
+
+        app.apply(Action::ToggleSplit, 20);
+        assert!(!app.split(), "now unified");
+        assert_eq!(app.leading_line(app.rows[app.cursor]), before);
+
+        app.apply(Action::ToggleSplit, 20);
+        assert!(app.split(), "and back");
+        assert_eq!(app.leading_line(app.rows[app.cursor]), before);
+    }
+
+    #[test]
+    fn a_drag_that_wanders_past_the_divider_extends_to_end_of_line() {
+        // The pointer leaving the column it started in does not mean the
+        // reviewer changed their mind about which line they are selecting. Read
+        // in the other half's frame, the column restarts from zero — which
+        // reverses the stored range, or collapses it far enough to be taken for
+        // a click and dropped.
+        let mut app = split_texty();
+        let text_x = split_side_prefix(app.gutter) as u16;
+        let half = split_half_width(app.wrap_width, app.gutter);
+        let far_right = (split_side_prefix(app.gutter) * 2 + half + 20) as u16;
+        drag(&mut app, (text_x, 4), (far_right, 4));
+        let anchor = app.comment_anchor().expect("still a selection");
+        assert_eq!(anchor.side, "deletions");
+        let (start, end, text) = anchor.columns.expect("a character anchor");
+        assert!(start <= end, "columns came back {start}..{end}");
+        assert_eq!(text, "charlie delta", "extended to the end of its own line");
+    }
+
+    #[test]
+    fn a_press_on_a_row_with_no_sides_does_not_invent_one() {
+        // Which half of the pane a hunk header happens to sit under is not a
+        // statement about additions or deletions, and letting it become one
+        // overrides the side comment_anchor would have derived.
+        let app = split_texty();
+        let far_right = (split_side_prefix(app.gutter) * 2
+            + split_half_width(app.wrap_width, app.gutter)
+            + 4) as u16;
+        // Screen row 2 is the hunk header; row 1 the file header.
+        let action = app.mouse_action(mouse(MouseEventKind::Down(MouseButton::Left), far_right, 2));
+        match action {
+            Action::SelectStart { side, .. } => assert_eq!(side, None),
+            other => panic!("expected a SelectStart, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_pane_too_narrow_for_two_columns_falls_back_to_unified() {
         // Remembered, not forgotten: hiding the file list or widening the
         // terminal has to bring it back without the reviewer asking twice.
@@ -2215,11 +2344,10 @@ mod tests {
     #[test]
     fn a_drag_in_the_old_column_anchors_on_the_deletions_side() {
         // The row holds both sides at once, so nothing but the drag itself can
-        // say which one the reviewer meant. Deriving it would file a comment
-        // against the replacement line — the right number, the wrong text.
+        // say which one the reviewer meant (`Selection::side`).
         let mut app = split_texty();
         let gutter = app.gutter;
-        let left_text = (gutter + MARKER_COLS - 1) as u16;
+        let left_text = split_side_prefix(gutter) as u16;
         // Row 3 of the model pairs "-charlie delta" with "+echo foxtrot";
         // screen row 4 with the diff pane starting at y=1.
         drag(&mut app, (left_text, 4), (left_text + 6, 4));
@@ -2231,8 +2359,8 @@ mod tests {
     #[test]
     fn a_drag_in_the_new_column_anchors_on_the_additions_side() {
         let mut app = split_texty();
-        let half = crate::ui::split_half_width(app.wrap_width, app.gutter);
-        let right_text = (app.gutter + MARKER_COLS - 1) * 2 + half + 1;
+        let half = split_half_width(app.wrap_width, app.gutter);
+        let right_text = split_side_prefix(app.gutter) * 2 + half + 1;
         drag(&mut app, (right_text as u16, 4), (right_text as u16 + 3, 4));
         let anchor = app.comment_anchor().expect("a line of code was marked");
         assert_eq!(anchor.side, "additions");

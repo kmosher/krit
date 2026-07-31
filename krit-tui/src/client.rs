@@ -63,9 +63,10 @@ pub struct DiffPayload {
 
 /// One file's text, as `/api/diff` bundles it.
 ///
-/// The response carries `old` as well; unified view only ever shows the new
-/// side of an unchanged line, so modelling the other one now would be a field
-/// nothing reads. Split view is what needs it (phase 2), and it can add it.
+/// The response carries `old` too and nothing models it, because nothing reads
+/// it: a hunk's lines already carry both sides' text, and a gap holds unchanged
+/// lines, which are the same text on either side. Split view did not change
+/// that — it draws both columns out of the hunk.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct FileSides {
     #[serde(default)]
@@ -78,9 +79,13 @@ pub struct FileSides {
 /// are not interchangeable: `missing` is a file that did not exist at that ref
 /// (every added file has one), `binary` is content no diff can show, and
 /// `oversize` is a file past `read_side`'s caps. Modelled as flags rather than
-/// an enum because that is what serde sees on the wire, and a shape this client
-/// does not recognise leaves every field false — which reads as "no text
-/// available", the safe answer.
+/// an enum because that is what serde sees on the wire.
+///
+/// A shape this client does not recognise leaves every field false, which
+/// `refusal` cannot name — so `take_file_text` treats *any* side with no
+/// `contents` as a refusal rather than trusting this list to stay complete. The
+/// wire will grow shapes, and the alternative is a file whose hidden context
+/// silently has no row at all.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SideText {
     pub contents: Option<String>,
@@ -93,9 +98,9 @@ pub struct SideText {
 }
 
 impl SideText {
-    /// The file's lines, or empty when this side carries no text. Callers can
-    /// treat "no text" and "no lines" alike: a gap over a side that cannot be
-    /// read simply does not expand.
+    /// The file's lines, or empty when this side carries no text — which the
+    /// caller must distinguish, since a gap with no text still gets a row
+    /// saying why it will not open.
     pub fn lines(&self) -> Vec<String> {
         match &self.contents {
             Some(text) => text.split('\n').map(str::to_string).collect(),
@@ -128,9 +133,11 @@ pub struct Settings {
     pub staged: bool,
     pub untracked: bool,
     pub tab_size: usize,
-    /// `diffStyle == "split"`. The reviewer's choice, shared with the browser;
-    /// whether the terminal is wide enough to honour it is `App::split`'s
-    /// question, not this one.
+    /// `diffStyle == "split"`. Read from the reviewer's settings once at
+    /// startup and never written back — `s` flips the view for this session
+    /// only, where the browser's toggle is durable, so the two can diverge
+    /// until the next launch. Whether the terminal is wide enough to honour it
+    /// is `App::split`'s question, not this one.
     pub split: bool,
 }
 

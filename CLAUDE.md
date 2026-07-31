@@ -339,17 +339,29 @@ is a guarantee — the residual race is the length of a fold:
     and it is why the two counts are clamped against each other rather than only
     against the length: two edges creeping toward the middle must meet exactly
     once, or a line renders twice and the diff quietly disagrees with itself.
-  - **A refused side still gets its gaps.** An oversize or binary file computes
-    its interior gaps anyway so the row can say *why* it will not open — told
-    nothing, a reviewer cannot tell a file too large to expand from a key that
-    does not work. Only the interior ones: the run after the last hunk is
-    bounded by the file's length, which is exactly what a refusal withholds.
+  - **A side with no text still gets its gaps.** An oversize or binary file
+    computes its interior gaps anyway so the row can say *why* it will not open
+    — told nothing, a reviewer cannot tell a file too large to expand from a key
+    that does not work. That covers shapes this client does not recognise as
+    well as the three it does, because the wire will grow more of them and the
+    alternative is a file whose hidden context has silently no row at all. Only
+    the interior gaps: the run after the last hunk is bounded by the file's
+    length, which is exactly what a refusal withholds, and `total_lines == 0` is
+    the documented way to say the length is unknown. A file with *no* new side —
+    a deletion, or one emptied in place — gets none at all: its only hunk is
+    `@@ -1,N +0,0 @@`, and reading that as a one-line trailing gap invented a
+    row for a line that does not exist and was the only route to a
+    `Row::Context { line: 0 }`, whose `line - 1` underflows.
 - **Split view is a different row model, not a different way of drawing one.**
   A `Row::Split` carries a *pair* of hunk-line indices where `Row::Code` carries
   one, so the same file is a different number of rows in each view — which is
-  why toggling re-finds the cursor by row identity the way a refetch does, and
-  why the row model rebuilds rather than the renderer branching. Three things
-  follow:
+  why the row model rebuilds rather than the renderer branching, and why
+  toggling re-finds the cursor by the *hunk line* the row names rather than by
+  row identity. Identity is what `set_comments` uses, and it can only do that
+  because the diff has not changed under it; a view toggle is exactly the case
+  where that fails, since a `Row::Code` never equals a `Row::Split` and the
+  lookup would miss every code row while the raw index carried on pointing at a
+  different line. Five things follow:
   - **Pairing is per run, not per hunk.** A run of deletions pairs index-wise
     with the run of additions that replaced it, and context ends a run. Pair
     across the whole hunk instead and a hunk containing two separate edits puts
@@ -363,12 +375,34 @@ is a guarantee — the residual race is the length of a fold:
     would disagree eventually, and a comment that lands differently depending on
     which view was open is invisible from either.
   - **`App::text_column_at` is the mirror of what `ui` draws**, and in split
-    view both halves must agree on `split_half_width`. Nothing catches a
-    mismatch: it does not fail, it anchors the comment a few characters off.
-    The fallback threshold is measured on the **diff pane**, not the terminal,
+    view both halves must agree on `rows::split_side_prefix` and
+    `rows::split_half_width` — which live beside `MARKER_COLS`, for the reason
+    its own doc gives. Nothing catches a mismatch: it does not fail, it anchors
+    the comment a few characters off. Both sides of a split row are therefore
+    **padded to the full half**, not merely sliced to it: `slice_columns`
+    truncates and never pads, so an unpadded side put the divider wherever its
+    line happened to end and every drag in the right-hand column decoded
+    against the left-hand line. The guard is a test that reads the divider's
+    column back off a rendered frame — a test that recomputes the arithmetic
+    shares the bug and passes.
+  - **Only a `Row::Split` is two-sided.** An expanded gap keeps the unified
+    shape even in split view (its text is identical on both sides, so a split
+    gap row would be the same string twice), and `text_column_at` decodes by row
+    kind for that reason. A press on a row with no sides at all — a header, a
+    comment, a gap — reports `None` rather than whichever half of the pane it
+    landed in: an invented side overrides the one `comment_anchor` would derive,
+    and over an addition-only run it leaves nothing to anchor to, so `c`
+    silently does nothing. Once a drag *has* a side it keeps it, and a pointer
+    wandering past the divider extends to end-of-line rather than restarting in
+    the other column's frame.
+  - The fallback threshold is measured on the **diff pane**, not the terminal,
     because the file list takes a fixed 34 columns — so hiding the list is a way
     to get split view back on a narrow terminal, which is the behaviour you want
-    and would be unexplainable if the threshold were on the window.
+    and would be unexplainable if the threshold were on the window. That also
+    makes `f` an *implicit* view flip, so `set_panes` drops the selection when
+    `split()` changes across a rebuild, exactly as the explicit toggle does: its
+    rows index the other model and its side was measured in the other column
+    frame.
 - **A mutation nobody broadcasts is invisible to any client that only
   listens**, and the browser's 3s `useComments` poll is what hid that for a
   long time. `krit-tui` has no poll, so every gap showed up there as a key that

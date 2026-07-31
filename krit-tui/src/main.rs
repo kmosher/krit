@@ -434,6 +434,7 @@ fn run(diff_args: &[String]) -> Result<(), String> {
         // indents on the same review is the kind of disagreement nobody
         // diagnoses. Set before `load`, which measures expanded lines.
         tab_size: settings.tab_size,
+        split_pref: settings.split,
         ..App::default()
     };
     app.load(&payload, 1);
