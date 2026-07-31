@@ -15,6 +15,13 @@ removed 2026-07), which is why some shapes look the way they do; it is not a
 constraint. Change the wire freely, and move the server, both clients and the
 skill together when you do.
 
+The skill is `skills/krit/`, reached through a symlink at
+`~/.claude/skills/krit` — a personal skill, not a plugin. A plugin from a
+directory-source marketplace would also load in place and keep edits live, but
+it namespaces the invocation (`/krit:krit` rather than `/krit`) and buys
+nothing until krit has a user who isn't the author. Don't "upgrade" it without
+being asked.
+
 ## Versioning and the changelog
 
 krit is `0.x` and nothing consumes the version but `--version`, so **bump it
@@ -33,9 +40,26 @@ disagrees about. `changelog/README.md` has the format. Breaking changes are
 listed under `### Changed`, not called out specially — at `0.x` they are
 routine, which is what the README's warning is for.
 
-`just release <version>` is the only thing that writes `CHANGELOG.md` or a
-version number; it collates the fragments, deletes them, and sets all three
-version files at once so they cannot drift apart.
+**Cut a release as the last commit before every `wt-fold`** — `just release`
+for a patch, `just release minor` when the change is one a user would notice or
+that moves the wire. Which of the two is your call; getting it wrong costs
+nothing at `0.x`, and skipping the release costs the thing releases are for.
+`just release` collates the fragments, deletes them, and sets all three version
+files at once, and it is the only thing that may write `CHANGELOG.md` or a
+version number.
+
+Releasing this often reopens the conflict the fragments closed, from one
+direction only: two agents folding minutes apart both derive the same next
+version and both write the same files. Two things hold that down, and neither
+is a guarantee — the residual race is the length of a fold:
+
+- **`release` refuses on a stale branch.** It fetches `origin/main` and stops
+  unless that is an ancestor of `HEAD`, because a branch that hasn't caught up
+  is reading a version somebody else has already moved past.
+- **`CHANGELOG.md` is `merge=union`** (`.gitattributes`), so two sections
+  inserted at the same point both survive rather than blocking the fold. The
+  version files deliberately are *not*, since two versions where one belongs
+  means two releases claimed one number and should be loud.
 
 ## Edit loops
 

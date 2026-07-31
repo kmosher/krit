@@ -7,7 +7,9 @@ three files carrying one have to agree, and they are three separate merge
 conflicts waiting to happen if each release edits them by hand.
 
     scripts/changelog.py collate            # print the merged section
-    scripts/changelog.py release 0.3.0      # write CHANGELOG.md, drop fragments, bump versions
+    scripts/changelog.py release patch      # next patch: write CHANGELOG.md, drop fragments, bump
+    scripts/changelog.py release minor      # next minor
+    scripts/changelog.py release 0.9.0      # an explicit version, when neither is right
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import datetime
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -109,7 +112,73 @@ def bump_versions(version: str) -> None:
         path.write_text(new)
 
 
-def release(version: str) -> None:
+CURRENT_VERSION = re.compile(r'(?m)^version = "(\d+)\.(\d+)\.(\d+)"$')
+
+
+def current_version() -> tuple[int, int, int]:
+    match = CURRENT_VERSION.search((ROOT / "Cargo.toml").read_text())
+    if match is None:
+        sys.exit("Cargo.toml: could not read the current workspace version")
+    return int(match[1]), int(match[2]), int(match[3])
+
+
+def resolve_version(spec: str) -> str:
+    """Turn `patch` / `minor` / an explicit `X.Y.Z` into a version string.
+
+    Deriving it beats naming it. Releases happen on every fold now, so the
+    number is picked many times a day by whoever is folding — and the two
+    mistakes available when typing it by hand (reusing the current version,
+    or skipping one) both land in three files and a changelog heading before
+    anything notices.
+    """
+    if re.fullmatch(r"\d+\.\d+\.\d+", spec):
+        return spec
+    major, minor, patch = current_version()
+    if spec == "patch":
+        return f"{major}.{minor}.{patch + 1}"
+    if spec == "minor":
+        return f"{major}.{minor + 1}.0"
+    sys.exit("Version must be 'patch', 'minor', or an explicit X.Y.Z")
+
+
+def check_not_stale() -> None:
+    """Refuse to release from a branch that hasn't caught up with origin/main.
+
+    Two agents releasing at once is the one way the fragment scheme can still
+    produce a conflict: both read the same current version, both pick the same
+    next one, and both write the same three files. Whoever folds second gets a
+    real conflict — and worse, a *silently* wrong result if they resolve it
+    carelessly, since two different releases would claim one number.
+
+    Being level with origin/main doesn't make that impossible, but it closes
+    the window from "however long this branch has existed" to "however long
+    this fold takes", which is the difference between routine and rare.
+    """
+    try:
+        # Plain `git fetch origin`, not `git fetch origin main`: the latter is
+        # only opportunistic about updating refs/remotes/origin/main, and the
+        # comparison below reads that ref.
+        subprocess.run(["git", "fetch", "--quiet", "origin"], cwd=ROOT, check=True)
+        merge_base = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        # No network, no remote, a detached checkout — none of which is a
+        # reason to block a release. The check is a guard rail, not a gate.
+        return
+    if merge_base.returncode != 0:
+        sys.exit(
+            "origin/main has commits this branch doesn't.\n"
+            "Merge it first (`git merge origin/main`), or another release may "
+            "already have claimed the next version."
+        )
+
+
+def release(spec: str) -> None:
+    check_not_stale()
+    version = resolve_version(spec)
     body = collate()
     if not body:
         sys.exit("No fragments in changelog/unreleased — nothing to release.")
@@ -131,8 +200,6 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "collate":
         sys.stdout.write(collate() or "No fragments in changelog/unreleased.\n")
     elif len(sys.argv) == 3 and sys.argv[1] == "release":
-        if not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[2]):
-            sys.exit("Version must look like 0.3.0")
         release(sys.argv[2])
     else:
         sys.exit(__doc__)

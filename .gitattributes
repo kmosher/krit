@@ -3,3 +3,14 @@
 # changed". Source files are always text; force real diffs.
 *.ts diff
 *.tsx diff
+
+# Releases happen on every fold, and two agents can fold minutes apart — both
+# inserting a section at the same point in this file. Union merge keeps both
+# rather than raising a conflict over text neither of them disagrees about; the
+# result may order two same-day releases oddly, which a human fixes in one edit
+# instead of a fold that stops dead.
+#
+# Deliberately *not* applied to the version files. Two versions where one
+# belongs is not something to resolve silently — it means two releases claimed
+# the same number, and that should be loud.
+CHANGELOG.md merge=union

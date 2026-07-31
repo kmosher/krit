@@ -36,10 +36,16 @@ described the same change, which is worth noticing.
 
 ## Releasing
 
+Every fold, as the last commit before `wt-fold`:
+
 ```
 just changelog          # preview the collated section
-just release 0.3.0      # collate into CHANGELOG.md, delete the fragments, bump every version
+just release            # next patch
+just release minor      # next minor — a user-visible change, or one that moves the wire
+just release 0.9.0      # an explicit version, when neither is right
 ```
 
-`just release` is the only thing that writes `CHANGELOG.md`, and it is the only
-thing that should.
+`just release` is the only thing that writes `CHANGELOG.md` or a version
+number, and it is the only thing that should. It refuses on a branch behind
+`origin/main`, because the next version is derived from the current one and a
+stale branch derives the wrong answer.
