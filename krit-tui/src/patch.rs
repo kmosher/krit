@@ -216,9 +216,13 @@ pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
             }
         }
 
-        // Only when *both* halves arrived and they differ: git emits the pair
-        // on a rename too, where the modes usually match and the rename is the
-        // story worth telling.
+        // git emits `old mode`/`new mode` only when the two actually differ —
+        // never as an identical pair, on a rename or anywhere else — so
+        // `old_mode` being present is what carries the weight here. The
+        // equality check is defence against patch text git did not write, not
+        // against a case it produces. A rename *with* a chmod does emit the
+        // pair, differing, and reporting it there is right: the file moved and
+        // its mode changed, and only one of those has anywhere else to show.
         if let (Some(from), Some(to)) = (old_mode, new_mode)
             && from != to
         {
@@ -512,15 +516,33 @@ mod tests {
     }
 
     #[test]
-    fn a_rename_that_kept_its_mode_says_nothing_about_modes() {
-        // git emits the pair on a rename too. Equal halves are not a change,
-        // and the rename is the story worth telling.
+    fn a_renamed_file_that_also_changed_mode_reports_both() {
+        // A real `git mv` + `chmod +x`, which is the *only* way a rename
+        // carries mode lines: git writes the pair only when the two differ, so
+        // a pure rename has none at all. Both facts are worth showing — the
+        // rename has the header, and nothing but this says the bit moved.
         let files = parse_patch(
-            "diff --git a/a.txt b/b.txt\nold mode 100644\nnew mode 100644\n\
-             rename from a.txt\nrename to b.txt\n",
+            "diff --git a/a.txt b/b.txt\nold mode 100644\nnew mode 100755\n\
+             similarity index 100%\nrename from a.txt\nrename to b.txt\n",
+            &[],
+        );
+        assert_eq!(
+            files[0].mode,
+            Some(("100644".to_string(), "100755".to_string()))
+        );
+        assert_eq!(files[0].kind, ChangeKind::Renamed);
+    }
+
+    #[test]
+    fn an_identical_mode_pair_is_not_a_change() {
+        // Defence against patch text git did not write — it never emits an
+        // equal pair. Kept because the alternative is a file claiming a change
+        // from 100644 to 100644, which reads as a bug in krit rather than in
+        // whatever produced the patch.
+        let files = parse_patch(
+            "diff --git a/a.txt b/a.txt\nold mode 100644\nnew mode 100644\n",
             &[],
         );
         assert_eq!(files[0].mode, None);
-        assert_eq!(files[0].kind, ChangeKind::Renamed);
     }
 }
