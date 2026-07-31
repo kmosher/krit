@@ -96,28 +96,45 @@ skill together when you do.
   - Playwright needs `PLAYWRIGHT_BROWSERS_PATH` somewhere writable, and
     launching the browser needs the sandbox off (XPC fails "Connection
     Invalid" otherwise).
-- **Driving `krit-tui` needs a pty with a size, and the sandbox off.**
-  `openpty` fails "Operation not permitted" under the Bash sandbox. And a pty
-  inherits no window size, so `script`-style harnesses hand the app a 0×0
-  terminal and it faithfully draws nothing: fork the pty yourself and
-  `TIOCSWINSZ` it before reading a byte.
-  - **A captured chunk is a delta, not the screen.** ratatui emits only the
-    cells that changed, so reading the bytes that arrive after an event shows
-    an unchanged screen as an empty one — which reads exactly like the feature
-    being broken. Stripping escapes and splitting on newlines is no better:
-    ratatui positions every run with `CUP` and emits almost no newlines, so
-    that yields a few very long lines, not rows. **Model the screen** — apply
-    `CUP`/`EL`/`ED` to a grid — and read assertions off the grid. Replay the
-    whole byte stream into a fresh grid rather than feeding chunks as they
-    arrive, because a pty read splits escape sequences mid-sequence at 1 KiB.
-    Between them these produced five confidently wrong "failures" in one
-    session, none of which was a bug in krit.
-  - Mouse input goes in as SGR reports: `ESC[<{button};{col+1};{row+1}M` to
-    press, `m` to release, button 64/65 for wheel up/down. crossterm parses
-    them whether or not capture is on, so a test can drive the mouse without
-    the terminal cooperating.
+- **Drive `krit-tui` under tmux, not under a hand-rolled pty.** tmux is a
+  debugged terminal emulator that will hand you the rendered screen, which is
+  the whole problem (see below). It needs the sandbox off — `openpty` fails
+  "Operation not permitted" — and its own server and config, so a run never
+  touches the session you are sitting in:
+
+  ```
+  tmux -L krittest -f /dev/null new-session -d -s t -x 120 -y 40 "…krit-tui …"
+  tmux -L krittest capture-pane -p -t t     # the screen, as text
+  tmux -L krittest send-keys -t t f         # a key
+  tmux -L krittest send-keys -t t -H 1b 5b 3c 36 35 3b 36 30 3b 31 30 4d
+  tmux -L krittest kill-server
+  ```
+
+  That `-H` line is a wheel-down: mouse input goes in as an SGR report,
+  `ESC[<{button};{col+1};{row+1}M` to press and `m` to release, button 64/65
+  for wheel up/down. crossterm parses those whether or not capture is on, so a
+  test can drive the mouse without the terminal cooperating.
+  - **Why not read the pty yourself: a captured chunk is a delta, not the
+    screen.** ratatui emits only the cells that changed, so the bytes arriving
+    after an event show an unchanged screen as an empty one — indistinguishable
+    from the feature being broken. Stripping escapes and splitting on newlines
+    is no better, because ratatui positions every run with `CUP` and emits
+    almost no newlines: you get a few very long lines, not rows. Writing a
+    small emulator instead works, but it is a real terminal's job and a
+    from-scratch one has from-scratch bugs (a `CUP` handler comparing a bytes
+    match group against a str, silently collapsing every row onto row 0). Five
+    confident "failures" in one session came out of this, none of them a bug in
+    krit. If you must read a pty directly, `TIOCSWINSZ` it first — a pty
+    inherits no size, and a 0×0 terminal makes the app faithfully draw nothing
+    — and replay the whole byte stream rather than feeding chunks, since a read
+    splits escape sequences at 1 KiB.
   - Suspend has to be verified from outside: `ps -o state=` shows `T` while
     stopped, and the app must have emitted `ESC[?1049l` *before* it stopped.
+    tmux is the wrong tool for that one — it owns the process group — so
+    suspend stays a hand-rolled `pty.fork`.
+  - For a committed harness (nobody has written one yet), the Rust equivalents
+    are `portable-pty` to spawn and `vt100` to model the screen, with `insta`
+    for the snapshots. Untried here.
 - **The fs-watcher needs `com.apple.FSEvents` in the sandbox's
   `allowMachLookup`**: without it `FSEventStreamStart` fails silently, so
   `cargo test watcher` fails and a sandboxed `krit` never emits
