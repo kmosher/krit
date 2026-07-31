@@ -861,6 +861,14 @@ body {
     gap: 3px;
 }
 
+/* A mode change is often the *only* thing a file has to show — a chmod has no
+ * hunks and no +N/−N — so this carries the secondary colour rather than a
+ * muted one. It has to read as content, not as a decoration on a diff. */
+.cv-mode {
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
 /* Faint "+" icon on gutter hover. CodeView calls renderGutterUtility for
  * every hover-target line; we render a low-opacity hint so users discover
  * the click-to-comment affordance without it being visually noisy. */

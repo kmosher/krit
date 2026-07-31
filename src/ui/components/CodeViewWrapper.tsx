@@ -37,6 +37,7 @@ import {
 import { computeSingleEdit } from '../utils/textEdits'
 import { linesToReveal } from '../utils/collapsedContext'
 import { islandOwnsLine } from '../utils/commentIslands'
+import { modeChangeOf } from '../utils/fileMode'
 import { usePendingDrafts } from '../hooks/usePendingDrafts'
 
 type DraftMetadata = {
@@ -1637,11 +1638,17 @@ export const CodeViewWrapper = memo(
         const additions = stats?.additions ?? 0
         const deletions = stats?.deletions ?? 0
         const count = commentCounts[item.id] ?? 0
+        const modeChange = modeChangeOf(item.fileDiff)
         return (
           <div className="codeview-header-meta">
             <span className={`cv-pill ${cls}`}>{label}</span>
             {additions > 0 && <span className="cv-stat cv-add">+{additions}</span>}
             {deletions > 0 && <span className="cv-stat cv-del">−{deletions}</span>}
+            {modeChange && (
+              <span className="cv-stat cv-mode" title="File permission change">
+                {modeChange.from} → {modeChange.to}
+              </span>
+            )}
             {count > 0 && (
               <span className="cv-stat cv-comments" title={`${count} comment${count === 1 ? '' : 's'}`}>
                 💬 {count}
