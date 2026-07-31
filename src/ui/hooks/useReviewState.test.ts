@@ -208,7 +208,9 @@ describe('submitReview', () => {
     vi.stubGlobal('close', close)
     renderHook(() => useReviewState())
     const es = FakeEventSource.last!
-    await expect(submitReview()).resolves.toBeUndefined()
+    // 'stays-open' is the answer the Toolbar turns into "close this tab": a
+    // refusal is the browser's normal behaviour, not an error to swallow.
+    await expect(submitReview()).resolves.toBe('stays-open')
     expect(close).toHaveBeenCalled()
     expect(es.closed).toBe(true)
   })

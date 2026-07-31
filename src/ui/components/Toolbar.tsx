@@ -27,7 +27,7 @@ interface ToolbarProps {
   /** Timestamp the user clicked Submit on this page, or null. */
   submittedAt: number | null
   /** `summary` is the reviewer's concluding notes; '' when they wrote none. */
-  onSubmitReview: (summary: string) => Promise<void>
+  onSubmitReview: (summary: string) => Promise<'closing' | 'stays-open'>
   refreshMode: RefreshMode
   onRefreshModeChange: (mode: RefreshMode) => void
   /** Files with a background change deferred by refreshMode, waiting to be applied. */
@@ -76,6 +76,8 @@ export function Toolbar({
   const [finishOpen, setFinishOpen] = useState(false)
   const [summary, setSummary] = useState('')
   const [confirmingDiscard, setConfirmingDiscard] = useState(false)
+  // Set once the review is in and the window turned out not to be closable.
+  const [windowStays, setWindowStays] = useState(false)
   const finishRef = useRef<HTMLDivElement>(null)
   const summaryRef = useRef<HTMLTextAreaElement>(null)
 
@@ -100,14 +102,18 @@ export function Toolbar({
   // keeps a zero-comment submit from reaching the agent as pure silence.
   const submitDisabled = submitting || isSubmitted || !hasWatcher
   const submitLabel = isSubmitted
-    ? 'Done ✓'
+    ? windowStays
+      ? 'Done ✓ — close this tab'
+      : 'Done ✓'
     : !hasWatcher
       ? 'No watcher'
       : commentCount === 0
         ? 'Done reviewing'
         : `Done reviewing (${commentCount})`
   const submitTitle = isSubmitted
-    ? 'Review finished — the listening Claude session has been told to stop watching.'
+    ? windowStays
+      ? 'Review finished — the listening Claude session has been told to stop watching. A browser tab cannot close itself unless a script opened it, so this one is yours to close; the server has already stopped.'
+      : 'Review finished — the listening Claude session has been told to stop watching.'
     : !hasWatcher
       ? 'No agent or watcher is currently subscribed to events. Have Claude attach one, or use Copy comments to paste manually.'
       : queuedCount > 0
@@ -126,7 +132,10 @@ export function Toolbar({
     if (submitting || isSubmitted) return
     setSubmitting(true)
     try {
-      await onSubmitReview(summary)
+      // A tab that cannot close itself is the common case (see
+      // closeReviewWindow), and a finished review that just sits there looks
+      // like the click did nothing — so say what happened instead.
+      setWindowStays((await onSubmitReview(summary)) === 'stays-open')
       setFinishOpen(false)
     } finally {
       setSubmitting(false)

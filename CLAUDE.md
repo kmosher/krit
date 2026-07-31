@@ -180,10 +180,29 @@ skill together when you do.
   the place: a write to any file above the viewport changes its height and
   walks the comment form off the screen mid-sentence. `captureDraftAnchor` /
   `holdDraftAnchor` note where the form sits and put it back, re-finding it by
-  `data-draft-key` (a remount rebuilds the node) over a bounded frame loop —
-  one correction is not enough, since the highlight worker pool repaints rows
-  above it for several frames afterwards. The loop yields the moment the
-  scroll position moves by anything other than its own correction.
+  `data-draft-key` (a remount rebuilds the node) over a bounded loop of ticks —
+  one correction is not enough, since the worker pool, Pierre's relayout and
+  Pierre's own scroll reanchoring each move things again afterwards. Four
+  properties of that loop are load-bearing, and every one of them fails
+  silently — a green suite and a clean build say nothing about any of them:
+  - **Nothing in this loop may hang off `requestAnimationFrame`.** A page
+    reports itself hidden the whole time anything drives it programmatically,
+    and a hidden page's rAF callbacks never run — so an rAF-driven hold is a
+    no-op in exactly the sessions krit exists for, with nothing to see but a
+    draft that scrolled away. It ticks on a `setInterval` plus a
+    `ResizeObserver`, both of which survive being hidden.
+  - **A scroll the loop did not perform is not evidence of a human.** Pierre
+    reanchors scroll itself after a relayout, so backing off on an unexpected
+    `scrollTop` means backing off exactly when the correction is needed. Real
+    input events (`wheel`, `pointerdown`, `keydown`, `touchstart`) are the
+    signal that the reviewer has taken over.
+  - **The form is not always in the DOM to measure.** A big enough update
+    pushes the draft's file out of Pierre's virtual window mid-correction and
+    unmounts the form, and no scrollTop arithmetic can get it back — only
+    Pierre knows where an unrendered line is. That is why the anchor carries
+    the draft's *line* as well as its key, and recovers with `scrollTo` before
+    fine-positioning. Watching only the element, the loop chases the layout
+    down the page and parks the reviewer inside the file that grew.
   - **Match the key by scanning `dataset`, never with an attribute selector.**
     `draftKey` joins with NUL and `CSS.escape` maps NUL to U+FFFD, so an
     escaped key cannot match the attribute React set. The lookup then returns
@@ -280,6 +299,15 @@ skill together when you do.
   the traversal, and `htmlSandbox.test.ts` asserts the two halves agree on
   every text run in a sample document. Keep that test honest if you touch
   either side.
+- **Done reviewing closes krit.app's window, and cannot close a browser tab.**
+  `window.close()` only works on a window a script opened, and a tab launched
+  from a terminal has no opener — Chrome ignores the call. So the button says
+  "Done ✓ — close this tab" when the window is staying, and `closeReviewWindow`
+  returns which happened rather than pretending. krit.app closes for real
+  through Tauri's own API (`withGlobalTauri`, plus `core:window:allow-close`
+  scoped to the localhost URLs the app frames). Do not reach for the
+  `window.open('', '_self')` trick: in Chrome it navigates the review away and
+  still leaves the tab.
 - The launch message says "Asked the krit app to open" because the launcher
   returning Ok only means the OS accepted the URL; a 10s post-launch check
   reports if no UI actually connected.

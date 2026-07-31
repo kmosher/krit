@@ -11,7 +11,7 @@ function renderToolbar(over: Partial<Props> = {}) {
     onDefaultTabSizeChange: vi.fn(),
     onBrowserChange: vi.fn(),
     onCopyComments: vi.fn(async () => {}),
-    onSubmitReview: vi.fn(async () => {}),
+    onSubmitReview: vi.fn(async () => 'stays-open' as const),
     onRefreshModeChange: vi.fn(),
     onRefresh: vi.fn(),
     onPostQueued: vi.fn(),

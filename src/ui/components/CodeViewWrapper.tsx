@@ -157,10 +157,18 @@ const WRAP_SAMPLE_LIMIT = 2000
 // Pierre's own defaults stand.
 const MEASURE_ATTEMPTS = 60
 
-// Frames to keep an open draft pinned in place after a diff update. Long enough
-// to outlast the highlight worker pool's repaints (each of which can move rows
-// above the draft again), short enough that it can't fight a later scroll.
-const ANCHOR_SETTLE_FRAMES = 30
+// How long to keep an open draft pinned in place after a diff update: tick
+// interval, a cap on ticks, and how many consecutive still ticks count as
+// settled. A hidden page clamps timers to about a second, so the cap is what
+// keeps the loop from outliving the update that started it.
+const ANCHOR_TICK_MS = 32
+const ANCHOR_SETTLE_TICKS = 40
+const ANCHOR_STABLE_TICKS = 3
+const ANCHOR_RECOVERIES = 4
+
+// Input that means the reviewer is moving the surface themselves, at which
+// point holding the draft still would be fighting them.
+const ANCHOR_RELEASE_EVENTS = ['wheel', 'pointerdown', 'keydown', 'touchstart'] as const
 
 // Average visual rows per source line, in pixels — what to hand Pierre as
 // `lineHeight`. Under-reserving is the bug being fixed here (the layout grows
@@ -709,17 +717,51 @@ export const CodeViewWrapper = memo(
       return undefined
     }
 
-    const captureDraftAnchor = (): { key: string; top: number } | null => {
+    const captureDraftAnchor = (): DraftAnchor | null => {
       const container = scrollRef.current
       if (!container) return null
       const forms = draftFormElements(container)
       const el = focusedDraftForm(forms) ?? forms[0]
       const key = el?.dataset.draftKey
       if (!el || !key) return null
-      return { key, top: el.getBoundingClientRect().top - container.getBoundingClientRect().top }
+      // The draft behind the element, because the element is the part that does
+      // not survive: a big enough update pushes the draft's file outside
+      // Pierre's virtual window and unmounts the form mid-correction. The line
+      // is what can always be scrolled back to.
+      const draft = pending.get(key)
+      if (!draft) return null
+      return {
+        key,
+        itemId: draft.itemId,
+        side: draft.side,
+        lineNumber: draft.endLine,
+        top: el.getBoundingClientRect().top - container.getBoundingClientRect().top,
+      }
     }
 
-    const anchorSettleRef = useRef<number | null>(null)
+    type DraftAnchor = {
+      key: string
+      itemId: string
+      side: AnnotationSide
+      lineNumber: number
+      top: number
+    }
+    const anchorHoldRef = useRef<{
+      observer: ResizeObserver
+      timer: number
+      release: () => void
+    } | null>(null)
+    const stopAnchorHold = useStableCallback(() => {
+      const hold = anchorHoldRef.current
+      if (!hold) return
+      anchorHoldRef.current = null
+      hold.observer.disconnect()
+      window.clearInterval(hold.timer)
+      const container = scrollRef.current
+      for (const type of ANCHOR_RELEASE_EVENTS) {
+        container?.removeEventListener(type, hold.release)
+      }
+    })
     // Keeping the reviewer's scroll position is not the same as keeping their
     // *place*: an agent's write to any file above the viewport changes that
     // file's height, and a scrollTop the update never touched then points
@@ -737,35 +779,84 @@ export const CodeViewWrapper = memo(
     // frames, and each pass can move everything below it again. Correct on a
     // short frame loop instead, and re-find the element by key each time —
     // a remount rebuilds the form, so its node identity does not survive.
-    const holdDraftAnchor = (anchor: { key: string; top: number } | null) => {
+    const holdDraftAnchor = (anchor: DraftAnchor | null) => {
       if (!anchor) return
-      if (anchorSettleRef.current !== null) cancelAnimationFrame(anchorSettleRef.current)
-      let framesLeft = ANCHOR_SETTLE_FRAMES
-      let expected: number | null = null
-      const step = () => {
-        anchorSettleRef.current = null
+      stopAnchorHold()
+      // Correcting once is not enough — an update's rows are painted over the
+      // following moments (the highlight worker pool, Pierre's own relayout and
+      // its own scroll reanchoring), and each pass can move everything above the
+      // draft again. So keep putting it back until the surface stops moving.
+      //
+      // Driven by a ResizeObserver plus a timer, and deliberately NOT by
+      // requestAnimationFrame: a page reports itself hidden the whole time
+      // anything drives it programmatically, and a hidden page's rAF callbacks
+      // never run. Built on rAF this loop was a no-op in exactly the sessions
+      // krit exists for, with nothing to see but a draft that scrolled away.
+      let ticks = ANCHOR_SETTLE_TICKS
+      let stable = 0
+      // Bounded, because each recovery scrolls the surface and so provokes the
+      // render that can lose the form again — unbounded, two of those chase
+      // each other for as long as the loop lives.
+      let recoveries = ANCHOR_RECOVERIES
+      const correct = () => {
         const container = scrollRef.current
-        if (!container) return
-        // The reviewer scrolling outranks the anchor: if the position moved by
-        // anything other than our own correction, they took over. Stop.
-        if (expected !== null && Math.abs(container.scrollTop - expected) > 1) return
+        if (!container) return stopAnchorHold()
         const el = draftFormElements(container).find((f) => f.dataset.draftKey === anchor.key)
         if (el) {
           const now = el.getBoundingClientRect().top - container.getBoundingClientRect().top
           const delta = now - anchor.top
-          if (Math.abs(delta) > 0.5) container.scrollTop += delta
+          if (Math.abs(delta) > 0.5) {
+            container.scrollTop += delta
+            stable = 0
+          } else {
+            stable++
+          }
+        } else if (recoveries > 0) {
+          // The form is not in the DOM: its file left the virtual window while
+          // the surface was being rebuilt. Nothing to measure, and scrollTop
+          // arithmetic cannot get it back — only Pierre knows where an
+          // unrendered line lives. Ask it to put the line back on screen and
+          // let the next tick do the fine positioning.
+          recoveries--
+          stable = 0
+          viewerRef.current?.scrollTo({
+            type: 'line',
+            id: anchor.itemId,
+            lineNumber: anchor.lineNumber,
+            side: anchor.side,
+            align: 'center',
+          })
         }
-        expected = container.scrollTop
-        if (--framesLeft > 0) anchorSettleRef.current = requestAnimationFrame(step)
+        // Stop once the draft has held still for a few ticks running, or when
+        // the budget runs out — whichever comes first. The cap matters most in
+        // a hidden page, where the browser clamps timers to about a second and
+        // a generous tick count would keep correcting long after the update.
+        if (--ticks <= 0 || stable >= ANCHOR_STABLE_TICKS) stopAnchorHold()
       }
-      anchorSettleRef.current = requestAnimationFrame(step)
+      anchorHoldRef.current = {
+        observer: new ResizeObserver(correct),
+        timer: window.setInterval(correct, ANCHOR_TICK_MS),
+        // A scroll the reviewer performs outranks the anchor. Their *input* is
+        // the signal, not a scrollTop delta: Pierre reanchors scroll itself, so
+        // an unexpected position is as likely to be upstream as a human, and
+        // reading it as a human is how the anchor quietly gives up.
+        release: () => stopAnchorHold(),
+      }
+      const container = scrollRef.current
+      if (container) {
+        anchorHoldRef.current.observer.observe(container)
+        // The content element, not just the viewport: the container's own box
+        // never changes size when a file above the draft grows.
+        if (container.firstElementChild) {
+          anchorHoldRef.current.observer.observe(container.firstElementChild)
+        }
+        for (const type of ANCHOR_RELEASE_EVENTS) {
+          container.addEventListener(type, anchorHoldRef.current.release, { passive: true })
+        }
+      }
+      correct()
     }
-    useEffect(
-      () => () => {
-        if (anchorSettleRef.current !== null) cancelAnimationFrame(anchorSettleRef.current)
-      },
-      [],
-    )
+    useEffect(() => stopAnchorHold, [stopAnchorHold])
 
     useEffect(() => {
       const prevFiles = lastFileRef.current

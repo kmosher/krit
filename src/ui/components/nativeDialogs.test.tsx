@@ -161,7 +161,7 @@ describe('no native dialog on any decision path', () => {
   })
 
   it('Toolbar: finishing the review, which also publishes queued comments', async () => {
-    const onSubmitReview = vi.fn(async () => {})
+    const onSubmitReview = vi.fn(async () => 'stays-open' as const)
     render(
       <Toolbar
         repoName="krit"

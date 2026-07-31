@@ -87,8 +87,11 @@ export function useReviewState(): ReviewState {
  * server has already posted the queued comments and broadcast `submitted` when this
  * tab's streams go; the disconnect that follows is what lets it shut down at
  * once if this was the last browser.
+ *
+ * Returns what became of the window: krit.app closes, a browser tab cannot
+ * (see `closeReviewWindow`), and the caller tells the reviewer which happened.
  */
-export async function submitReview(summary = ''): Promise<void> {
+export async function submitReview(summary = ''): Promise<'closing' | 'stays-open'> {
   // The body is always sent, even empty: one request shape is easier to reason
   // about than two, and the server treats blank notes as none.
   await fetch('/api/submit', {
@@ -97,5 +100,5 @@ export async function submitReview(summary = ''): Promise<void> {
     body: JSON.stringify({ summary }),
   })
   endReviewSession()
-  closeReviewWindow()
+  return closeReviewWindow()
 }

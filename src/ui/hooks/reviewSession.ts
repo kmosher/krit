@@ -30,19 +30,49 @@ export function endReviewSession(): void {
   }
 }
 
+// The globals krit.app injects into a review window (`withGlobalTauri`), narrowed
+// to the one call this file makes. Absent in a browser, which is how the two
+// hosts are told apart — there is no user-agent sniffing worth doing here.
+interface TauriWindowApi {
+  window?: { getCurrentWindow?: () => { close?: () => Promise<void> } }
+}
+
 /**
- * Best-effort close of the tab or the krit.app window.
+ * Close the review window, and report whether it will actually go.
  *
- * `window.close()` is a no-op in a tab the script didn't open, which is the
- * common case for `krit` launched from a terminal — so this is a nicety, not
- * the mechanism. The server stops because `endReviewSession` dropped the SSE
- * streams and the browser count went to zero, whether or not the window
- * actually goes away.
+ * The two hosts differ, and not by degree:
+ *
+ * - **krit.app** closes for real. The window is a Tauri window framing the local
+ *   server, so it can close itself through the app's own API — `close` is
+ *   granted to `review-*` windows in the desktop capability, scoped to the
+ *   localhost URLs krit frames.
+ * - **A browser tab does not close.** `window.close()` only works on a window
+ *   opened by script, and a tab `krit` launched from a terminal has no opener —
+ *   verified in Chrome, where the call is simply ignored. It is still attempted,
+ *   because a reviewer who *did* open krit from a script-opened window gets the
+ *   close they asked for; when it is ignored, the caller says so on the page
+ *   rather than leaving a finished review looking like it hung.
+ *
+ * Do not "fix" the browser case with `window.open('', '_self')` first: in Chrome
+ * that navigates the page away and still does not close the tab, so the reviewer
+ * loses their review and keeps the tab.
+ *
+ * Either way the server stops, because `endReviewSession` dropped the streams.
  */
-export function closeReviewWindow(): void {
+export function closeReviewWindow(): 'closing' | 'stays-open' {
+  const tauri = (window as unknown as { __TAURI__?: TauriWindowApi }).__TAURI__
+  const appWindow = tauri?.window?.getCurrentWindow?.()
+  if (appWindow?.close) {
+    void appWindow.close()
+    return 'closing'
+  }
   try {
     window.close()
   } catch {
     // Blocked by the browser; the page simply stays open.
   }
+  // `window.closed` does not flip synchronously even when the close is honoured,
+  // so this is the pessimistic answer: the caller shows "you can close this tab"
+  // and the tab that *is* closing takes the message with it.
+  return 'stays-open'
 }

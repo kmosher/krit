@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { closeReviewWindow, endReviewSession, onReviewSessionEnd } from './reviewSession'
 
 describe('reviewSession', () => {
@@ -47,5 +47,57 @@ describe('reviewSession', () => {
     })
     expect(() => closeReviewWindow()).not.toThrow()
     vi.unstubAllGlobals()
+  })
+})
+
+describe('closeReviewWindow', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__
+  })
+
+  it('closes the krit.app window through the app API when it is there', () => {
+    // The desktop window frames the local server as remote content, so this
+    // global is the only thing distinguishing the two hosts — there is no
+    // user-agent worth sniffing.
+    const close = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      window: { getCurrentWindow: () => ({ close }) },
+    }
+    const browserClose = vi.fn()
+    vi.stubGlobal('close', browserClose)
+    expect(closeReviewWindow()).toBe('closing')
+    expect(close).toHaveBeenCalled()
+    // window.close() would be a no-op here anyway, but calling both would mean
+    // two close paths racing on the one window.
+    expect(browserClose).not.toHaveBeenCalled()
+  })
+
+  it('reports that a browser tab stays open, because it does', () => {
+    // Chrome ignores close() on a tab no script opened, which is every tab
+    // `krit` launches from a terminal. Saying so is what lets the toolbar tell
+    // the reviewer to close it rather than leaving a finished review sitting
+    // there looking stuck.
+    const browserClose = vi.fn()
+    vi.stubGlobal('close', browserClose)
+    expect(closeReviewWindow()).toBe('stays-open')
+    expect(browserClose).toHaveBeenCalled()
+  })
+
+  it('survives a browser that throws instead of ignoring the call', () => {
+    vi.stubGlobal('close', () => {
+      throw new Error('Scripts may not close windows that were not opened by script')
+    })
+    expect(closeReviewWindow()).toBe('stays-open')
+  })
+
+  it('falls back to the browser path when the app API is present but unusable', () => {
+    // A future krit.app that injects the global without granting the close
+    // permission must not silently do nothing.
+    ;(window as unknown as { __TAURI__: unknown }).__TAURI__ = { window: {} }
+    const browserClose = vi.fn()
+    vi.stubGlobal('close', browserClose)
+    expect(closeReviewWindow()).toBe('stays-open')
+    expect(browserClose).toHaveBeenCalled()
   })
 })

@@ -1,7 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Review windows render the local krit server as trusted remote content; they get the core defaults and nothing more — krit exposes no custom IPC commands.",
-  "windows": ["review-*"],
-  "permissions": ["core:default"]
+  "description": "Review windows render the local krit server as trusted remote content. They get the core defaults plus permission to close themselves: Done reviewing ends the session, and a window that outlives its server is a dead frame the reviewer has to dismiss by hand.",
+  "windows": [
+    "review-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close"
+  ],
+  "remote": {
+    "urls": [
+      "http://localhost:*",
+      "http://127.0.0.1:*"
+    ]
+  }
 }
