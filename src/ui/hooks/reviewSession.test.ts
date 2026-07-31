@@ -56,7 +56,7 @@ describe('closeReviewWindow', () => {
     delete (window as unknown as { __TAURI__?: unknown }).__TAURI__
   })
 
-  it('closes the krit.app window through the app API when it is there', () => {
+  it('closes the krit.app window through the app API when it is there', async () => {
     // The desktop window frames the local server as remote content, so this
     // global is the only thing distinguishing the two hosts — there is no
     // user-agent worth sniffing.
@@ -66,38 +66,60 @@ describe('closeReviewWindow', () => {
     }
     const browserClose = vi.fn()
     vi.stubGlobal('close', browserClose)
-    expect(closeReviewWindow()).toBe('closing')
+    await expect(closeReviewWindow()).resolves.toBe('closing')
     expect(close).toHaveBeenCalled()
     // window.close() would be a no-op here anyway, but calling both would mean
     // two close paths racing on the one window.
     expect(browserClose).not.toHaveBeenCalled()
   })
 
-  it('reports that a browser tab stays open, because it does', () => {
+  it('reports that a browser tab stays open, because it does', async () => {
     // Chrome ignores close() on a tab no script opened, which is every tab
     // `krit` launches from a terminal. Saying so is what lets the toolbar tell
     // the reviewer to close it rather than leaving a finished review sitting
     // there looking stuck.
     const browserClose = vi.fn()
     vi.stubGlobal('close', browserClose)
-    expect(closeReviewWindow()).toBe('stays-open')
+    await expect(closeReviewWindow()).resolves.toBe('stays-open')
     expect(browserClose).toHaveBeenCalled()
   })
 
-  it('survives a browser that throws instead of ignoring the call', () => {
+  it('survives a browser that throws instead of ignoring the call', async () => {
     vi.stubGlobal('close', () => {
       throw new Error('Scripts may not close windows that were not opened by script')
     })
-    expect(closeReviewWindow()).toBe('stays-open')
+    await expect(closeReviewWindow()).resolves.toBe('stays-open')
   })
 
-  it('falls back to the browser path when the app API is present but unusable', () => {
-    // A future krit.app that injects the global without granting the close
-    // permission must not silently do nothing.
-    ;(window as unknown as { __TAURI__: unknown }).__TAURI__ = { window: {} }
+  it('falls back to the browser path when the app window refuses to close', async () => {
+    // The shape a missing `core:window:allow-close` actually produces: the
+    // method is there and callable, and the promise rejects. The app bundle and
+    // the UI ship separately, so an app built without the capability is the
+    // ordinary skew — and treating that as "closing" leaves the reviewer with a
+    // dead window and a label saying the review is done.
+    ;(window as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      window: { getCurrentWindow: () => ({ close: () => Promise.reject(new Error('forbidden')) }) },
+    }
     const browserClose = vi.fn()
     vi.stubGlobal('close', browserClose)
-    expect(closeReviewWindow()).toBe('stays-open')
+    await expect(closeReviewWindow()).resolves.toBe('stays-open')
+    expect(browserClose).toHaveBeenCalled()
+  })
+
+  it('falls back when the host injects a global it cannot use', async () => {
+    // A half-built API: the namespace exists, the accessor throws. Left
+    // unguarded this rejects `submitReview` *after* the review was submitted,
+    // so the page reports failure for something that succeeded.
+    ;(window as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      window: {
+        getCurrentWindow: () => {
+          throw new Error('not initialised')
+        },
+      },
+    }
+    const browserClose = vi.fn()
+    vi.stubGlobal('close', browserClose)
+    await expect(closeReviewWindow()).resolves.toBe('stays-open')
     expect(browserClose).toHaveBeenCalled()
   })
 })

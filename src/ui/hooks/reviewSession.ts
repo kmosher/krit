@@ -59,12 +59,23 @@ interface TauriWindowApi {
  *
  * Either way the server stops, because `endReviewSession` dropped the streams.
  */
-export function closeReviewWindow(): 'closing' | 'stays-open' {
-  const tauri = (window as unknown as { __TAURI__?: TauriWindowApi }).__TAURI__
-  const appWindow = tauri?.window?.getCurrentWindow?.()
-  if (appWindow?.close) {
-    void appWindow.close()
-    return 'closing'
+export async function closeReviewWindow(): Promise<'closing' | 'stays-open'> {
+  try {
+    const tauri = (window as unknown as { __TAURI__?: TauriWindowApi }).__TAURI__
+    const appWindow = tauri?.window?.getCurrentWindow?.()
+    if (appWindow?.close) {
+      // Awaited, because the interesting failure is a *rejection*: an app built
+      // with the global injected but without `core:window:allow-close` denies
+      // the call from a `close` that exists and looks callable. The app bundle
+      // and the UI ship separately, so the two can disagree on any machine
+      // where only one was rebuilt — and swallowing that rejection would put
+      // back exactly the dead frame this is meant to prevent.
+      await appWindow.close()
+      return 'closing'
+    }
+  } catch {
+    // Denied, or a host that injects a half-built API. Fall through and let the
+    // browser path have its turn.
   }
   try {
     window.close()
@@ -72,7 +83,8 @@ export function closeReviewWindow(): 'closing' | 'stays-open' {
     // Blocked by the browser; the page simply stays open.
   }
   // `window.closed` does not flip synchronously even when the close is honoured,
-  // so this is the pessimistic answer: the caller shows "you can close this tab"
-  // and the tab that *is* closing takes the message with it.
+  // so this is the pessimistic answer: the caller says the window is the
+  // reviewer's to close, and a window that *is* closing takes the message with
+  // it.
   return 'stays-open'
 }

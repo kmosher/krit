@@ -190,12 +190,33 @@ export function useComments(onError?: (message: string) => void) {
     onError: report,
   })
 
+  // Every in-flight body edit, so the paths that post queued comments can wait
+  // for them rather than racing them.
+  const inFlightEdits = useRef(new Set<Promise<unknown>>())
+  const settleEdits = useCallback(async () => {
+    await Promise.allSettled([...inFlightEdits.current])
+  }, [])
+
   const editMutation = useMutation({
-    mutationFn: async ({ id, body, status }: { id: string; body?: string; status?: ReviewComment['status'] }) => {
+    mutationFn: async ({
+      id,
+      body,
+      status,
+      expectStatus,
+    }: {
+      id: string
+      body?: string
+      status?: ReviewComment['status']
+      // Refuses the write server-side unless the comment is still in this
+      // state — see api_comment_put. The editor sends 'queued' so a save that
+      // lost the race against "Post queued" fails loudly instead of rewriting
+      // a comment the agent has already read.
+      expectStatus?: ReviewComment['status']
+    }) => {
       const res = await fetch(`/api/comments/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body, status }),
+        body: JSON.stringify({ body, status, expectStatus }),
       })
       // Both the body edit and the resolve flip land here, so the message says
       // "Updating" rather than naming one of them.
@@ -238,9 +259,14 @@ export function useComments(onError?: (message: string) => void) {
     [addMutation],
   )
 
-  const postQueued = useCallback(() => {
+  // Posting waits for any save still in flight. Otherwise a rewrite saved a
+  // moment before the click lands after the status flip, where the server now
+  // refuses it (expectStatus) — correct, but it would throw away an edit the
+  // reviewer had every reason to think was saved.
+  const postQueued = useCallback(async () => {
+    await settleEdits()
     postQueuedMutation.mutate()
-  }, [postQueuedMutation])
+  }, [postQueuedMutation, settleEdits])
 
   const removeComment = useCallback(
     (id: string) => {
@@ -249,9 +275,17 @@ export function useComments(onError?: (message: string) => void) {
     [removeMutation],
   )
 
+  // Awaitable, unlike the other mutations: its caller is a form holding text
+  // the reviewer typed, and it has to know whether to keep that text on screen.
   const editComment = useCallback(
-    (id: string, body: string) => {
-      editMutation.mutate({ id, body })
+    async (id: string, body: string) => {
+      const save = editMutation.mutateAsync({ id, body, expectStatus: 'queued' })
+      inFlightEdits.current.add(save)
+      try {
+        await save
+      } finally {
+        inFlightEdits.current.delete(save)
+      }
     },
     [editMutation],
   )
@@ -339,6 +373,7 @@ export function useComments(onError?: (message: string) => void) {
     addComment,
     removeComment,
     editComment,
+    settleEdits,
     resolveComment,
     replyToComment,
     postQueued,

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import { CommentBubble } from './CommentBubble'
 import type { ReviewComment } from '../../types'
 import { makeComment } from '../test-utils'
@@ -183,7 +183,7 @@ describe('editing a queued comment', () => {
     expect(editor()).toHaveValue('first thoughts')
   })
 
-  it('saves the rewritten body against the right comment', () => {
+  it('saves the rewritten body against the right comment', async () => {
     const onEdit = vi.fn()
     renderBubble({ id: 'c-target', status: 'queued', body: 'first thoughts' }, onEdit)
     fireEvent.click(queuedBadge())
@@ -192,7 +192,8 @@ describe('editing a queued comment', () => {
     // Trimmed, and against the id the badge belongs to — an edit filed against
     // another comment is invisibly wrong.
     expect(onEdit).toHaveBeenCalledWith('c-target', 'second thoughts')
-    expect(screen.queryByLabelText('Edit queued comment')).not.toBeInTheDocument()
+    // The editor closes on the save resolving, not on the click.
+    await waitFor(() => expect(screen.queryByLabelText('Edit queued comment')).not.toBeInTheDocument())
   })
 
   it('saves on Cmd/Ctrl-Enter without reaching for the mouse', () => {
@@ -256,6 +257,76 @@ describe('editing a queued comment', () => {
     expect(screen.queryByRole('button', { name: /Queued/ })).not.toBeInTheDocument()
     renderBubble({ status: 'resolved', body: 'done' }, onEdit)
     expect(screen.queryByRole('button', { name: /Queued/ })).not.toBeInTheDocument()
+  })
+
+  it('drops an open editor when the same instance is handed a different comment', () => {
+    // Pierre keys line annotations by array *index*, so deleting a comment
+    // earlier in the file shifts every later one into its neighbour's slot and
+    // React reuses this component for a different comment. Carrying the editor
+    // across files one comment's text under another comment's id.
+    const onEdit = vi.fn()
+    const { rerender } = render(
+      <CommentBubble
+        comment={makeComment({ id: 'first', status: 'queued', body: 'about the first' })}
+        onDelete={vi.fn()}
+        onReply={vi.fn()}
+        onEdit={onEdit}
+      />,
+    )
+    fireEvent.click(queuedBadge())
+    fireEvent.change(editor(), { target: { value: 'rewritten for the first' } })
+    rerender(
+      <CommentBubble
+        comment={makeComment({ id: 'second', status: 'queued', body: 'about the second' })}
+        onDelete={vi.fn()}
+        onReply={vi.fn()}
+        onEdit={onEdit}
+      />,
+    )
+    expect(screen.queryByLabelText('Edit queued comment')).not.toBeInTheDocument()
+    expect(screen.getByText('about the second')).toBeInTheDocument()
+    expect(onEdit).not.toHaveBeenCalled()
+  })
+
+  it('closes the editor if the comment is posted while it is open', () => {
+    // "Post queued" and Done reviewing both flip the status from under an open
+    // editor. Saving after that would rewrite a comment the agent has already
+    // read, and nothing on this route tells it the text changed.
+    const onEdit = vi.fn()
+    const { rerender } = render(
+      <CommentBubble
+        comment={makeComment({ id: 'c1', status: 'queued', body: 'still mine' })}
+        onDelete={vi.fn()}
+        onReply={vi.fn()}
+        onEdit={onEdit}
+      />,
+    )
+    fireEvent.click(queuedBadge())
+    expect(editor()).toBeInTheDocument()
+    rerender(
+      <CommentBubble
+        comment={makeComment({ id: 'c1', status: 'open', body: 'still mine' })}
+        onDelete={vi.fn()}
+        onReply={vi.fn()}
+        onEdit={onEdit}
+      />,
+    )
+    expect(screen.queryByLabelText('Edit queued comment')).not.toBeInTheDocument()
+    expect(screen.getByText('still mine')).toBeInTheDocument()
+  })
+
+  it('keeps the text on screen when the save is refused', async () => {
+    // The refusal that matters is losing the race to "Post queued": the server
+    // rejects the write (expectStatus) and the reviewer's rewrite exists only
+    // in this textarea. Closing on the click would be the one unrecoverable
+    // outcome.
+    const onEdit = vi.fn().mockRejectedValue(new Error('409'))
+    renderBubble({ status: 'queued', body: 'original' }, onEdit)
+    fireEvent.click(queuedBadge())
+    fireEvent.change(editor(), { target: { value: 'my rewrite' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/didn.t save/i))
+    expect(editor()).toHaveValue('my rewrite')
   })
 
   it('renders the badge as plain text where no edit handler is wired', () => {

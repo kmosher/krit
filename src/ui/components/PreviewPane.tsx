@@ -43,7 +43,7 @@ export interface PreviewPaneProps {
   ) => void
   onDeleteComment: (id: string) => void
   onReplyComment: (id: string, body: string) => void
-  onEditComment: (id: string, body: string) => void
+  onEditComment: (id: string, body: string) => Promise<void> | void
 }
 
 interface PendingSelection {

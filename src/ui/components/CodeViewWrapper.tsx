@@ -164,6 +164,9 @@ const MEASURE_ATTEMPTS = 60
 const ANCHOR_TICK_MS = 32
 const ANCHOR_SETTLE_TICKS = 40
 const ANCHOR_STABLE_TICKS = 3
+// The wall-clock half of the same budget, for the hidden page whose timers are
+// clamped to ~1s and would otherwise stretch those 40 ticks across 40 seconds.
+const ANCHOR_SETTLE_MS = 2000
 const ANCHOR_RECOVERIES = 4
 
 // Input that means the reviewer is moving the surface themselves, at which
@@ -281,7 +284,7 @@ interface Props {
   ): void
   onDeleteComment(id: string): void
   onReplyComment(id: string, body: string): void
-  onEditComment(id: string, body: string): void
+  onEditComment(id: string, body: string): Promise<void> | void
   // SelectionPill's "Delete" — splices `anchor`'s exact character range out
   // of the working-tree file (server-side, via POST /api/edits/delete).
   onDeleteRange?(filePath: string, anchor: SelectionAnchor): void
@@ -726,32 +729,38 @@ export const CodeViewWrapper = memo(
       const el = focusedDraftForm(forms) ?? forms[0]
       const key = el?.dataset.draftKey
       if (!el || !key) return null
+      const top = el.getBoundingClientRect().top - container.getBoundingClientRect().top
       // The draft behind the element, because the element is the part that does
       // not survive: a big enough update pushes the draft's file outside
       // Pierre's virtual window and unmounts the form mid-correction. The line
       // is what can always be scrolled back to.
+      //
+      // A miss should be impossible — the key came from this same map — but it
+      // degrades to holding the element while it is rendered rather than to
+      // nothing at all. A key format that drifted would otherwise turn the
+      // whole feature off with no error, which is this loop's whole risk.
       const draft = pending.get(key)
-      if (!draft) return null
-      return {
-        key,
-        itemId: draft.itemId,
-        side: draft.side,
-        lineNumber: draft.endLine,
-        top: el.getBoundingClientRect().top - container.getBoundingClientRect().top,
-      }
+      if (!draft) return { key, top }
+      return { key, itemId: draft.itemId, side: draft.side, lineNumber: draft.endLine, top }
     }
 
     type DraftAnchor = {
       key: string
-      itemId: string
-      side: AnnotationSide
-      lineNumber: number
       top: number
+      // Absent only when the draft behind the form could not be found, which
+      // costs the recovery path (see captureDraftAnchor), not the hold.
+      itemId?: string
+      side?: AnnotationSide
+      lineNumber?: number
     }
     const anchorHoldRef = useRef<{
       observer: ResizeObserver
       timer: number
-      release: () => void
+      release: (e: Event) => void
+      // The element the observer and listeners are currently attached to, so a
+      // remount that swaps CodeView's container is noticed rather than silently
+      // leaving the hold bound to a detached node.
+      boundTo: HTMLElement | null
     } | null>(null)
     const stopAnchorHold = useStableCallback(() => {
       const hold = anchorHoldRef.current
@@ -759,9 +768,10 @@ export const CodeViewWrapper = memo(
       anchorHoldRef.current = null
       hold.observer.disconnect()
       window.clearInterval(hold.timer)
-      const container = scrollRef.current
+      // `boundTo`, not the current container: a remount may have replaced it,
+      // and removing from the new node leaves the old one still listening.
       for (const type of ANCHOR_RELEASE_EVENTS) {
-        container?.removeEventListener(type, hold.release)
+        hold.boundTo?.removeEventListener(type, hold.release)
       }
     })
     // Keeping the reviewer's scroll position is not the same as keeping their
@@ -781,6 +791,31 @@ export const CodeViewWrapper = memo(
     // frames, and each pass can move everything below it again. Correct on a
     // short frame loop instead, and re-find the element by key each time —
     // a remount rebuilds the form, so its node identity does not survive.
+    // (Re)attach the observer and the release listeners to whichever element is
+    // CodeView's container *now*. The structural path starts a hold before the
+    // remount, so the node bound at that moment is detached a tick later —
+    // leaving a loop nothing could release, on the update that moves the most
+    // layout. Called again from every tick, which is where the swap is noticed.
+    const bindAnchorHold = useStableCallback(() => {
+      const hold = anchorHoldRef.current
+      const container = scrollRef.current
+      if (!hold || !container || hold.boundTo === container) return
+      if (hold.boundTo) {
+        for (const type of ANCHOR_RELEASE_EVENTS) {
+          hold.boundTo.removeEventListener(type, hold.release)
+        }
+      }
+      hold.observer.disconnect()
+      hold.observer.observe(container)
+      // The content element, not just the viewport: the container's own box
+      // never changes size when a file above the draft grows.
+      if (container.firstElementChild) hold.observer.observe(container.firstElementChild)
+      for (const type of ANCHOR_RELEASE_EVENTS) {
+        container.addEventListener(type, hold.release, { passive: true })
+      }
+      hold.boundTo = container
+    })
+
     const holdDraftAnchor = (anchor: DraftAnchor | null) => {
       if (!anchor) return
       stopAnchorHold()
@@ -796,11 +831,13 @@ export const CodeViewWrapper = memo(
       // krit exists for, with nothing to see but a draft that scrolled away.
       let ticks = ANCHOR_SETTLE_TICKS
       let stable = 0
+      const startedAt = Date.now()
       // Bounded, because each recovery scrolls the surface and so provokes the
       // render that can lose the form again — unbounded, two of those chase
       // each other for as long as the loop lives.
       let recoveries = ANCHOR_RECOVERIES
       const correct = () => {
+        bindAnchorHold()
         const container = scrollRef.current
         if (!container) return stopAnchorHold()
         const el = draftFormElements(container).find((f) => f.dataset.draftKey === anchor.key)
@@ -813,7 +850,7 @@ export const CodeViewWrapper = memo(
           } else {
             stable++
           }
-        } else if (recoveries > 0) {
+        } else if (recoveries > 0 && anchor.itemId && anchor.lineNumber !== undefined) {
           // The form is not in the DOM: its file left the virtual window while
           // the surface was being rebuilt. Nothing to measure, and scrollTop
           // arithmetic cannot get it back — only Pierre knows where an
@@ -830,32 +867,34 @@ export const CodeViewWrapper = memo(
           })
         }
         // Stop once the draft has held still for a few ticks running, or when
-        // the budget runs out — whichever comes first. The cap matters most in
-        // a hidden page, where the browser clamps timers to about a second and
-        // a generous tick count would keep correcting long after the update.
-        if (--ticks <= 0 || stable >= ANCHOR_STABLE_TICKS) stopAnchorHold()
-      }
-      anchorHoldRef.current = {
-        observer: new ResizeObserver(correct),
-        timer: window.setInterval(correct, ANCHOR_TICK_MS),
-        // A scroll the reviewer performs outranks the anchor. Their *input* is
-        // the signal, not a scrollTop delta: Pierre reanchors scroll itself, so
-        // an unexpected position is as likely to be upstream as a human, and
-        // reading it as a human is how the anchor quietly gives up.
-        release: () => stopAnchorHold(),
-      }
-      const container = scrollRef.current
-      if (container) {
-        anchorHoldRef.current.observer.observe(container)
-        // The content element, not just the viewport: the container's own box
-        // never changes size when a file above the draft grows.
-        if (container.firstElementChild) {
-          anchorHoldRef.current.observer.observe(container.firstElementChild)
-        }
-        for (const type of ANCHOR_RELEASE_EVENTS) {
-          container.addEventListener(type, anchorHoldRef.current.release, { passive: true })
+        // either budget runs out. Both budgets are needed: a hidden page clamps
+        // timers to about a second, so counting ticks alone would keep snapping
+        // the reviewer's scroll back for the better part of a minute on a
+        // surface that never settles.
+        const spent = Date.now() - startedAt
+        if (--ticks <= 0 || spent >= ANCHOR_SETTLE_MS || stable >= ANCHOR_STABLE_TICKS) {
+          stopAnchorHold()
         }
       }
+      // Released by the reviewer's own input — but not by the keystrokes going
+      // into the draft itself. The form is a descendant of the container these
+      // listeners sit on, and `AnnotationEventGuard` cannot help: it stops
+      // React's synthetic events at the React root, which the native event
+      // reaches only *after* bubbling past the container. Unfiltered, typing
+      // mid-sentence cancels the hold that exists for typing mid-sentence.
+      const release = (e: Event) => {
+        const target = e.target as Node | null
+        const container = scrollRef.current
+        if (target && container) {
+          for (const form of draftFormElements(container)) {
+            if (form.contains(target)) return
+          }
+        }
+        stopAnchorHold()
+      }
+      const observer = new ResizeObserver(correct)
+      anchorHoldRef.current = { observer, timer: window.setInterval(correct, ANCHOR_TICK_MS), release, boundTo: null }
+      bindAnchorHold()
       correct()
     }
     useEffect(() => stopAnchorHold, [stopAnchorHold])
@@ -1422,7 +1461,13 @@ export const CodeViewWrapper = memo(
         }
         return (
           <AnnotationEventGuard>
+            {/* Keyed by comment id because Pierre keys line annotations by
+                array *index*: delete or resolve a comment earlier in the same
+                file and every later one shifts down a slot, so React would
+                otherwise reuse this instance — and its open editor, holding
+                text typed for the old comment — for a different comment. */}
             <CommentBubble
+              key={(annotation.metadata as ReviewComment).id}
               comment={annotation.metadata as ReviewComment}
               onDelete={onDeleteComment}
               onReply={onReplyComment}

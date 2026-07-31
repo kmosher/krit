@@ -24,6 +24,12 @@ test:
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
+    # The desktop app is its own workspace (see desktop/src-tauri/Cargo.toml), so
+    # nothing above reaches it — and it is the other half of the Done-reviewing
+    # contract: window labels, capability names, and the global the UI probes
+    # for. Without this it is compiled only by a manual `cargo tauri build`.
+    cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
+    cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
     pnpm exec tsc --noEmit
 
 # Build the web UI bundle (what release binaries embed)

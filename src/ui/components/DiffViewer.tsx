@@ -30,7 +30,7 @@ interface DiffViewerProps {
   ) => void
   onDeleteComment: (id: string) => void
   onReplyComment: (id: string, body: string) => void
-  onEditComment: (id: string, body: string) => void
+  onEditComment: (id: string, body: string) => Promise<void> | void
   onDeleteRange?: (filePath: string, anchor: SelectionAnchor) => void
   onActiveFileChange?: (filePath: string | null) => void
   onEditFile?: (filePath: string) => void

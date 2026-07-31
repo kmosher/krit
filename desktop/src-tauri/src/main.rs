@@ -65,7 +65,9 @@ fn open_review_window(app: &tauri::AppHandle, deep_link: &url::Url) {
     }
 
     let Some(target) = target else { return };
-    let Ok(parsed) = target.parse::<url::Url>() else { return };
+    let Ok(parsed) = target.parse::<url::Url>() else {
+        return;
+    };
     if parsed.scheme() != "http" {
         return;
     }
@@ -85,9 +87,22 @@ fn open_review_window(app: &tauri::AppHandle, deep_link: &url::Url) {
         return;
     }
 
+    // The window may only ever be its own server. The capability that lets a
+    // review page close its window is scoped to loopback URLs, and loopback is
+    // not an identity: any other local server framed here would inherit it.
+    // Nothing else bounds that — a review renders Markdown from the branch
+    // under review, so the links in it are the branch author's to choose.
+    let origin = format!("{}://{}", parsed.scheme(), parsed.authority());
     if let Err(e) = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
         .title(title)
         .inner_size(1400.0, 900.0)
+        .on_navigation(move |url| {
+            let same = format!("{}://{}", url.scheme(), url.authority()) == origin;
+            if !same {
+                eprintln!("krit: refused to navigate a review window to {url}");
+            }
+            same
+        })
         .build()
     {
         eprintln!("krit: failed to open review window: {e}");

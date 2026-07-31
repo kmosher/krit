@@ -103,7 +103,7 @@ export function Toolbar({
   const submitDisabled = submitting || isSubmitted || !hasWatcher
   const submitLabel = isSubmitted
     ? windowStays
-      ? 'Done ✓ — close this tab'
+      ? 'Done ✓ — close this window'
       : 'Done ✓'
     : !hasWatcher
       ? 'No watcher'
@@ -112,7 +112,7 @@ export function Toolbar({
         : `Done reviewing (${commentCount})`
   const submitTitle = isSubmitted
     ? windowStays
-      ? 'Review finished — the listening Claude session has been told to stop watching. A browser tab cannot close itself unless a script opened it, so this one is yours to close; the server has already stopped.'
+      ? 'Review finished and the server has stopped — this window is yours to close. (A page can only close itself when a script opened it, which a terminal-launched tab is not.)'
       : 'Review finished — the listening Claude session has been told to stop watching.'
     : !hasWatcher
       ? 'No agent or watcher is currently subscribed to events. Have Claude attach one, or use Copy comments to paste manually.'

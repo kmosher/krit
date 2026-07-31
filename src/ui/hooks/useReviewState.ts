@@ -100,5 +100,5 @@ export async function submitReview(summary = ''): Promise<'closing' | 'stays-ope
     body: JSON.stringify({ summary }),
   })
   endReviewSession()
-  return closeReviewWindow()
+  return await closeReviewWindow()
 }

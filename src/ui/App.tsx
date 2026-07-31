@@ -316,7 +316,7 @@ export function App() {
     activeFiles,
     editingFiles: inlineEditFiles,
   })
-  const { comments, addComment, removeComment, editComment, replyToComment, copyAllComments, postQueued, queuedCount } =
+  const { comments, addComment, removeComment, editComment, settleEdits, replyToComment, copyAllComments, postQueued, queuedCount } =
     useComments(reportError)
   const reviewState = useReviewState()
   const [activeFile, setActiveFile] = useState<string | null>(null)
@@ -911,7 +911,13 @@ export function App() {
         watcherCount={reviewState.watcherCount}
         agentCount={reviewState.agentCount}
         submittedAt={reviewState.submittedAt}
-        onSubmitReview={submitReview}
+        // Done reviewing posts every queued comment server-side, so a rewrite
+        // still in flight has to land first — after the flip the server refuses
+        // it (see api_comment_put's expectStatus) and the edit would be lost.
+        onSubmitReview={async (summary) => {
+          await settleEdits()
+          return submitReview(summary)
+        }}
         refreshMode={settings.refreshMode}
         onRefreshModeChange={(refreshMode) => updateSettings({ refreshMode })}
         staleCount={staleFiles.size}

@@ -1064,8 +1064,40 @@ async fn api_comment_put(
         )
             .into_response();
     }
+    // Optional optimistic concurrency, used by the browser's queued-comment
+    // editor. A body edit is only safe while the comment is still queued: once
+    // it is posted, this route changes the stored text and broadcasts nothing,
+    // so a save that lands a moment too late would leave the reviewer and the
+    // agent reading different comments with nothing anywhere to say so. The
+    // reviewer can lose that race by clicking "Post queued" (or Done reviewing)
+    // while a save is in flight. Refusing here is what makes it a visible
+    // failure instead of a silent divergence.
+    let expect_status = payload["expectStatus"].as_str();
     let (was_queued, updated) = {
         let mut store = lock(&state.store);
+        if let Some(expected) = expect_status {
+            let current = store.get(&id).map(|c| c.status.clone());
+            match current {
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        axum::Json(json!({"error": "Comment not found"})),
+                    )
+                        .into_response();
+                }
+                Some(status) if status != expected => {
+                    return (
+                        StatusCode::CONFLICT,
+                        axum::Json(json!({
+                            "error": format!("comment is '{status}', not '{expected}'"),
+                            "status": status,
+                        })),
+                    )
+                        .into_response();
+                }
+                Some(_) => {}
+            }
+        }
         // Only meaningful when a status change was requested: None = no status
         // in the payload.
         let was_queued: Option<bool> = new_status
@@ -2288,6 +2320,88 @@ mod tests {
             meddled,
             "a refused undo writes nothing"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- queued-comment edits ----------
+
+    fn post_queued_comment(port: u16, body: &str) -> String {
+        let res: Value = ureq::post(&format!("http://127.0.0.1:{port}/api/comments"))
+            .send_json(json!({
+                "filePath": "a.txt", "side": "additions",
+                "lineNumber": 1, "endLine": 1, "lineContent": "one",
+                "body": body, "status": "queued",
+            }))
+            .expect("the comment lands")
+            .into_json()
+            .unwrap();
+        res["id"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn expect_status_lets_a_queued_comment_be_rewritten() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (root, port) = spawn_edit_server(&rt, "edit-queued");
+        let id = post_queued_comment(port, "first thoughts");
+
+        let res: Value = ureq::put(&format!("http://127.0.0.1:{port}/api/comments/{id}"))
+            .send_json(json!({"body": "second thoughts", "expectStatus": "queued"}))
+            .expect("a queued comment takes the edit")
+            .into_json()
+            .unwrap();
+        assert_eq!(res["body"], "second thoughts");
+        assert_eq!(res["status"], "queued", "editing must not post it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expect_status_refuses_an_edit_that_lost_the_race_to_posting() {
+        // The reviewer can click "Post queued" (or Done reviewing) while a save
+        // is in flight. This route broadcasts nothing for a body change, so
+        // letting the late write land would leave the agent holding the text it
+        // was posted with and the reviewer looking at something else, with
+        // nothing anywhere to say the two disagree.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (root, port) = spawn_edit_server(&rt, "edit-raced");
+        let id = post_queued_comment(port, "first thoughts");
+        ureq::post(&format!("http://127.0.0.1:{port}/api/queued/post"))
+            .send_json(json!({}))
+            .expect("the queue flushes");
+
+        let err = ureq::put(&format!("http://127.0.0.1:{port}/api/comments/{id}"))
+            .send_json(json!({"body": "too late", "expectStatus": "queued"}))
+            .unwrap_err();
+        assert!(matches!(&err, ureq::Error::Status(409, _)), "{err}");
+
+        let all: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/comments"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(
+            all[0]["body"], "first thoughts",
+            "a refused edit writes nothing"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_put_without_expect_status_is_unconditional() {
+        // Every other caller of this route (resolve, reopen, the agent CLI)
+        // sends no expectation and must keep working exactly as before.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (root, port) = spawn_edit_server(&rt, "edit-unconditional");
+        let id = post_queued_comment(port, "first thoughts");
+        ureq::post(&format!("http://127.0.0.1:{port}/api/queued/post"))
+            .send_json(json!({}))
+            .expect("the queue flushes");
+
+        let res: Value = ureq::put(&format!("http://127.0.0.1:{port}/api/comments/{id}"))
+            .send_json(json!({"status": "resolved"}))
+            .expect("an unconditional update still applies")
+            .into_json()
+            .unwrap();
+        assert_eq!(res["status"], "resolved");
         let _ = std::fs::remove_dir_all(&root);
     }
 

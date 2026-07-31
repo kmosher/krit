@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 
 interface QueuedCommentEditorProps {
   initialBody: string
-  onSave: (body: string) => void
+  // Resolves when the rewrite is stored. The editor stays open until then and
+  // keeps the text if it rejects — a refusal is exactly when the reviewer needs
+  // what they typed to still be on screen.
+  onSave: (body: string) => Promise<void> | void
   onCancel: () => void
 }
 
@@ -17,6 +20,8 @@ interface QueuedCommentEditorProps {
 export function QueuedCommentEditor({ initialBody, onSave, onCancel }: QueuedCommentEditorProps) {
   const [body, setBody] = useState(initialBody)
   const [confirmingDiscard, setConfirmingDiscard] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveFailed, setSaveFailed] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
@@ -43,12 +48,24 @@ export function QueuedCommentEditor({ initialBody, onSave, onCancel }: QueuedCom
     onCancel()
   }
 
-  const save = () => {
+  const save = async () => {
     const trimmed = body.trim()
     // An empty body would leave a comment with nothing in it but its anchor,
     // which reads as a rendering bug. Deleting the comment is the other button.
-    if (!trimmed) return
-    onSave(trimmed)
+    if (!trimmed || saving) return
+    setSaveFailed(false)
+    setSaving(true)
+    try {
+      await onSave(trimmed)
+    } catch {
+      // The reason is reported by the caller's error path; this only has to
+      // keep the text alive and say the save did not take. The commonest cause
+      // is losing the race against "Post queued", after which the comment is no
+      // longer editable at all — hence "copy it somewhere" rather than "retry".
+      setSaveFailed(true)
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -62,7 +79,7 @@ export function QueuedCommentEditor({ initialBody, onSave, onCancel }: QueuedCom
         onKeyDown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             e.preventDefault()
-            save()
+            void save()
           }
           if (e.key === 'Escape') {
             e.preventDefault()
@@ -78,6 +95,11 @@ export function QueuedCommentEditor({ initialBody, onSave, onCancel }: QueuedCom
         }}
         aria-label="Edit queued comment"
       />
+      {saveFailed && (
+        <div className="comment-form-confirm" role="alert">
+          <span>That didn’t save — your text is still here. Copy it before closing.</span>
+        </div>
+      )}
       {confirmingDiscard && (
         <div className="comment-form-confirm" role="alert">
           <span>Discard your changes?</span>
@@ -108,9 +130,9 @@ export function QueuedCommentEditor({ initialBody, onSave, onCancel }: QueuedCom
           type="button"
           className="btn btn-primary btn-sm"
           onClick={save}
-          disabled={!body.trim() || !edited}
+          disabled={!body.trim() || !edited || saving}
         >
-          Save
+          {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
     </div>

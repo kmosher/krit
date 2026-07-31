@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { UserCircle, CheckCircle2, Bot, Reply, History, PenLine } from 'lucide-react'
 import type { ReviewComment } from '../../types'
 import { timeAgo } from '../utils'
@@ -14,13 +14,23 @@ interface CommentBubbleProps {
   // nothing for a body change, so editing one would leave the reviewer and the
   // agent reading different text with nothing to say so. Optional, for the
   // surfaces that render comments read-only.
-  onEdit?: (id: string, body: string) => void
+  onEdit?: (id: string, body: string) => Promise<void> | void
 }
 
 export function CommentBubble({ comment, onDelete, onReply, onEdit }: CommentBubbleProps) {
   const [, setTick] = useState(0)
   const [replying, setReplying] = useState(false)
   const [editing, setEditing] = useState(false)
+  // Belt and braces for the same hazard the `key` at the call site addresses:
+  // this component is reused across comments wherever a caller forgets it, and
+  // an open editor carried onto another comment saves one comment's text under
+  // another comment's id. Reset rather than trust every future call site.
+  const lastIdRef = useRef(comment.id)
+  if (lastIdRef.current !== comment.id) {
+    lastIdRef.current = comment.id
+    if (editing) setEditing(false)
+    if (replying) setReplying(false)
+  }
   const isResolved = comment.status === 'resolved'
   const isQueued = comment.status === 'queued'
 
@@ -89,11 +99,13 @@ export function CommentBubble({ comment, onDelete, onReply, onEdit }: CommentBub
           &times;
         </button>
       </div>
-      {editing && onEdit ? (
+      {editing && isQueued && onEdit ? (
         <QueuedCommentEditor
           initialBody={comment.body}
-          onSave={(body) => {
-            onEdit(comment.id, body)
+          // Closed only once the rewrite is stored: a refused save (the comment
+          // was posted while it was in flight) has to leave the text on screen.
+          onSave={async (body) => {
+            await onEdit(comment.id, body)
             setEditing(false)
           }}
           onCancel={() => setEditing(false)}

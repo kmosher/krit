@@ -195,7 +195,18 @@ skill together when you do.
     reanchors scroll itself after a relayout, so backing off on an unexpected
     `scrollTop` means backing off exactly when the correction is needed. Real
     input events (`wheel`, `pointerdown`, `keydown`, `touchstart`) are the
-    signal that the reviewer has taken over.
+    signal that the reviewer has taken over — **except the ones coming out of
+    the draft itself**. The form is a descendant of the container those
+    listeners sit on, and `AnnotationEventGuard` cannot stop them: it stops
+    React's synthetic events at the React root, which the native event reaches
+    only after bubbling past the container. Unfiltered, typing cancels the hold
+    that exists for typing.
+  - **The container the hold is bound to can be replaced under it.** The
+    structural path starts a hold *before* the remount, so the node bound at
+    that moment is detached a tick later — a loop nothing can release, on the
+    update that moves the most layout. Every tick re-checks the identity
+    (`bindAnchorHold`), and teardown removes listeners from what it bound to,
+    not from whatever is current.
   - **The form is not always in the DOM to measure.** A big enough update
     pushes the draft's file out of Pierre's virtual window mid-correction and
     unmounts the form, and no scrollTop arithmetic can get it back — only
@@ -308,6 +319,17 @@ skill together when you do.
   scoped to the localhost URLs the app frames). Do not reach for the
   `window.open('', '_self')` trick: in Chrome it navigates the review away and
   still leaves the tab.
+  - **Await the app's `close()` and treat a rejection as "stays open".** The app
+    bundle and the UI ship separately (`cargo tauri build` vs `cargo install`),
+    so an installed app whose capabilities predate the UI denies the call from a
+    `close` that exists and looks callable. Swallowing that rejection puts back
+    exactly the dead frame the capability was added to prevent, and the label
+    would say the review is done.
+  - The capability's remote scope is loopback-wide, which is not an identity —
+    so the window itself is pinned to the origin it was opened with
+    (`on_navigation` in `desktop/src-tauri/src/main.rs`). A review renders
+    Markdown from the branch under review, and the links in it are the branch
+    author's to choose.
 - The launch message says "Asked the krit app to open" because the launcher
   returning Ok only means the OS accepted the URL; a 10s post-launch check
   reports if no UI actually connected.
@@ -382,7 +404,21 @@ skill together when you do.
   comment is posted — so editing an already-posted comment would leave the
   reviewer and the agent reading different text with nothing anywhere to say so.
   Making open comments editable means giving that route a `comment-updated`
-  broadcast first, and teaching the agent side what to do with it.
+  broadcast first, and teaching the agent side what to do with it. (Note
+  `comment-updated` is filtered out of the agent stream today, so that is two
+  changes, not one.)
+  - The reviewer can lose a race they cannot see: "Post queued" and Done
+    reviewing both flip the status while a save is in flight. Three things hold
+    the line, and the first two are not enough alone — **the write carries
+    `expectStatus: "queued"`** and the server refuses it with a 409 once the
+    comment has been posted; **the posting paths wait** for in-flight saves
+    (`settleEdits`); and **the editor keeps the reviewer's text on screen** when
+    a save is refused, because at that point it exists nowhere else.
+  - The bubble is **keyed by comment id** at every call site, and resets its own
+    editing state when the id changes. Pierre keys line annotations by array
+    *index*, so deleting a comment earlier in a file shifts every later one into
+    its neighbour's slot — React then reuses the component, and an open editor
+    would file one comment's text under another comment's id.
 - Pending drafts are the one mutation that **deliberately does not broadcast**.
   Echoing a reviewer's keystrokes back into the form they came from fights the
   form, and unsent text is not the agent's business — so there is no SSE event

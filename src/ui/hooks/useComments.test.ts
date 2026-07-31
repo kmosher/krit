@@ -266,7 +266,9 @@ describe('adding a comment', () => {
 describe('editing, resolving and deleting', () => {
   it('edits the body in place without touching the other comments', async () => {
     const { result } = await mount([makeComment({ id: 'a' }), makeComment({ id: 'b', body: 'other' })])
-    act(() => result.current.editComment('a', 'rewritten'))
+    await act(async () => {
+      await result.current.editComment('a', 'rewritten')
+    })
     await waitFor(() => expect(result.current.comments[0].body).toBe('rewritten'))
     expect(result.current.comments.map((c) => c.id)).toEqual(['a', 'b'])
     expect(result.current.comments[1].body).toBe('other')
@@ -309,9 +311,8 @@ describe('editing, resolving and deleting', () => {
     // when the request was fired; a snapshot would let the second response
     // discard the first edit.
     const { result } = await mount([makeComment({ id: 'a' }), makeComment({ id: 'b' })])
-    act(() => {
-      result.current.editComment('a', 'A!')
-      result.current.editComment('b', 'B!')
+    await act(async () => {
+      await Promise.all([result.current.editComment('a', 'A!'), result.current.editComment('b', 'B!')])
     })
     await waitFor(() => expect(result.current.comments.map((c) => c.body)).toEqual(['A!', 'B!']))
   })
@@ -320,9 +321,10 @@ describe('editing, resolving and deleting', () => {
     // Deleting a comment whose edit is still in flight is easy to do; a map
     // that reinserted the missing id would resurrect it.
     const { result } = await mount([makeComment({ id: 'a' }), makeComment({ id: 'b' })])
-    act(() => {
-      result.current.editComment('a', 'edited')
+    await act(async () => {
+      const edit = result.current.editComment('a', 'edited')
       result.current.removeComment('a')
+      await edit
     })
     await waitFor(() => expect(result.current.comments).toHaveLength(1))
     expect(result.current.comments[0].id).toBe('b')
@@ -365,7 +367,9 @@ describe('posting queued comments', () => {
     // "Done reviewing" — including on comments the agent already has.
     const { result } = await mount([makeComment({ id: 'a', status: 'queued' }), makeComment({ id: 'b', status: 'queued' })])
     expect(result.current.queuedCount).toBe(2)
-    act(() => result.current.postQueued())
+    await act(async () => {
+      await result.current.postQueued()
+    })
     await waitFor(() => expect(result.current.queuedCount).toBe(0))
     expect(calls.filter((c) => c.url === '/api/queued/post')).toHaveLength(1)
     expect(result.current.comments.every((c) => c.status === 'open')).toBe(true)
@@ -677,7 +681,7 @@ describe('a server that says no', () => {
     const { result } = await mount([makeComment({ id: 'c1', status: 'queued' })])
     refuse = { method: 'POST', status: 500 }
     await act(async () => {
-      result.current.postQueued()
+      await result.current.postQueued()
     })
     await waitFor(() => expect(reported).toHaveLength(1))
     // Nothing to assert about the cache — this mutation never wrote one
