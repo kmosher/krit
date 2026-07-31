@@ -104,10 +104,18 @@ skill together when you do.
   - **A captured chunk is a delta, not the screen.** ratatui emits only the
     cells that changed, so reading the bytes that arrive after an event shows
     an unchanged screen as an empty one — which reads exactly like the feature
-    being broken. Two checks were confidently wrong this way before the cause
-    was obvious. Force a full repaint before capturing (nudging the window size
-    makes `Terminal::draw` autoresize and repaint everything), or keep a real
-    emulator's screen state.
+    being broken. Stripping escapes and splitting on newlines is no better:
+    ratatui positions every run with `CUP` and emits almost no newlines, so
+    that yields a few very long lines, not rows. **Model the screen** — apply
+    `CUP`/`EL`/`ED` to a grid — and read assertions off the grid. Replay the
+    whole byte stream into a fresh grid rather than feeding chunks as they
+    arrive, because a pty read splits escape sequences mid-sequence at 1 KiB.
+    Between them these produced five confidently wrong "failures" in one
+    session, none of which was a bug in krit.
+  - Mouse input goes in as SGR reports: `ESC[<{button};{col+1};{row+1}M` to
+    press, `m` to release, button 64/65 for wheel up/down. crossterm parses
+    them whether or not capture is on, so a test can drive the mouse without
+    the terminal cooperating.
   - Suspend has to be verified from outside: `ps -o state=` shows `T` while
     stopped, and the app must have emitted `ESC[?1049l` *before* it stopped.
 - **The fs-watcher needs `com.apple.FSEvents` in the sandbox's
@@ -150,6 +158,15 @@ skill together when you do.
   agents pay tokens per frame and shouldn't hear themselves work (`server.rs`,
   `agent_visible`). The UI's SSE stream (`/api/events`) carries everything.
   If a WS test "sees no events", check this before debugging the watcher.
+- **`krit-tui` starts a server when there isn't one, and never stops it.**
+  Killing it on exit would be wrong whenever a browser tab is also attached,
+  and unnecessary either way: the idle timeout already counts subscribers, so
+  a server nobody is watching goes away on its own. The adopt path probes
+  `/api/settings` before trusting the state file — a crashed server leaves one
+  behind, and believing it means reporting "cannot reach krit" when the honest
+  answer is that we should have started one. A server that *is* running keeps
+  its own diff range; `-- <args>` passed to a viewer that adopts one is
+  reported in the status strip rather than silently ignored.
 - **`krit-tui` subscribes as `role=ui`, not `role=cli`.** It is a human's
   client, so it has to hold the server open the way a browser tab does; a `cli`
   subscription would let the idle timeout fire with the review still on screen.

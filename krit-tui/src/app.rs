@@ -9,13 +9,36 @@
 use crate::client::DiffPayload;
 use crate::patch::{FileDiff, parse_patch};
 use crate::rows::{Row, build_rows, file_rows, hunk_rows, next_stop, scroll_to_show};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Files,
     Diff,
+}
+
+/// Where the last frame put things, so a click can be turned back into the
+/// thing under it.
+///
+/// Written by `ui::draw` and read by `App::mouse_action`. Hit-testing against
+/// anything else — a remembered constant, a recomputed layout — is a second
+/// opinion about the screen, and the two will disagree the first time a pane
+/// is hidden or the terminal is resized.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Panes {
+    /// The rows the diff occupies, and the row index drawn at its top.
+    pub diff: Rect,
+    pub diff_top_row: usize,
+    /// `None` when the file list is hidden — by the `f` toggle or because the
+    /// terminal is too narrow for it.
+    pub files: Option<Rect>,
+    /// Index of the first file drawn in that list; the list scrolls with the
+    /// cursor, so this is not always 0.
+    pub files_top: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +63,18 @@ pub enum Action {
     Refetch,
     ToggleHelp,
     Suspend,
+    ToggleFiles,
+    /// Release the mouse back to the terminal (or take it again).
+    ToggleMouse,
+    /// Move the *view* without moving the cursor — what a wheel does. Every
+    /// other movement drags the view along behind the cursor; this one is the
+    /// exception, and keeping it a separate action is what stops the next
+    /// `scroll_to_show` from immediately undoing it.
+    ScrollViewDown(usize),
+    ScrollViewUp(usize),
+    /// Put the cursor on a row, or on a file's header. From a click.
+    FocusRow(usize),
+    FocusFile(usize),
 }
 
 /// A line of feedback under the diff. Not a modal, and never a prompt: the
@@ -68,8 +103,14 @@ pub struct App {
     pub custom_mode: bool,
     pub status: Status,
     pub show_help: bool,
+    pub show_files: bool,
+    /// Whether we are holding the mouse. On, the wheel scrolls and a click
+    /// moves the cursor; off, the terminal gets its own selection back so the
+    /// reviewer can copy a line the ordinary way.
+    pub mouse: bool,
     pub tab_size: usize,
     pub should_quit: bool,
+    pub panes: Panes,
 }
 
 impl Default for App {
@@ -87,8 +128,11 @@ impl Default for App {
             custom_mode: false,
             status: Status::Idle,
             show_help: false,
+            show_files: true,
+            mouse: true,
             tab_size: 4,
             should_quit: false,
+            panes: Panes::default(),
         }
     }
 }
@@ -148,6 +192,26 @@ impl App {
 
     pub fn apply(&mut self, action: Action, viewport: usize) {
         let last = self.rows.len().saturating_sub(1);
+
+        // Wheel scrolling moves the view out from under the cursor on purpose,
+        // so it must not fall through to the `scroll_to_show` below — that
+        // call exists to drag the view *to* the cursor and would undo this
+        // before the frame was drawn. The cursor is picked up again by the
+        // next movement key, which is what scrolling ahead to read and then
+        // carrying on should feel like.
+        let max_offset = self.rows.len().saturating_sub(viewport);
+        match action {
+            Action::ScrollViewDown(n) => {
+                self.offset = (self.offset + n).min(max_offset);
+                return;
+            }
+            Action::ScrollViewUp(n) => {
+                self.offset = self.offset.saturating_sub(n);
+                return;
+            }
+            _ => {}
+        }
+
         match action {
             Action::None => {}
             Action::Quit => self.should_quit = true,
@@ -157,8 +221,14 @@ impl App {
             Action::HalfPageUp => self.cursor = self.cursor.saturating_sub(viewport / 2),
             Action::Top => self.cursor = 0,
             Action::Bottom => self.cursor = last,
-            Action::NextFile => self.jump(&file_rows(&self.rows), true),
-            Action::PrevFile => self.jump(&file_rows(&self.rows), false),
+            Action::NextFile => {
+                self.jump(&file_rows(&self.rows), true);
+                self.reveal_at_top(viewport);
+            }
+            Action::PrevFile => {
+                self.jump(&file_rows(&self.rows), false);
+                self.reveal_at_top(viewport);
+            }
             Action::NextHunk => self.jump(&hunk_rows(&self.rows), true),
             Action::PrevHunk => self.jump(&hunk_rows(&self.rows), false),
             Action::ScrollRight(n) => self.h_scroll += n,
@@ -172,10 +242,100 @@ impl App {
             }
             Action::ToggleCollapse => self.toggle_collapse(),
             Action::ToggleHelp => self.show_help = !self.show_help,
+            Action::ToggleFiles => {
+                self.show_files = !self.show_files;
+                // Focus cannot stay on a pane that is no longer drawn.
+                if !self.show_files {
+                    self.focus = Focus::Diff;
+                }
+            }
+            Action::ToggleMouse => self.mouse = !self.mouse,
+            Action::FocusRow(row) => {
+                self.cursor = row.min(last);
+                self.focus = Focus::Diff;
+            }
+            Action::FocusFile(index) => {
+                if let Some(file) = self.files.get(index)
+                    && let Some(row) = self.row_of_path(&file.path.clone())
+                {
+                    self.cursor = row;
+                    self.reveal_at_top(viewport);
+                }
+                self.focus = Focus::Files;
+            }
+            // Returned above.
+            Action::ScrollViewDown(_) | Action::ScrollViewUp(_) => {}
             // Handled by the caller, which owns the socket and the terminal.
             Action::Refetch | Action::Suspend => {}
         }
         self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
+    }
+
+    /// What a mouse event means, given where the last frame put things.
+    ///
+    /// Returns `None` for anything outside a pane or that we don't act on, so
+    /// the caller can tell "not for us" from "do nothing" — a drag across the
+    /// screen is a stream of moves, and treating each as a click would drag
+    /// the cursor with it.
+    pub fn mouse_action(&self, event: MouseEvent) -> Action {
+        if !self.mouse {
+            return Action::None;
+        }
+        let (col, row) = (event.column, event.row);
+        match event.kind {
+            // Three lines a notch, the same as most pagers. The wheel is for
+            // reading ahead, so it does not disturb the cursor.
+            MouseEventKind::ScrollDown => Action::ScrollViewDown(3),
+            MouseEventKind::ScrollUp => Action::ScrollViewUp(3),
+            // Terminals that report horizontal wheels (or shift+wheel) send
+            // these; the diff is the only thing that scrolls sideways.
+            MouseEventKind::ScrollRight => Action::ScrollRight(4),
+            MouseEventKind::ScrollLeft => Action::ScrollLeft(4),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(files) = self.files_pane_hit(col, row) {
+                    return files;
+                }
+                self.diff_hit(col, row)
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn files_pane_hit(&self, col: u16, row: u16) -> Option<Action> {
+        let area = self.panes.files?;
+        if !contains(area, col, row) {
+            return None;
+        }
+        let index = self.panes.files_top + (row - area.y) as usize;
+        // Below the last file is still inside the pane — clicking the empty
+        // part of a short list should do nothing, not select the last file.
+        (index < self.files.len()).then_some(Action::FocusFile(index))
+    }
+
+    fn diff_hit(&self, col: u16, row: u16) -> Action {
+        let area = self.panes.diff;
+        if !contains(area, col, row) {
+            return Action::None;
+        }
+        let index = self.panes.diff_top_row + (row - area.y) as usize;
+        if index >= self.rows.len() {
+            return Action::None;
+        }
+        Action::FocusRow(index)
+    }
+
+    /// Put the cursor's row at the top of the view.
+    ///
+    /// Only for *going to a file* — clicking one in the list, or `]`/`[`.
+    /// Minimal scrolling is right when the cursor is walking, but a jump
+    /// under it lands the file header on the last visible row, so arriving
+    /// at a file means looking at the end of the one before it. Asking to go
+    /// somewhere and being shown where you came from is the wrong answer.
+    /// Hunk jumps keep the minimal behavior: consecutive hunks are usually
+    /// already on screen, and re-topping for each would make `n` lurch.
+    fn reveal_at_top(&mut self, viewport: usize) {
+        let max_offset = self.rows.len().saturating_sub(viewport);
+        self.offset = self.cursor.min(max_offset);
     }
 
     fn jump(&mut self, stops: &[usize], forward: bool) {
@@ -206,6 +366,12 @@ impl App {
             self.cursor = row;
         }
     }
+}
+
+/// `Rect::contains` wants a `Position`; this is the same test against the two
+/// numbers a mouse event actually carries.
+fn contains(area: Rect, col: u16, row: u16) -> bool {
+    col >= area.x && col < area.right() && row >= area.y && row < area.bottom()
 }
 
 /// Keys to actions. `pending_g` carries the half-typed `gg`; it is returned
@@ -257,6 +423,8 @@ fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
         (KeyCode::Tab, _) => Action::ToggleFocus,
         (KeyCode::Char('z'), false) | (KeyCode::Enter, _) => Action::ToggleCollapse,
         (KeyCode::Char('r'), false) => Action::Refetch,
+        (KeyCode::Char('f'), false) => Action::ToggleFiles,
+        (KeyCode::Char('m'), false) => Action::ToggleMouse,
         (KeyCode::Char('?'), false) => Action::ToggleHelp,
         _ => Action::None,
     };
@@ -521,5 +689,213 @@ mod tests {
         assert_eq!(app.offset, app.rows.len().saturating_sub(5));
         app.apply(Action::Top, 5);
         assert_eq!(app.offset, 0);
+    }
+
+    // ---- hiding the file list ------------------------------------------
+
+    #[test]
+    fn hiding_the_file_list_takes_focus_with_it() {
+        // Focus on a pane that is not drawn is focus nothing can move or
+        // show, and tab would appear to do nothing.
+        let mut app = app();
+        app.apply(Action::ToggleFocus, 10);
+        assert_eq!(app.focus, Focus::Files);
+        app.apply(Action::ToggleFiles, 10);
+        assert!(!app.show_files);
+        assert_eq!(app.focus, Focus::Diff);
+        app.apply(Action::ToggleFiles, 10);
+        assert!(app.show_files);
+    }
+
+    #[test]
+    fn f_hides_the_files_and_m_releases_the_mouse() {
+        assert_eq!(action_for(key('f'), false).0, Action::ToggleFiles);
+        assert_eq!(action_for(key('m'), false).0, Action::ToggleMouse);
+    }
+
+    // ---- mouse ---------------------------------------------------------
+
+    fn with_panes(app: &mut App) {
+        // A plausible frame: header on row 0, footer on the last row, file
+        // list 34 wide on the left.
+        app.panes = Panes {
+            diff: Rect::new(34, 1, 66, 20),
+            diff_top_row: 0,
+            files: Some(Rect::new(1, 2, 32, 18)),
+            files_top: 0,
+        };
+    }
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn click(col: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Down(MouseButton::Left), col, row)
+    }
+
+    #[test]
+    fn the_wheel_moves_the_view_and_leaves_the_cursor_behind() {
+        // Reading ahead without losing your place is the whole point of a
+        // wheel; a wheel that dragged the cursor would be a slow `j`.
+        let mut app = app();
+        with_panes(&mut app);
+        let before = app.cursor;
+        app.apply(
+            app.mouse_action(mouse(MouseEventKind::ScrollDown, 40, 5)),
+            5,
+        );
+        assert_eq!(app.offset, 3);
+        assert_eq!(app.cursor, before, "the cursor stayed put");
+
+        // And the next movement key snaps the view back to the cursor.
+        app.apply(Action::Down(1), 5);
+        assert!(app.offset <= app.cursor);
+    }
+
+    #[test]
+    fn the_view_does_not_scroll_past_either_end() {
+        let mut app = app();
+        with_panes(&mut app);
+        app.apply(Action::ScrollViewUp(3), 5);
+        assert_eq!(app.offset, 0);
+        for _ in 0..50 {
+            app.apply(Action::ScrollViewDown(3), 5);
+        }
+        assert_eq!(app.offset, app.rows.len().saturating_sub(5));
+    }
+
+    #[test]
+    fn a_click_in_the_diff_lands_on_the_row_that_was_drawn_there() {
+        let mut app = app();
+        with_panes(&mut app);
+        // Row 1 of the pane, with the view scrolled to 4, is row 5.
+        app.panes.diff_top_row = 4;
+        app.apply(app.mouse_action(click(50, 5)), 20);
+        assert_eq!(app.cursor, 8);
+        assert_eq!(app.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn a_click_past_the_last_row_does_nothing() {
+        // The pane is taller than a short diff; the empty part is not row -1.
+        let mut app = app();
+        with_panes(&mut app);
+        let before = app.cursor;
+        assert_eq!(app.mouse_action(click(50, 19)), Action::None);
+        app.apply(app.mouse_action(click(50, 19)), 20);
+        assert_eq!(app.cursor, before);
+    }
+
+    #[test]
+    fn going_to_a_file_puts_it_at_the_top_not_at_the_bottom() {
+        // Minimal scrolling would land the header on the last visible row, so
+        // arriving at a file would mean looking at the end of the one before
+        // it. Found by clicking one in a real terminal and reading the
+        // previous file.
+        let mut app = app();
+        let viewport = 4;
+        app.apply(Action::NextFile, viewport);
+        assert_eq!(app.rows[app.cursor], Row::File { file: 1 });
+        assert_eq!(
+            app.offset, app.cursor,
+            "the file being opened is the first row on screen"
+        );
+
+        // Same for a click in the list.
+        app.apply(Action::Top, viewport);
+        with_panes(&mut app);
+        app.apply(app.mouse_action(click(10, 3)), viewport);
+        assert_eq!(app.offset, app.cursor);
+        assert_eq!(app.cursor_path().as_deref(), Some("b.rs"));
+    }
+
+    #[test]
+    fn walking_by_line_still_scrolls_as_little_as_possible() {
+        // The counterpart to the above: a cursor moving one row at a time
+        // must not re-top the view, or reading is a slideshow.
+        let mut app = app();
+        app.apply(Action::Bottom, 4);
+        let settled = app.offset;
+        app.apply(Action::Up(1), 4);
+        assert_eq!(app.offset, settled, "still visible, so nothing moved");
+    }
+
+    #[test]
+    fn a_click_in_the_file_list_jumps_to_that_file() {
+        let mut app = app();
+        with_panes(&mut app);
+        app.apply(app.mouse_action(click(10, 3)), 20);
+        assert_eq!(app.cursor_path().as_deref(), Some("b.rs"));
+        assert_eq!(app.focus, Focus::Files);
+        // And below the list, nothing.
+        assert_eq!(app.mouse_action(click(10, 15)), Action::None);
+    }
+
+    #[test]
+    fn a_scrolled_file_list_still_hits_the_right_file() {
+        // The list follows the cursor, so its first drawn row is not always
+        // file 0 — hit-testing has to use what the frame actually drew.
+        let mut app = app();
+        with_panes(&mut app);
+        app.panes.files_top = 1;
+        app.apply(app.mouse_action(click(10, 2)), 20);
+        assert_eq!(app.cursor_path().as_deref(), Some("b.rs"));
+    }
+
+    #[test]
+    fn a_click_between_the_panes_belongs_to_neither() {
+        let mut app = app();
+        with_panes(&mut app);
+        // Column 33 is the file pane's border, outside both inner rects.
+        assert_eq!(app.mouse_action(click(33, 5)), Action::None);
+        // The header row is above both.
+        assert_eq!(app.mouse_action(click(50, 0)), Action::None);
+    }
+
+    #[test]
+    fn a_hidden_file_list_cannot_be_clicked() {
+        let mut app = app();
+        with_panes(&mut app);
+        app.panes.files = None;
+        assert_eq!(app.mouse_action(click(10, 3)), Action::None);
+    }
+
+    #[test]
+    fn releasing_the_mouse_makes_every_mouse_event_a_no_op() {
+        // Capture is off at the terminal too, but a stray event queued before
+        // the toggle must not still move the cursor.
+        let mut app = app();
+        with_panes(&mut app);
+        app.apply(Action::ToggleMouse, 20);
+        assert!(!app.mouse);
+        assert_eq!(app.mouse_action(click(50, 5)), Action::None);
+        assert_eq!(
+            app.mouse_action(mouse(MouseEventKind::ScrollDown, 50, 5)),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn a_drag_does_not_pull_the_cursor_along_with_it() {
+        let mut app = app();
+        with_panes(&mut app);
+        assert_eq!(
+            app.mouse_action(mouse(MouseEventKind::Drag(MouseButton::Left), 50, 8)),
+            Action::None
+        );
+        assert_eq!(
+            app.mouse_action(mouse(MouseEventKind::Moved, 50, 8)),
+            Action::None
+        );
+        assert_eq!(
+            app.mouse_action(mouse(MouseEventKind::Up(MouseButton::Left), 50, 8)),
+            Action::None
+        );
     }
 }

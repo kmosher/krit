@@ -7,7 +7,7 @@
 //! type is a sigil, an added line starts with `+`, and the cursor is drawn
 //! with reverse video — an attribute, not a hue.
 
-use crate::app::{App, Focus, Status};
+use crate::app::{App, Focus, Panes, Status};
 use crate::patch::{ChangeKind, LineKind};
 use crate::rows::row_window;
 use crate::rows::{Note, Row, gutter_width, line_marker, stat_label};
@@ -52,7 +52,9 @@ impl Theme {
     }
 }
 
-pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
+/// Draw a frame, and report where things ended up so a click can be resolved
+/// against the same geometry that produced the picture.
+pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) -> Panes {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -66,24 +68,41 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(header(app, theme), chunks[0]);
 
     let body = chunks[1];
-    if area.width >= FILE_PANE_MIN_TOTAL {
+    // Two independent reasons the list can be absent: the reviewer hid it,
+    // or it does not fit. Either way the diff gets the whole body.
+    let mut panes = Panes::default();
+    let show_files = app.show_files && area.width >= FILE_PANE_MIN_TOTAL;
+    let diff_area = if show_files {
         let split = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(FILE_PANE_WIDTH), Constraint::Min(20)])
             .split(body);
-        frame.render_widget(file_pane(app, theme, split[0].height), split[0]);
-        frame.render_widget(diff_pane(app, theme, split[1]), split[1]);
+        let (pane, inner, top) = file_pane(app, theme, split[0]);
+        frame.render_widget(pane, split[0]);
+        panes.files = Some(inner);
+        panes.files_top = top;
+        split[1]
     } else {
-        frame.render_widget(diff_pane(app, theme, body), body);
-    }
+        body
+    };
+    frame.render_widget(diff_pane(app, theme, diff_area), diff_area);
+    panes.diff = diff_area;
+    panes.diff_top_row = app.offset.min(app.rows.len());
 
     frame.render_widget(footer(app, theme), chunks[2]);
 
     if app.show_help {
-        let overlay = centered(area, 54, 15);
+        let overlay = centered(area, 54, 17);
         frame.render_widget(Clear, overlay);
         frame.render_widget(help(), overlay);
+        // The overlay covers the panes, so a click while it is up must not
+        // reach whatever it is sitting on top of.
+        panes = Panes {
+            diff: Rect::default(),
+            ..Panes::default()
+        };
     }
+    panes
 }
 
 fn header<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
@@ -113,8 +132,12 @@ fn header<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
 fn footer<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     let (text, style) = match &app.status {
         Status::Idle => (
-            " j/k move · n/p hunk · ]/[ file · z fold · tab pane · r refresh · ? keys · q quit"
-                .to_string(),
+            format!(
+                " j/k move · n/p hunk · ]/[ file · z fold · f files{} · r refresh · ? keys · q quit",
+                // Only worth a cell when it is off, because that is the state
+                // someone needs telling how to undo.
+                if app.mouse { "" } else { " · m mouse off" },
+            ),
             theme.dim(),
         ),
         Status::Note(msg) => (format!(" {msg}"), theme.fg(Color::Cyan)),
@@ -143,15 +166,24 @@ fn kind_color(kind: ChangeKind) -> Color {
     }
 }
 
-fn file_pane<'a>(app: &App, theme: &Theme, height: u16) -> Paragraph<'a> {
+/// The list widget, the rect its rows occupy (inside the border), and the
+/// index of the file drawn on its first row. The last two are what make a
+/// click resolvable — computed here because here is where they are decided.
+fn file_pane<'a>(app: &App, theme: &Theme, area: Rect) -> (Paragraph<'a>, Rect, usize) {
     let current = app.current_file();
     let inner = FILE_PANE_WIDTH.saturating_sub(2) as usize;
-    let visible = height.saturating_sub(2) as usize;
+    let visible = area.height.saturating_sub(2) as usize;
     // Scroll the list so the current file stays on it; the list is not
     // separately navigable yet, it follows the diff cursor.
     let start = current
         .map(|c| c.saturating_sub(visible.saturating_sub(1)))
         .unwrap_or(0);
+    let rows = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, file) in app.files.iter().enumerate().skip(start).take(visible) {
@@ -180,7 +212,8 @@ fn file_pane<'a>(app: &App, theme: &Theme, height: u16) -> Paragraph<'a> {
     } else {
         " Files "
     };
-    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title))
+    let pane = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
+    (pane, rows, start)
 }
 
 fn diff_pane<'a>(app: &App, theme: &Theme, area: Rect) -> Paragraph<'a> {
@@ -311,6 +344,9 @@ fn help<'a>() -> Paragraph<'a> {
         Line::from("  h / l, 0          scroll sideways, reset"),
         Line::from("  z, enter          fold the current file"),
         Line::from("  tab               move between panes"),
+        Line::from("  f                 show / hide the file list"),
+        Line::from("  m                 release the mouse to the terminal"),
+        Line::from("  wheel, click      scroll / put the cursor there"),
         Line::from("  r                 refetch the diff"),
         Line::from("  ctrl-z            suspend"),
         Line::from("  ? , q             this / quit"),
@@ -374,10 +410,15 @@ mod tests {
     }
 
     fn render(app: &App, width: u16, height: u16) -> Vec<String> {
+        render_with_panes(app, width, height).0
+    }
+
+    fn render_with_panes(app: &App, width: u16, height: u16) -> (Vec<String>, Panes) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let theme = Theme { color: true };
-        terminal.draw(|f| draw(f, app, &theme)).unwrap();
-        rows_of(terminal.backend().buffer())
+        let mut panes = Panes::default();
+        terminal.draw(|f| panes = draw(f, app, &theme)).unwrap();
+        (rows_of(terminal.backend().buffer()), panes)
     }
 
     #[test]
@@ -502,7 +543,11 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
         let theme = Theme { color: false };
         let app = app();
-        terminal.draw(|f| draw(f, &app, &theme)).unwrap();
+        terminal
+            .draw(|f| {
+                draw(f, &app, &theme);
+            })
+            .unwrap();
         let buf = terminal.backend().buffer();
         // Nothing sets a foreground color...
         assert!(
@@ -515,6 +560,73 @@ mod tests {
         assert!(all.contains("M src/a.rs"), "{all}");
         assert!(all.contains("-     was()"), "{all}");
         assert!(all.contains("+     is()"), "{all}");
+    }
+
+    #[test]
+    fn hiding_the_file_list_gives_the_diff_the_whole_width() {
+        let mut app = app();
+        app.apply(Action::ToggleFiles, 10);
+        let (screen, panes) = render_with_panes(&app, 100, 12);
+        assert!(!screen.iter().any(|l| l.contains("Files")), "{screen:?}");
+        assert!(panes.files.is_none(), "nothing to click at");
+        assert_eq!(panes.diff.x, 0);
+        assert_eq!(panes.diff.width, 100);
+        assert!(screen.iter().any(|l| l.contains("src/a.rs")));
+    }
+
+    #[test]
+    fn the_reported_geometry_is_the_geometry_that_was_drawn() {
+        // The whole point of returning it: a click resolves against this, so
+        // if it disagrees with the picture, clicks land on the wrong row.
+        let (screen, panes) = render_with_panes(&app(), 100, 16);
+        let files = panes.files.expect("the list is drawn at this width");
+        // The file pane's first row is inside its border, and the first file
+        // is drawn on it.
+        assert_eq!(files.y, 2);
+        assert_eq!(panes.files_top, 0);
+        assert!(
+            screen[files.y as usize].contains("src/a.rs"),
+            "{:?}",
+            screen[2]
+        );
+        // The diff starts just right of the pane and just under the header.
+        assert_eq!((panes.diff.x, panes.diff.y), (FILE_PANE_WIDTH, 1));
+        assert_eq!(panes.diff_top_row, 0);
+        assert!(screen[panes.diff.y as usize].contains("src/a.rs"));
+    }
+
+    #[test]
+    fn a_scrolled_view_reports_the_row_drawn_at_its_top() {
+        let mut app = app();
+        // A viewport short enough that there is something to scroll: this
+        // diff is 10 rows, so a 10-row view is already showing all of it.
+        app.apply(Action::ScrollViewDown(3), 6);
+        let (screen, panes) = render_with_panes(&app, 100, 8);
+        assert_eq!(panes.diff_top_row, 3);
+        // Row 3 of this diff is the second changed line; whatever it is, the
+        // top of the pane is not the file header any more.
+        assert!(!screen[panes.diff.y as usize].contains("+3 −1"));
+    }
+
+    #[test]
+    fn the_help_overlay_takes_the_panes_out_of_reach() {
+        // It covers them, so a click must not fall through to what is under it.
+        let mut app = app();
+        app.show_help = true;
+        let (_, panes) = render_with_panes(&app, 100, 20);
+        assert!(panes.files.is_none());
+        assert_eq!(panes.diff.width, 0);
+    }
+
+    #[test]
+    fn the_footer_says_how_to_get_the_mouse_back_only_once_it_is_gone() {
+        let mut app = app();
+        let screen = render(&app, 100, 12);
+        assert!(screen[11].contains("f files"), "{:?}", screen[11]);
+        assert!(!screen[11].contains("mouse"), "{:?}", screen[11]);
+        app.apply(Action::ToggleMouse, 10);
+        let screen = render(&app, 100, 12);
+        assert!(screen[11].contains("m mouse off"), "{:?}", screen[11]);
     }
 
     #[test]

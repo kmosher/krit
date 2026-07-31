@@ -85,9 +85,12 @@ is live. Do not pick the binding based on the developer's terminal.
 **Mouse capture, and giving it back.** `EnableMouseCapture` buys click-to-focus,
 click-drag selection, and scroll. It also takes over the terminal's own
 selection, so the user loses native copy — a real cost, since copy-the-comment
-is a workflow. Bind a key to toggle capture off, and prefer OSC 52 for clipboard
-writes over shelling out to `pbcopy`/`wl-copy`: OSC 52 works through tmux and
-over SSH, which is exactly where a terminal review tool gets used.
+is a workflow. Hence `m`, and hence releasing capture on *every* exit, not just
+the tidy one: a terminal left reporting mouse events writes escape sequences
+into the next shell prompt every time the pointer moves, so the panic hook
+disables it unconditionally rather than consulting any state. Prefer OSC 52 for
+clipboard writes over shelling out to `pbcopy`/`wl-copy`: OSC 52 works through
+tmux and over SSH, which is exactly where a terminal review tool gets used.
 
 **A cached row model, virtualized.** Build the visible window only. The web UI
 already learned this (`computeRowWindow`, `useVirtualRows`) and the reason is
@@ -208,16 +211,30 @@ ref under `refs/krit/`, and be honest in the UI about what the scope means.
 ## Phases
 
 **Phase 0 — read-only viewer. Done.** Adopts a running server via the state
-file, `GET /api/diff`, renders a unified diff with a file list, navigates by
-line, page, file and hunk, folds files, and follows SSE for live updates. The
-row model, width handling, virtualization and terminal setup/teardown are the
-part that carried the risk, and they are the part that landed.
+file — or starts one, forwarding anything after `--` as its git diff range, so
+`krit-tui` is a single command in a single shell. `GET /api/diff`, a unified
+diff with a file list, navigation by line, page, file and hunk, folding, and
+SSE for live updates. Mouse capture came with it (wheel scrolls without moving
+the cursor, click moves it, `m` hands the mouse back to the terminal), and
+`f` hides the file list. The row model, width handling, virtualization and
+terminal setup/teardown are the part that carried the risk, and they are the
+part that landed.
 
-Two things it does *not* do that the sketch above assumes: it does not spawn a
-server (no server means a diagnosis and exit 1, which is what every other krit
-client does), and the file pane is a flat list rather than a tree — grouping by
-directory is worth doing with the rest of the phase-2 polish, not before
-anything else works.
+A server it started is not killed on exit: the idle timeout already counts
+subscribers, so it goes away by itself a few seconds later — and killing it
+would be wrong anyway if a browser tab is also attached.
+
+One thing the sketch above assumes that is not there: the file pane is a flat
+list, not a tree. Grouping by directory belongs with the rest of the phase-2
+polish, not before anything else works.
+
+**Going to a file tops it; walking scrolls minimally.** Least-movement
+scrolling is right for a cursor moving a row at a time and wrong for a jump —
+it lands the file header on the *last* visible row, so arriving at a file means
+looking at the end of the previous one. `]`/`[` and a click in the file list
+put the header on the first row instead; hunk jumps keep the minimal behavior,
+since consecutive hunks are usually already on screen and re-topping each one
+makes `n` lurch.
 
 **Phase 1 — commenting.** Visual-mode and click-drag selection down to the
 column, the composer (bracketed paste, keyboard disambiguation, the strip-stack
