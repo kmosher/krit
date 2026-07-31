@@ -12,6 +12,23 @@ import { rangesIntersect } from '../utils/previewFormat'
 // mapped back to the file — see previewAnchor.ts, which consumes the stamp,
 // and docs/design/rendered-preview.md for why the stamp is the whole design.
 
+export interface SourceOffsetOptions {
+  changedRanges: Array<[number, number]>
+  /**
+   * Translates an offset into the rendered Markdown into an offset into the
+   * *file*. The two differ only when the Markdown is embedded in something
+   * else — a notebook cell, where the text is a JSON string literal and
+   * escapes make the correspondence non-linear.
+   */
+  mapOffset?: (offset: number) => number
+  /**
+   * Overrides the line-range test when the caller already knows whether this
+   * document changed. A notebook cell's Markdown has its own line numbering,
+   * which the diff's new-side line numbers say nothing about.
+   */
+  changed?: boolean
+}
+
 /**
  * Stamps `data-src="<startOffset>-<endOffset>"` on every element, and
  * `data-changed` on those overlapping lines the diff touched.
@@ -21,16 +38,17 @@ import { rangesIntersect } from '../utils/previewFormat'
  * rehype-sanitize, which is what drops the attributes off anything the schema
  * doesn't recognise.
  */
-export function rehypeSourceOffsets(options: { changedRanges: Array<[number, number]> }) {
+export function rehypeSourceOffsets(options: SourceOffsetOptions) {
+  const map = options.mapOffset ?? ((n: number) => n)
   return (tree: Root) => {
     visit(tree, 'element', (node) => {
       const p = node.position
       if (p?.start?.offset == null || p?.end?.offset == null) return
       node.properties = node.properties ?? {}
-      node.properties.dataSrc = `${p.start.offset}-${p.end.offset}`
-      if (rangesIntersect(options.changedRanges, p.start.line, p.end.line)) {
-        node.properties.dataChanged = 'true'
-      }
+      node.properties.dataSrc = `${map(p.start.offset)}-${map(p.end.offset)}`
+      const changed =
+        options.changed ?? rangesIntersect(options.changedRanges, p.start.line, p.end.line)
+      if (changed) node.properties.dataChanged = 'true'
     })
   }
 }
@@ -65,17 +83,24 @@ interface Props {
   source: string
   /** Inclusive new-side line ranges the diff added or modified. */
   changedRanges: Array<[number, number]>
+  /** See `SourceOffsetOptions` — set by the notebook path only. */
+  mapOffset?: (offset: number) => number
+  changed?: boolean
 }
 
-export function MarkdownPreview({ source, changedRanges }: Props) {
+export function MarkdownPreview({ source, changedRanges, mapOffset, changed }: Props) {
   // Rebuilt only when the changed lines actually move: the plugin closes over
   // them, and a fresh array every render would reparse the document on every
   // keystroke in an open comment form.
   const key = changedRanges.map(([a, b]) => `${a}-${b}`).join(',')
   const rehypePlugins = useMemo(
-    () => [rehypeRaw, [rehypeSourceOffsets, { changedRanges }], [rehypeSanitize, SCHEMA]],
+    () => [
+      rehypeRaw,
+      [rehypeSourceOffsets, { changedRanges, mapOffset, changed }],
+      [rehypeSanitize, SCHEMA],
+    ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [key],
+    [key, mapOffset, changed],
   )
 
   return (

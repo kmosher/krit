@@ -1,10 +1,11 @@
 // Which files krit can render as a document instead of a diff, and which of
 // their lines the current diff touched.
 
-export type PreviewFormat = 'markdown' | 'html'
+export type PreviewFormat = 'markdown' | 'html' | 'notebook' | 'csv'
 
 const MARKDOWN_EXT = new Set(['md', 'markdown', 'mdown', 'mkd', 'mdx'])
 const HTML_EXT = new Set(['html', 'htm'])
+const CSV_EXT = new Set(['csv', 'tsv', 'tab'])
 
 /** null for anything krit has no renderer for — the caller shows no toggle. */
 export function previewFormatFor(path: string): PreviewFormat | null {
@@ -14,7 +15,18 @@ export function previewFormatFor(path: string): PreviewFormat | null {
   const ext = base.slice(dot + 1).toLowerCase()
   if (MARKDOWN_EXT.has(ext)) return 'markdown'
   if (HTML_EXT.has(ext)) return 'html'
+  if (ext === 'ipynb') return 'notebook'
+  if (CSV_EXT.has(ext)) return 'csv'
   return null
+}
+
+/**
+ * Whether the preview renders into this document rather than into the isolated
+ * iframe the HTML path needs. Everything that does shares one selection path
+ * and one highlight path, because a `data-src` stamp is all either one reads.
+ */
+export function rendersInPage(format: PreviewFormat): boolean {
+  return format !== 'html'
 }
 
 /**

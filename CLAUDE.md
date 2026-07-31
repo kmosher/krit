@@ -227,6 +227,28 @@ skill together when you do.
   `document.getSelection()` inside one returns real light-DOM nodes with no
   retargeting. The stale comment in `CommentForm` about being "portaled into
   the shadow root" is what makes this look harder than it is.
+- **A preview renderer's entire contract is `data-src`.** Every element it
+  emits carries `"<startOffset>-<endOffset>"` into the *file*, and
+  `previewAnchor.ts` needs nothing else — which is why Markdown, `.ipynb` and
+  `.csv` share one selection path, one highlight path and one comment path.
+  Adding a format is a renderer plus an entry in `previewFormatFor`; anything
+  that reaches for a second mechanism has taken a wrong turn.
+  - **A notebook is the one format where a rendered offset is not a file
+    offset.** Cell text lives in JSON string literals, and an escape is more
+    source characters than decoded ones, so `jsonPositions.ts` keeps a
+    per-character map and the notebook path composes it into the stamps
+    (`mapOffset` on `rehypeSourceOffsets`). Skip the map and every anchor is
+    quietly off by however many escapes precede it, which reads as a plausible
+    anchor, not an error.
+  - **Stamp a code cell per line, not per cell.** `previewAnchor` locates a
+    position by searching the element's source slice for the text node's exact
+    value: one line does occur verbatim inside its own literal, while a whole
+    cell — real newlines where the file has `\n",\n "` — does not, and every
+    selection in it would widen to the cell.
+  - **Outputs carry no stamp on purpose.** There is no source position behind a
+    rendered figure, and an unstamped subtree yields no anchor rather than a
+    wrong one. `text/html` outputs are dropped entirely: the pane renders in
+    the page, and that markup is kernel-authored.
 - **A file-level annotation (`lineNumber: 0`) is how the rendered preview
   replaces a diff**, and three things have to line up or it silently renders
   nothing:
