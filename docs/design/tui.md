@@ -1,8 +1,9 @@
 # krit in the terminal
 
-> **Status: phase 0 is built** (`krit-tui/`); phases 1–3 are the ones worth
-> committing to next, and 4 and 5 are sketched to show where the seams are,
-> not because they should be scheduled.
+> **Status: phases 0 and 1 are built** (`krit-tui/`) — it reads a review and
+> comments on one. Phases 2 and 3 are the ones worth committing to next, and 4
+> and 5 are sketched to show where the seams are, not because they should be
+> scheduled.
 
 A second client for the same server, so a review can happen in the pane beside
 the agent instead of in a browser. The end state is a `krit-tui` binary that
@@ -238,11 +239,45 @@ put the header on the first row instead; hunk jumps keep the minimal behavior,
 since consecutive hunks are usually already on screen and re-topping each one
 makes `n` lurch.
 
-**Phase 1 — commenting.** Visual-mode and click-drag selection down to the
-column, the composer (bracketed paste, keyboard disambiguation, the strip-stack
-question on discard), then `POST /api/comments`, replies, resolve/reopen,
-queueing, and `POST /api/submit`. At the end of this phase the TUI is a usable
-review client.
+**Phase 1 — commenting. Done.** The TUI is a review client: `v` selects lines
+(every movement key extends it), a drag selects characters, `c` opens the
+composer, and `R`/`X`/`P`/`S` reply, resolve, post queued and finish. Comments
+render as annotation rows interleaved into the row model, `}`/`{` step between
+them, and the badge line says the state in words.
+
+The column really does come free: `selectionMapping.ts` is 400 lines of
+caret-from-point hit-testing to recover what a terminal puts in the mouse
+event. What it costs instead is a *conversion*, because the two clients have to
+agree on what a column is — the wire counts UTF-16 units into the source line
+(the browser measures `Range.toString().length`), the screen counts cells, and
+a tab is one of the first and four of the second. `text::cluster_at_column` is
+that conversion, and the one place the two clients deliberately differ is which
+end is included: a browser endpoint is an insertion point between characters, a
+terminal endpoint is a *cell*, so the character under the pointer is in the
+selection.
+
+Three things are deliberately not in it:
+
+- **Character-level selection from the keyboard.** `v` is line-wise, which is
+  the shape a line comment already has on the wire. A caret that moves along a
+  line is a second cursor to draw, move and scroll, and the mouse covers the
+  case it would serve.
+- **Suggestions.** The `suggestion` field is a second editor seeded from the
+  file, plus the stored `suggestionEdited` bit and everything that hangs off it
+  (see `CLAUDE.md`). None of that is here; a suggestion posted from the browser
+  renders as a comment whose badge says `suggestion`.
+- **Editing a queued comment**, which the browser allows through the badge.
+
+**A write asks for its own refetch.** Two of the mutations broadcast nothing at
+all — a queued comment is suppressed from every broadcast until it is posted,
+and `PUT /api/comments/{id}` announces only the catch-up when a queued one goes
+open. A client that only listened would show queueing and resolving as keys
+that do nothing. The browser is covered by its comment poll; the TUI asks.
+
+**Pending drafts are still on the table and not wired.** `/api/pending-drafts`
+exists and the composer could hydrate from it, which is worth having in a pane
+that gets closed and reopened. Two clients on one slot is last-writer-wins, so
+a TUI and a browser open on the same review would not see each other type.
 
 **Phase 2 — parity polish.** Split view with the narrow-terminal fallback,
 syntax highlighting, hunk expansion from the bundled `fileContents`, viewed
@@ -271,12 +306,16 @@ only if the honesty problem above can be solved in the UI.
 - **`api_file_content_get` has no size cap.** `read_side` caps both bytes and
   lines, but the file-content route streams whatever it finds. A TUI that opens
   files directly (phase 4, or a whole-worktree browser) will hit this first.
-- ~~**Drafts do not survive a client restart.**~~ Closed: unsent comment text
-  now persists server-side through `/api/pending-drafts`, so the TUI gets it for
-  free — hydrate the composer from that route on start and write on change. The
-  route deliberately does not broadcast, so two clients on one slot is
-  last-writer-wins; for phase 1 that is fine (one reviewer), but a TUI and a
-  browser open on the same review will not see each other type.
+- ~~**Drafts do not survive a client restart.**~~ Closed server-side: unsent
+  comment text persists through `/api/pending-drafts`. The TUI does not use it
+  yet — see the note under phase 1.
+- **A resolve is invisible to the other client for as long as its poll takes.**
+  `PUT /api/comments/{id}` broadcasts nothing but the catch-up when a queued
+  comment goes open, so neither client learns of the other's status changes
+  from the stream. The browser polls; the TUI refetches after its own writes
+  and would otherwise never notice. Giving that route a `comment-updated`
+  broadcast is the real fix, and `CLAUDE.md` already names it as the
+  prerequisite for making open comments editable.
 - **The SSE stream carries everything, deliberately.** Unlike
   `/api/events-ws`, `/api/events` does not filter `files-changed` or reanchor
   fallout (`server.rs`, `agent_visible`). That is correct for the TUI — it is a

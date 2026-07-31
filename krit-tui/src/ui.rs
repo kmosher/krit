@@ -10,8 +10,12 @@
 //! with reverse video — an attribute, not a hue.
 
 use crate::app::{App, Focus, Panes, Status};
+use crate::comments::{CommentAnchor, CommentLine};
+use crate::compose::Composer;
 use crate::patch::{ChangeKind, LineKind};
-use crate::rows::{Note, Row, line_marker, row_window, scroll_to_show, stat_label};
+use crate::rows::{
+    MARKER_COLS, Note, Row, comments_in, line_marker, row_window, scroll_to_show, stat_label,
+};
 use crate::text::{display_width, expand_tabs, fit_columns, slice_columns};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -55,7 +59,7 @@ impl Theme {
 
 /// Draw a frame, and report where things ended up so a click can be resolved
 /// against the same geometry that produced the picture.
-pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) -> Panes {
+pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, enhanced: bool) -> Panes {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -85,6 +89,24 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) -> Panes {
         split[1]
     } else {
         body
+    };
+    // The composer takes rows off the bottom of the diff rather than covering
+    // it: what is being commented on has to stay readable while it is being
+    // written about. `App::set_panes` scrolls the cursor back into what is
+    // left.
+    let diff_area = match &app.compose {
+        Some(composer) => {
+            let height = compose_height(composer, diff_area);
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(height)])
+                .split(diff_area);
+            let (widget, caret) = compose_pane(composer, theme, split[1], enhanced);
+            frame.render_widget(widget, split[1]);
+            frame.set_cursor_position(caret);
+            split[0]
+        }
+        None => diff_area,
     };
     frame.render_widget(diff_pane(app, theme, diff_area), diff_area);
     panes.diff = diff_area;
@@ -117,8 +139,20 @@ fn header<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     } else {
         ""
     };
+    // Comments are counted here rather than left to be discovered by scrolling:
+    // a review with three of them and a review with none look identical until
+    // you reach one.
+    let comments = match app.comments.len() {
+        0 => String::new(),
+        1 => "  1 comment".to_string(),
+        n => format!("  {n} comments"),
+    };
+    let queued = match app.comments.iter().filter(|c| c.status == "queued").count() {
+        0 => String::new(),
+        n => format!(" ({n} queued)"),
+    };
     let text = format!(
-        " krit  {}  {}{}   {} file{}  +{} −{}",
+        " krit  {}  {}{}   {} file{}  +{} −{}{}{}",
         app.repo,
         app.branch,
         scope,
@@ -126,6 +160,8 @@ fn header<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
         if app.files.len() == 1 { "" } else { "s" },
         adds,
         dels,
+        comments,
+        queued,
     );
     Paragraph::new(Line::from(Span::styled(
         text,
@@ -134,10 +170,26 @@ fn header<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
 }
 
 fn footer<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
+    // A selection displaces the key hints, because it is a mode: what the
+    // next keystroke does has changed, and the strip is the only place that
+    // can say so.
+    if app.selection.is_some() && matches!(app.status, Status::Idle) {
+        let text = match app.comment_anchor() {
+            Some(a) => format!(" {}  ·  c comment  ·  Esc clear", selection_label(&a)),
+            // Marked, but over nothing that can carry a comment — a gap, a
+            // file header, someone else's comment. Saying so beats a `c` that
+            // appears to do nothing.
+            None => " nothing to comment on here  ·  Esc clear".to_string(),
+        };
+        return Paragraph::new(Line::from(Span::styled(
+            text,
+            theme.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+    }
     let (text, style) = match &app.status {
         Status::Idle => (
             format!(
-                " j/k move · n/p hunk · ]/[ file · z collapse · f files{} · r refresh · ? keys · q quit",
+                " j/k move · n/p hunk · ]/[ file · v select · c comment · z collapse · f files{} · ? keys · q quit",
                 // Only worth a cell when it is off, because that is the state
                 // someone needs telling how to undo.
                 if app.mouse { "" } else { " · m mouse off" },
@@ -161,12 +213,121 @@ fn footer<'a>(app: &App, theme: &Theme) -> Paragraph<'a> {
     Paragraph::new(Line::from(Span::styled(text, style)))
 }
 
+/// Rows the composer needs: its border, what it holds, and a line for the
+/// keys — but never more than half the pane, since the point of putting it
+/// below the diff is that the diff stays readable.
+fn compose_height(composer: &Composer, area: Rect) -> u16 {
+    let text_width = area.width.saturating_sub(2).max(1) as usize;
+    let wrapped = composer.editor.layout(text_width).0.len() as u16;
+    (wrapped + 3).clamp(5, (area.height / 2).max(5))
+}
+
+/// The form, and where the terminal's own caret goes.
+///
+/// A real caret rather than a drawn one: it blinks, it is where the terminal
+/// puts the IME, and a screen reader follows it. That is the whole reason the
+/// editor's layout reports a position instead of the pane inventing one.
+fn compose_pane<'a>(
+    composer: &Composer,
+    theme: &Theme,
+    area: Rect,
+    enhanced: bool,
+) -> (Paragraph<'a>, (u16, u16)) {
+    let text_width = area.width.saturating_sub(2).max(1) as usize;
+    let (mut lines, (caret_row, caret_col)) = composer.editor.layout(text_width);
+    let visible = area.height.saturating_sub(3) as usize;
+    // Scroll the buffer, not the caret: a comment longer than the pane still
+    // has to be typeable, and the line being typed is the one to keep.
+    let top = caret_row.saturating_sub(visible.saturating_sub(1));
+    let shown: Vec<Line> = lines
+        .drain(..)
+        .skip(top)
+        .take(visible)
+        .map(|l| Line::from(Span::raw(l)))
+        .collect();
+
+    let keys = if composer.confirm_discard {
+        // The terminal's answer to `confirm()`: a line of text and a flag, with
+        // the screen still live and still redrawing behind it.
+        " Discard what you have written?  y to discard  ·  any other key to keep it".to_string()
+    } else if composer.sending {
+        " Sending…".to_string()
+    } else {
+        let post = if enhanced {
+            "ctrl-s / ctrl-enter post"
+        } else {
+            "ctrl-s post"
+        };
+        let queue = if composer.can_queue() {
+            "  ·  ctrl-q queue"
+        } else {
+            ""
+        };
+        format!(" {post}{queue}  ·  enter newline  ·  esc cancel")
+    };
+    let style = if composer.confirm_discard {
+        theme
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        theme.dim()
+    };
+
+    let mut body = shown;
+    body.push(Line::from(Span::styled(keys, style)));
+    let widget = Paragraph::new(body).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(composer.title())
+            .border_style(theme.fg(Color::Cyan)),
+    );
+    let caret = (
+        area.x + 1 + caret_col.min(text_width.saturating_sub(1)) as u16,
+        area.y + 1 + (caret_row - top) as u16,
+    );
+    (widget, caret)
+}
+
+/// What the marked range covers, as the reviewer would describe it.
+///
+/// The selected text itself for a short character range, because that is the
+/// thing being asked about and it fits; the line count otherwise.
+pub fn selection_label(anchor: &CommentAnchor) -> String {
+    let lines = (anchor.end_line - anchor.start_line + 1) as usize;
+    let where_ = if lines == 1 {
+        format!("{} line {}", anchor.file_path, anchor.start_line)
+    } else {
+        format!(
+            "{} lines {}–{}",
+            anchor.file_path, anchor.start_line, anchor.end_line
+        )
+    };
+    match &anchor.columns {
+        Some((_, _, text)) if lines == 1 && display_width(text) <= 40 && !text.is_empty() => {
+            format!("{where_}  “{text}”")
+        }
+        Some(_) => format!("{where_}  (part)"),
+        None => where_,
+    }
+}
+
 fn kind_color(kind: ChangeKind) -> Color {
     match kind {
         ChangeKind::Added | ChangeKind::Untracked => Color::Green,
         ChangeKind::Deleted => Color::Red,
         ChangeKind::Renamed => Color::Magenta,
         ChangeKind::Modified => Color::Yellow,
+    }
+}
+
+/// Decoration only — `comments::status_label` puts the same distinction in
+/// words on the badge line, which is what a monochrome terminal reads.
+fn comment_color(comment: &krit_core::types::ReviewComment) -> Color {
+    match crate::comments::status_label(comment) {
+        "resolved" => Color::Green,
+        "queued" => Color::Magenta,
+        "outdated" => Color::Yellow,
+        _ => Color::Cyan,
     }
 }
 
@@ -244,11 +405,12 @@ fn diff_pane<'a>(app: &App, theme: &Theme, area: Rect) -> Paragraph<'a> {
     Paragraph::new(lines)
 }
 
-/// The columns between the gutters and the code: one separator space, the
-/// change marker, and one more space. Named because three row kinds have to
-/// agree with it — a header that computed the width differently would drift
-/// out of line with the code rows below it.
-const MARKER_COLS: usize = 4;
+/// How a marked range is drawn: an attribute, not a hue, because the cursor
+/// already owns reverse video and both have to survive `NO_COLOR`. Underline
+/// is the one remaining attribute every terminal worth supporting renders.
+fn marked() -> Style {
+    Style::default().add_modifier(Modifier::UNDERLINED)
+}
 
 fn render_row<'a>(
     app: &App,
@@ -262,6 +424,15 @@ fn render_row<'a>(
     } else {
         Style::default()
     };
+    let marks = app.selected_columns(index);
+    // A non-code row caught in a visual range is marked whole: there is no
+    // text of its own to narrow to, and leaving it plain would make a
+    // selection spanning a hunk boundary look like two selections.
+    let whole = if marks.is_some() {
+        marked()
+    } else {
+        Style::default()
+    };
     // old │ new │ marker │ text — a fixed prefix, so the code column never
     // moves as you scroll between files.
     let gutter = app.gutter;
@@ -271,7 +442,10 @@ fn render_row<'a>(
         // Padded and styled like every other row: a cursor parked on the gap
         // between two files would otherwise be invisible, since reverse video
         // over an empty string covers nothing.
-        Row::Gap => Line::from(Span::styled(fit_columns("", pane_width), cursor)),
+        Row::Gap => Line::from(Span::styled(
+            fit_columns("", pane_width),
+            whole.patch(cursor),
+        )),
         Row::File { file } => {
             let f = &app.files[file];
             let text = format!(" {} {}  {}", f.kind.sigil(), f.path, stat_label(f));
@@ -280,7 +454,31 @@ fn render_row<'a>(
                 theme
                     .fg(kind_color(f.kind))
                     .add_modifier(Modifier::BOLD)
+                    .patch(whole)
                     .patch(cursor),
+            ))
+        }
+        Row::Comment {
+            comment, line: at, ..
+        } => {
+            let Some(line) = app.comment_rows.line(comment, at) else {
+                return Line::from(Span::styled(
+                    fit_columns("", pane_width),
+                    whole.patch(cursor),
+                ));
+            };
+            // The badge line carries the status word, so the color is
+            // decoration on top of text that already says it.
+            let style = match line {
+                CommentLine::Head(_) => theme
+                    .fg(comment_color(&app.comments[comment]))
+                    .add_modifier(Modifier::BOLD),
+                CommentLine::Body(_) => Style::default(),
+                CommentLine::Reply(_) => theme.dim(),
+            };
+            Line::from(Span::styled(
+                fit_columns(line.text(), pane_width),
+                style.patch(whole).patch(cursor),
             ))
         }
         Row::Meta { file, note } => {
@@ -292,8 +490,17 @@ fn render_row<'a>(
                 Note::Binary => "   binary file — not shown".to_string(),
                 Note::Collapsed => {
                     let n = f.hunks.len();
+                    // The comments go with the body, so the note says how many
+                    // — folding a file must not silently take its conversation
+                    // out of sight.
+                    let hidden = comments_in(&app.files, file, &app.comment_rows);
+                    let conversation = match hidden {
+                        0 => String::new(),
+                        1 => ", 1 comment".to_string(),
+                        n => format!(", {n} comments"),
+                    };
                     format!(
-                        "   collapsed — {n} hunk{} hidden",
+                        "   collapsed — {n} hunk{}{conversation} hidden",
                         if n == 1 { "" } else { "s" }
                     )
                 }
@@ -303,7 +510,7 @@ fn render_row<'a>(
             // that survives NO_COLOR.
             Line::from(Span::styled(
                 fit_columns(&text, pane_width),
-                theme.dim().patch(cursor),
+                theme.dim().patch(whole).patch(cursor),
             ))
         }
         Row::Hunk { file, hunk } => {
@@ -314,7 +521,7 @@ fn render_row<'a>(
             );
             Line::from(Span::styled(
                 fit_columns(&text, pane_width),
-                theme.fg(Color::Cyan).patch(cursor),
+                theme.fg(Color::Cyan).patch(whole).patch(cursor),
             ))
         }
         Row::Code { file, hunk, line } => {
@@ -329,15 +536,61 @@ fn render_row<'a>(
             }
             .patch(cursor);
             let gutter_style = theme.dim().patch(cursor);
-            Line::from(vec![
+            let mut spans = vec![
+                // The gutters stay unmarked: what is selected is text, and a
+                // character range that underlined the line numbers too would
+                // claim more than it covers.
                 Span::styled(fit_columns(&num(l.old_line), gutter), gutter_style),
                 Span::styled(" ", gutter_style),
                 Span::styled(fit_columns(&num(l.new_line), gutter), gutter_style),
                 Span::styled(format!(" {marker} "), style),
-                Span::styled(visible, style),
-            ])
+            ];
+            spans.extend(marked_spans(
+                &visible,
+                style,
+                app.h_scroll,
+                text_width,
+                marks,
+            ));
+            Line::from(spans)
         }
     }
+}
+
+/// The code column, split at the selection's edges.
+///
+/// Every column here is a display column of the *visible* window, so the
+/// horizontal scroll is subtracted once, at the door. The marked run is padded
+/// to its own width rather than to the text's: a selection that runs past the
+/// end of a short line — a blank line inside a multi-line drag, or a pointer
+/// released in the empty right-hand side of the pane — has to show as marked,
+/// and there is no text there to carry the attribute.
+fn marked_spans<'a>(
+    visible: &str,
+    style: Style,
+    h_scroll: usize,
+    text_width: usize,
+    marks: Option<(usize, usize)>,
+) -> Vec<Span<'a>> {
+    let Some((from, to)) = marks else {
+        return vec![Span::styled(visible.to_string(), style)];
+    };
+    let start = from.saturating_sub(h_scroll).min(text_width);
+    let end = to.saturating_sub(h_scroll).min(text_width);
+    if end <= start {
+        return vec![Span::styled(visible.to_string(), style)];
+    }
+    vec![
+        Span::styled(slice_columns(visible, 0, start), style),
+        Span::styled(
+            fit_columns(&slice_columns(visible, start, end - start), end - start),
+            style.patch(marked()),
+        ),
+        Span::styled(
+            slice_columns(visible, end, text_width.saturating_sub(end)),
+            style,
+        ),
+    ]
 }
 
 fn num(n: Option<u32>) -> String {
@@ -373,13 +626,24 @@ fn help<'a>() -> (Paragraph<'a>, u16, u16) {
         Line::from("  n / p             next / previous hunk"),
         Line::from("  ] / [             next / previous file"),
         Line::from("  h / l, 0          scroll sideways, reset"),
+        Line::from("  } / {             next / previous comment"),
         Line::from("  z, enter          collapse the current file"),
         Line::from("  tab               move between panes"),
         Line::from("  f                 show / hide the file list"),
         Line::from("  m                 release the mouse to the terminal"),
         Line::from("  wheel, click      scroll / put the cursor there"),
-        Line::from("  r                 refetch the diff"),
+        Line::from(""),
+        Line::from("  v                 select lines (movement extends)"),
+        Line::from("  drag              select characters"),
+        Line::from("  c                 comment on the selection or the line"),
+        Line::from("  R                 reply to the comment under the cursor"),
+        Line::from("  X                 resolve it, or reopen it"),
+        Line::from("  P                 post every queued comment"),
+        Line::from("  S                 done reviewing"),
+        Line::from(""),
+        Line::from("  r                 refetch the review"),
         Line::from("  ctrl-z            suspend"),
+        Line::from("  esc               close this, then clear a selection"),
         Line::from("  ? , q             this / quit"),
     ];
     let width = lines
@@ -461,7 +725,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let theme = Theme { color: true };
         let mut panes = Panes::default();
-        terminal.draw(|f| panes = draw(f, app, &theme)).unwrap();
+        terminal
+            .draw(|f| panes = draw(f, app, &theme, false))
+            .unwrap();
         (rows_of(terminal.backend().buffer()), panes)
     }
 
@@ -595,7 +861,7 @@ mod tests {
         let app = app();
         terminal
             .draw(|f| {
-                draw(f, &app, &theme);
+                draw(f, &app, &theme, false);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -745,6 +1011,202 @@ mod tests {
         app.apply(Action::ToggleMouse, 10);
         let screen = render(&app, 100, 12);
         assert!(screen[11].contains("m mouse off"), "{:?}", screen[11]);
+    }
+
+    fn comment(line: u32, body: &str) -> krit_core::types::ReviewComment {
+        krit_core::types::ReviewComment {
+            id: format!("c{line}"),
+            file_path: "src/a.rs".into(),
+            side: "additions".into(),
+            line_number: line,
+            end_line: None,
+            line_content: String::new(),
+            body: body.into(),
+            status: "open".into(),
+            created_at: 0,
+            replies: Vec::new(),
+            outdated: None,
+            suggestion: None,
+            start_column: None,
+            end_column: None,
+            selected_text: None,
+        }
+    }
+
+    #[test]
+    fn a_comment_is_drawn_under_its_line_and_counted_in_the_header() {
+        // PATCH's new-side line 11 is the "+    is()" row.
+        let mut app = app();
+        app.set_comments(vec![comment(11, "this name is doing two jobs")], 10);
+        let screen = render(&app, 100, 20);
+        let at = screen
+            .iter()
+            .position(|l| l.contains("this name is doing two jobs"))
+            .expect("the body is on screen");
+        assert!(
+            screen[at - 1].contains("┌ open  11"),
+            "{:?}",
+            screen[at - 1]
+        );
+        assert!(
+            screen[at - 2].contains("+     is()"),
+            "{:?}",
+            screen[at - 2]
+        );
+        assert!(screen[0].contains("1 comment"), "{:?}", screen[0]);
+    }
+
+    #[test]
+    fn a_queued_comment_says_so_in_the_header_as_well_as_on_the_badge() {
+        // It is the reviewer's own unposted work; the agent cannot see it yet,
+        // and finding out only by scrolling past it is how it gets forgotten.
+        let mut app = app();
+        let mut c = comment(12, "not yet");
+        c.status = "queued".into();
+        app.set_comments(vec![c], 10);
+        let screen = render(&app, 100, 20);
+        assert!(
+            screen[0].contains("1 comment (1 queued)"),
+            "{:?}",
+            screen[0]
+        );
+        assert!(screen.iter().any(|l| l.contains("┌ queued")), "{screen:?}");
+    }
+
+    #[test]
+    fn a_narrower_pane_rewraps_the_body_rather_than_clipping_it() {
+        // Comment bodies wrap to the pane, so the row model depends on the
+        // width — and `set_panes` is what notices, since hiding the file list
+        // widens the pane without resizing the terminal.
+        let mut app = app();
+        let long = "a body long enough that it wraps to a different number of \
+                    lines in a wide pane than it does in a narrow one, which is \
+                    the whole point of measuring it here";
+        app.set_comments(vec![comment(11, long)], 10);
+        let (_, wide) = render_with_panes(&app, 120, 20);
+        assert!(app.set_panes(wide), "the first frame settles the width");
+        let tall = app.rows.len();
+
+        let (_, narrow) = render_with_panes(&app, 100, 20);
+        assert!(app.set_panes(narrow), "a narrower pane is a taller comment");
+        assert!(
+            app.rows.len() > tall,
+            "{} rows at 120 columns, {} at 100",
+            tall,
+            app.rows.len()
+        );
+        // Nothing overflows: every line still fits the pane it was wrapped to.
+        for line in render(&app, 100, 20) {
+            assert!(display_width(&line) <= 100, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_comment_the_diff_cannot_place_is_still_visible() {
+        // On a line no hunk carries, so there is no code row to hang it off.
+        let mut app = app();
+        app.set_comments(vec![comment(900, "from an older shape of this file")], 10);
+        let screen = render(&app, 100, 20);
+        let at = screen
+            .iter()
+            .position(|l| l.contains("from an older shape"))
+            .expect("shown somewhere rather than dropped");
+        assert!(
+            screen[at - 1].contains("┌ open  900"),
+            "{:?}",
+            screen[at - 1]
+        );
+    }
+
+    #[test]
+    fn folding_a_file_says_how_much_conversation_went_with_it() {
+        let mut app = app();
+        app.set_comments(vec![comment(12, "a note")], 10);
+        app.apply(Action::ToggleCollapse, 10);
+        let all = render(&app, 100, 20).join("\n");
+        assert!(all.contains("1 hunk, 1 comment hidden"), "{all}");
+        assert!(
+            !all.contains("a note"),
+            "the body went with the body: {all}"
+        );
+    }
+
+    // ---- the composer ---------------------------------------------------
+
+    fn composing(app: &mut App, body: &str) {
+        let anchor = app.comment_anchor().expect("the cursor is on code");
+        app.compose = Some(Composer::new(
+            crate::compose::Target::Comment(Box::new(anchor)),
+            body,
+        ));
+    }
+
+    #[test]
+    fn the_composer_takes_rows_from_the_diff_rather_than_covering_it() {
+        // What is being commented on has to stay readable while it is being
+        // written about — and the cursor has to still be in what is left.
+        let mut app = app();
+        app.apply(Action::Down(4), 10);
+        let before = render_with_panes(&app, 100, 20).1;
+        composing(&mut app, "this name is doing two jobs");
+
+        let (screen, panes) = render_with_panes(&app, 100, 20);
+        assert!(panes.diff.height < before.diff.height, "the diff shrank");
+        assert!(app.set_panes(panes) || app.cursor >= app.offset);
+        let all = screen.join("\n");
+        assert!(all.contains("this name is doing two jobs"), "{all}");
+        assert!(all.contains("ctrl-s post"), "{all}");
+        assert!(all.contains("Comment on src/a.rs"), "{all}");
+        // And the diff is still there above it.
+        assert!(all.contains("src/a.rs"), "{all}");
+    }
+
+    #[test]
+    fn the_footer_promises_ctrl_enter_only_where_the_terminal_can_deliver_it() {
+        // A legacy terminal reports Ctrl+Enter as a bare Enter, so promising
+        // the binding there would be promising a newline.
+        let mut app = app();
+        app.apply(Action::Down(4), 10);
+        composing(&mut app, "x");
+        let plain = render(&app, 100, 20).join("\n");
+        assert!(plain.contains("ctrl-s post"), "{plain}");
+        assert!(!plain.contains("ctrl-enter"), "{plain}");
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        let theme = Theme { color: true };
+        terminal
+            .draw(|f| {
+                draw(f, &app, &theme, true);
+            })
+            .unwrap();
+        let enhanced = rows_of(terminal.backend().buffer()).join("\n");
+        assert!(enhanced.contains("ctrl-s / ctrl-enter post"), "{enhanced}");
+    }
+
+    #[test]
+    fn the_discard_question_is_a_strip_and_the_diff_keeps_drawing_behind_it() {
+        // The terminal reading of the ban on `confirm()`: a program that stops
+        // redrawing until someone answers deadlocks whatever is driving it.
+        let mut app = app();
+        app.apply(Action::Down(4), 10);
+        composing(&mut app, "half a thought");
+        app.compose.as_mut().unwrap().confirm_discard = true;
+        let screen = render(&app, 100, 20);
+        let all = screen.join("\n");
+        assert!(all.contains("Discard what you have written?"), "{all}");
+        assert!(all.contains("half a thought"), "the text is still there");
+        assert!(all.contains("src/a.rs"), "and so is the diff");
+    }
+
+    #[test]
+    fn a_selection_shows_what_c_would_comment_on() {
+        let mut app = app();
+        app.apply(Action::Down(4), 10);
+        app.apply(Action::ToggleVisual, 10);
+        app.apply(Action::Down(1), 10);
+        let screen = render(&app, 100, 20);
+        assert!(screen[19].contains("c comment"), "{:?}", screen[19]);
+        assert!(screen[19].contains("src/a.rs lines"), "{:?}", screen[19]);
     }
 
     #[test]

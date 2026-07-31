@@ -2,7 +2,8 @@
 
 A cargo workspace plus a web UI. `krit/` is the Rust server; `src/ui/`
 (React, Pierre CodeView) is the web UI it embeds; `krit-tui/` is a second,
-terminal client (ratatui — read-only so far, see `docs/design/tui.md`);
+terminal client (ratatui — reads a review and comments on one, see
+`docs/design/tui.md`);
 `krit-core/` holds what the server and its Rust clients must agree on
 exactly — the wire types, state-file discovery, repo identity, and
 `diff_header_path`. `src/types.ts` mirrors `krit-core::types` for the web UI
@@ -232,6 +233,54 @@ skill together when you do.
   with backoff: a dropped subscription is not a dead server, and since the TUI
   is what holds `role=ui`, letting one drop stand would arm the server's idle
   shutdown and make its own "krit crashed" message come true.
+- **A comment is a run of rows, and the row model has to know the width.** A
+  body is prose, so how tall it is depends on the pane — and rows are *screen*
+  rows, since every scroll calculation there is counts them. So the layout is
+  redone whenever the diff pane's width changes, which `App::set_panes` notices
+  and reports back to the loop as "the frame you just drew is stale". Hiding
+  the file list is the case that makes this non-obvious: it widens the pane
+  without resizing the terminal, so a resize handler alone would miss it.
+  Comments whose line is in no hunk render under the file header rather than
+  nowhere — a comment that exists, is listed by `krit comments`, and cannot be
+  seen is worse than one in an approximate place.
+- **`krit-tui` refetches comments after its own writes, on purpose.** Two of
+  the mutations broadcast nothing: a queued comment is suppressed from every
+  broadcast until posted, and `PUT /api/comments/{id}` announces only the
+  catch-up when a queued one goes open. A client that only listened would show
+  queueing and resolving as keys that do nothing — no error, no change. The
+  browser is covered by `useComments`'s poll; the TUI has none, so it asks.
+- **The terminal and the browser mean different things by a column, and both
+  are right.** The wire counts UTF-16 units into the *source* line, because
+  that is what `Range.toString().length` measures and what `edits.rs` converts
+  back with `utf16_col_to_byte`. A terminal counts *cells*, where a tab is
+  `tab_size` of them and one source character. `text::cluster_at_column` is the
+  conversion, and it is the reason character anchors from the two clients land
+  on the same text. One deliberate difference: a browser endpoint is an
+  insertion point *between* characters, a terminal endpoint is the cell under
+  the pointer, so the character it is over is inside the selection — which is
+  also why a mouse drag cannot express a one-character range.
+- **The composer is a pane, not a modal**, and the discard question is a flag
+  plus a line of text. This is `docs/design/tui.md`'s "no blocking prompts,
+  ever" — the terminal reading of the ban on `confirm()`, enforced by
+  `nothing_outside_the_draw_loop_waits_for_input`, which globs `krit-tui/src`
+  for anything that reads input outside the loop. Two things follow that are
+  easy to undo by accident:
+  - **The form stays up until the server answers**, with `sending` set. Closing
+    it on submit throws the reviewer's text away on any failure, and at that
+    point it exists nowhere else — the same reason the browser's queued-comment
+    editor keeps its text on a refused save. `Incoming::Done` carries whether
+    the write came from the composer, so an unrelated write finishing cannot
+    close a form it has nothing to do with.
+  - **Submit is `Ctrl+S`, never `Enter`.** A terminal without the Kitty
+    keyboard protocol reports `Ctrl+Enter` and `Shift+Enter` as a bare `\r`,
+    indistinguishable from `Enter` — so binding submit there makes a two-line
+    comment impossible to write. `Ctrl+Enter` is accepted *as well*, and the
+    footer promises it only where `supports_keyboard_enhancement()` said yes.
+    Do not pick this binding from the terminal you happen to use.
+  - Its up/down/home/end move by **screen** row, not by line of the buffer: the
+    form is full of prose and most rows on screen are wrapped ones. That is why
+    `Editor` is one string and one offset rather than a vector of lines, and
+    why those four methods take the width.
 - **The comment poll sets `refetchIntervalInBackground: true`** (`useComments`),
   overriding react-query's default of pausing an interval while the page is
   unfocused. An automated browser reports itself hidden the whole time it is
