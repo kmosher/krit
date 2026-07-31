@@ -8,6 +8,7 @@
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -19,14 +20,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-fn enter_screen() -> io::Result<()> {
+fn enter_screen(mouse: bool) -> io::Result<()> {
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)
+    execute!(stdout(), EnterAlternateScreen)?;
+    if mouse {
+        execute!(stdout(), EnableMouseCapture)?;
+    }
+    Ok(())
 }
 
 fn leave_screen() -> io::Result<()> {
-    // Raw mode first: it has the wider blast radius, so if only one of the two
-    // succeeds it should be this one.
+    // Unconditionally released, whatever we think the state is: this runs from
+    // a panic hook too, and a terminal left reporting mouse events writes
+    // escape sequences into the user's next shell prompt every time they move
+    // the pointer. Releasing one that was never taken costs nothing.
+    let _ = execute!(stdout(), DisableMouseCapture);
+    // Raw mode next: it has the wider blast radius, so if only one of the
+    // remaining two succeeds it should be this one.
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)
 }
@@ -54,14 +64,42 @@ fn install_panic_hook() {
 /// harmless).
 pub struct Session {
     restored: bool,
+    /// Whether we are currently holding the mouse — remembered so that
+    /// re-entering the screen after a suspend restores the same state rather
+    /// than silently taking it back from a reviewer who gave it away.
+    mouse: bool,
 }
 
 impl Session {
-    pub fn start() -> io::Result<(Self, Tui)> {
+    pub fn start(mouse: bool) -> io::Result<(Self, Tui)> {
         install_panic_hook();
-        enter_screen()?;
+        enter_screen(mouse)?;
         let terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-        Ok((Session { restored: false }, terminal))
+        Ok((
+            Session {
+                restored: false,
+                mouse,
+            },
+            terminal,
+        ))
+    }
+
+    /// Take or release the mouse mid-session.
+    ///
+    /// Releasing it is a real feature, not a debug affordance: capture takes
+    /// over the terminal's own selection, so with it on there is no way to
+    /// drag-select a line and copy it — which is a thing people do to a diff
+    /// constantly.
+    pub fn set_mouse(&mut self, on: bool) -> io::Result<()> {
+        if self.mouse == on {
+            return Ok(());
+        }
+        self.mouse = on;
+        if on {
+            execute!(stdout(), EnableMouseCapture)
+        } else {
+            execute!(stdout(), DisableMouseCapture)
+        }
     }
 
     /// Hand the terminal back and stop the process the way the shell expects.
@@ -74,7 +112,7 @@ impl Session {
         leave_screen()?;
         self.restored = true;
         let _ = signal_hook::low_level::emulate_default_handler(signal_hook::consts::SIGTSTP);
-        enter_screen()?;
+        enter_screen(self.mouse)?;
         self.restored = false;
 
         // Whoever had the terminal while we were stopped drew on it, and

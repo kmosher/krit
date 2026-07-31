@@ -10,7 +10,10 @@ use krit_core::state::{StateError, default_state_path, read_state_at};
 use serde::Deserialize;
 use serde_json::Value;
 use std::io::Read;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 /// What `GET /api/diff` gives us. Phase 0 reads the patch and the two labels;
 /// `fileContents` (hunk expansion) and `binaryFiles` are deliberately not
@@ -50,13 +53,139 @@ pub enum ServerEvent {
     Disconnected,
 }
 
-/// The base URL of the server serving this worktree and branch.
+/// 127.0.0.1 → localhost, for the same reason the CLI verbs do it: sandbox
+/// host allowlists accept only the name.
+fn localhost(url: &str) -> String {
+    url.replace("://127.0.0.1", "://localhost")
+}
+
+/// How we got a server, because it changes what the reviewer should be told —
+/// and, for a server we started, what happens when they quit.
+pub enum Attached {
+    Adopted(String),
+    Started(String),
+}
+
+impl Attached {
+    pub fn base(&self) -> &str {
+        match self {
+            Attached::Adopted(base) | Attached::Started(base) => base,
+        }
+    }
+}
+
+/// Find a server for this review, or start one.
 ///
-/// 127.0.0.1 is rewritten to localhost for the same reason the CLI verbs do
-/// it: sandbox host allowlists accept only the name.
-pub fn resolve_server() -> Result<String, StateError> {
-    let state = read_state_at(&default_state_path())?;
-    Ok(state.url.replace("://127.0.0.1", "://localhost"))
+/// This is what makes `krit-tui` a single command in a single shell: the
+/// common case is that no server is running, and requiring the reviewer to
+/// start one in another pane first is most of the friction of using it at
+/// all. A server that was already running is adopted rather than duplicated —
+/// state is keyed by worktree and branch, so a second one would fight the
+/// first over the same files.
+pub fn attach(diff_args: &[String]) -> Result<Attached, String> {
+    match read_state_at(&default_state_path()) {
+        Ok(state) => {
+            let base = localhost(&state.url);
+            // A state file outlives a server that crashed — nothing cleans it
+            // up but the server's own shutdown. Believing it means a viewer
+            // that reports "cannot reach krit" when the honest answer is that
+            // there is nothing there and we should start one.
+            if reachable(&base) {
+                return Ok(Attached::Adopted(base));
+            }
+        }
+        Err(StateError::Missing(_)) => {}
+        // Unreadable or malformed is a configuration problem, not an absence:
+        // starting a second server on top of one that may well be running is
+        // the wrong guess to make on the reviewer's behalf.
+        Err(other) => return Err(other.lines().join("\n")),
+    }
+    start_server(diff_args).map(Attached::Started)
+}
+
+/// A cheap route that touches no git — enough to answer "is anything
+/// listening and is it krit".
+fn reachable(base: &str) -> bool {
+    ureq::get(&format!("{base}/api/settings"))
+        .timeout(Duration::from_millis(1500))
+        .call()
+        .is_ok()
+}
+
+/// The `krit` next to this binary, falling back to `PATH`.
+///
+/// Sibling first so a build run out of `target/debug` spawns *its* server
+/// rather than whatever happens to be installed — otherwise a change to the
+/// wire looks like it works while the two halves are different versions.
+fn krit_binary() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join("krit");
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    PathBuf::from("krit")
+}
+
+fn start_server(diff_args: &[String]) -> Result<String, String> {
+    let exe = krit_binary();
+    // The server's own stdout would land on top of the viewer, so it goes to
+    // a file — which is also the only thing we can quote back if it dies
+    // before writing a state file ("not a git repository", a typo'd rev).
+    let log_path = std::env::temp_dir().join(format!("krit-tui-{}.log", std::process::id()));
+    let log = std::fs::File::create(&log_path)
+        .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+    let errors = log
+        .try_clone()
+        .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--no-open");
+    if !diff_args.is_empty() {
+        cmd.arg("--");
+        cmd.args(diff_args);
+    }
+    cmd.stdin(Stdio::null()).stdout(log).stderr(errors);
+
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "cannot start {}: {e}\nInstall it alongside krit-tui, or start `krit` yourself first.",
+            exe.display()
+        )
+    })?;
+    let pid = child.id();
+    let state_path = default_state_path();
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    loop {
+        // Matched on pid, not merely on the file existing: a stale state file
+        // from a crashed server is exactly the case that got us here, and
+        // adopting it would hand us the dead port we just rejected.
+        if let Ok(state) = read_state_at(&state_path)
+            && state.pid == pid
+        {
+            return Ok(localhost(&state.url));
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let output = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let detail = output.trim();
+            return Err(if detail.is_empty() {
+                format!("krit exited ({status}) without saying why")
+            } else {
+                format!("krit could not start:\n{detail}")
+            });
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            return Err(format!(
+                "krit started but wrote no state file within 15s — see {}",
+                log_path.display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 pub fn fetch_diff(base: &str) -> Result<DiffPayload, String> {

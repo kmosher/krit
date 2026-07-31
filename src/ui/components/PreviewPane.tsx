@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReviewComment } from '../../types'
 import type { SelectionAnchor } from '../utils/selectionMapping'
-import type { PreviewFormat } from '../utils/previewFormat'
+import { rendersInPage, type PreviewFormat } from '../utils/previewFormat'
+import { delimiterFor } from '../utils/csvPreview'
 import {
   buildLineIndex,
   lineColToOffset,
@@ -14,6 +15,8 @@ import { buildHtmlTextMap, locateSelection } from '../utils/htmlTextMap'
 import { asBridgeMessage, buildSandboxDocument } from '../utils/htmlSandbox'
 import { setFileHighlights } from '../utils/previewHighlights'
 import { MarkdownPreview } from './MarkdownPreview'
+import { NotebookPreview } from './NotebookPreview'
+import { CsvPreview } from './CsvPreview'
 import { SelectionPill } from './SelectionPill'
 import { CommentForm } from './CommentForm'
 import { CommentBubble } from './CommentBubble'
@@ -107,9 +110,11 @@ export function PreviewPane({
     [lineStarts],
   )
 
-  // --- Markdown: the selection lives in this document, so read it directly.
+  // --- Everything but the HTML artifact renders into this document, so the
+  // selection can be read directly. All of them stamp `data-src`, which is the
+  // only thing `previewRangeToAnchor` looks at.
   useEffect(() => {
-    if (format !== 'markdown') return
+    if (!rendersInPage(format)) return
     const onMouseUp = (e: MouseEvent) => {
       // The pill's own buttons are inside this document; a mouseup on them is
       // not a new selection and must not clear the one being acted on.
@@ -194,7 +199,7 @@ export function PreviewPane({
   // offsets the highlight was computed from). Registered per file, because
   // several panes can be open at once and the API is keyed globally.
   useEffect(() => {
-    if (format !== 'markdown') return
+    if (!rendersInPage(format)) return
     const root = bodyRef.current
     if (!root) return
     const ranges: Range[] = []
@@ -251,6 +256,14 @@ export function PreviewPane({
       <div className="preview-pane-content" ref={bodyRef}>
         {format === 'markdown' ? (
           <MarkdownPreview source={source} changedRanges={changedRanges} />
+        ) : format === 'notebook' ? (
+          <NotebookPreview source={source} changedRanges={changedRanges} />
+        ) : format === 'csv' ? (
+          <CsvPreview
+            source={source}
+            delimiter={delimiterFor(filePath)}
+            changedRanges={changedRanges}
+          />
         ) : (
           <iframe
             ref={frameRef}

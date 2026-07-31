@@ -96,20 +96,45 @@ skill together when you do.
   - Playwright needs `PLAYWRIGHT_BROWSERS_PATH` somewhere writable, and
     launching the browser needs the sandbox off (XPC fails "Connection
     Invalid" otherwise).
-- **Driving `krit-tui` needs a pty with a size, and the sandbox off.**
-  `openpty` fails "Operation not permitted" under the Bash sandbox. And a pty
-  inherits no window size, so `script`-style harnesses hand the app a 0×0
-  terminal and it faithfully draws nothing: fork the pty yourself and
-  `TIOCSWINSZ` it before reading a byte.
-  - **A captured chunk is a delta, not the screen.** ratatui emits only the
-    cells that changed, so reading the bytes that arrive after an event shows
-    an unchanged screen as an empty one — which reads exactly like the feature
-    being broken. Two checks were confidently wrong this way before the cause
-    was obvious. Force a full repaint before capturing (nudging the window size
-    makes `Terminal::draw` autoresize and repaint everything), or keep a real
-    emulator's screen state.
+- **Drive `krit-tui` under tmux, not under a hand-rolled pty.** tmux is a
+  debugged terminal emulator that will hand you the rendered screen, which is
+  the whole problem (see below). It needs the sandbox off — `openpty` fails
+  "Operation not permitted" — and its own server and config, so a run never
+  touches the session you are sitting in:
+
+  ```
+  tmux -L krittest -f /dev/null new-session -d -s t -x 120 -y 40 "…krit-tui …"
+  tmux -L krittest capture-pane -p -t t     # the screen, as text
+  tmux -L krittest send-keys -t t f         # a key
+  tmux -L krittest send-keys -t t -H 1b 5b 3c 36 35 3b 36 30 3b 31 30 4d
+  tmux -L krittest kill-server
+  ```
+
+  That `-H` line is a wheel-down: mouse input goes in as an SGR report,
+  `ESC[<{button};{col+1};{row+1}M` to press and `m` to release, button 64/65
+  for wheel up/down. crossterm parses those whether or not capture is on, so a
+  test can drive the mouse without the terminal cooperating.
+  - **Why not read the pty yourself: a captured chunk is a delta, not the
+    screen.** ratatui emits only the cells that changed, so the bytes arriving
+    after an event show an unchanged screen as an empty one — indistinguishable
+    from the feature being broken. Stripping escapes and splitting on newlines
+    is no better, because ratatui positions every run with `CUP` and emits
+    almost no newlines: you get a few very long lines, not rows. Writing a
+    small emulator instead works, but it is a real terminal's job and a
+    from-scratch one has from-scratch bugs (a `CUP` handler comparing a bytes
+    match group against a str, silently collapsing every row onto row 0). Five
+    confident "failures" in one session came out of this, none of them a bug in
+    krit. If you must read a pty directly, `TIOCSWINSZ` it first — a pty
+    inherits no size, and a 0×0 terminal makes the app faithfully draw nothing
+    — and replay the whole byte stream rather than feeding chunks, since a read
+    splits escape sequences at 1 KiB.
   - Suspend has to be verified from outside: `ps -o state=` shows `T` while
     stopped, and the app must have emitted `ESC[?1049l` *before* it stopped.
+    tmux is the wrong tool for that one — it owns the process group — so
+    suspend stays a hand-rolled `pty.fork`.
+  - For a committed harness (nobody has written one yet), the Rust equivalents
+    are `portable-pty` to spawn and `vt100` to model the screen, with `insta`
+    for the snapshots. Untried here.
 - **The fs-watcher needs `com.apple.FSEvents` in the sandbox's
   `allowMachLookup`**: without it `FSEventStreamStart` fails silently, so
   `cargo test watcher` fails and a sandboxed `krit` never emits
@@ -150,6 +175,15 @@ skill together when you do.
   agents pay tokens per frame and shouldn't hear themselves work (`server.rs`,
   `agent_visible`). The UI's SSE stream (`/api/events`) carries everything.
   If a WS test "sees no events", check this before debugging the watcher.
+- **`krit-tui` starts a server when there isn't one, and never stops it.**
+  Killing it on exit would be wrong whenever a browser tab is also attached,
+  and unnecessary either way: the idle timeout already counts subscribers, so
+  a server nobody is watching goes away on its own. The adopt path probes
+  `/api/settings` before trusting the state file — a crashed server leaves one
+  behind, and believing it means reporting "cannot reach krit" when the honest
+  answer is that we should have started one. A server that *is* running keeps
+  its own diff range; `-- <args>` passed to a viewer that adopts one is
+  reported in the status strip rather than silently ignored.
 - **`krit-tui` subscribes as `role=ui`, not `role=cli`.** It is a human's
   client, so it has to hold the server open the way a browser tab does; a `cli`
   subscription would let the idle timeout fire with the review still on screen.
@@ -238,6 +272,28 @@ skill together when you do.
   `document.getSelection()` inside one returns real light-DOM nodes with no
   retargeting. The stale comment in `CommentForm` about being "portaled into
   the shadow root" is what makes this look harder than it is.
+- **A preview renderer's entire contract is `data-src`.** Every element it
+  emits carries `"<startOffset>-<endOffset>"` into the *file*, and
+  `previewAnchor.ts` needs nothing else — which is why Markdown, `.ipynb` and
+  `.csv` share one selection path, one highlight path and one comment path.
+  Adding a format is a renderer plus an entry in `previewFormatFor`; anything
+  that reaches for a second mechanism has taken a wrong turn.
+  - **A notebook is the one format where a rendered offset is not a file
+    offset.** Cell text lives in JSON string literals, and an escape is more
+    source characters than decoded ones, so `jsonPositions.ts` keeps a
+    per-character map and the notebook path composes it into the stamps
+    (`mapOffset` on `rehypeSourceOffsets`). Skip the map and every anchor is
+    quietly off by however many escapes precede it, which reads as a plausible
+    anchor, not an error.
+  - **Stamp a code cell per line, not per cell.** `previewAnchor` locates a
+    position by searching the element's source slice for the text node's exact
+    value: one line does occur verbatim inside its own literal, while a whole
+    cell — real newlines where the file has `\n",\n "` — does not, and every
+    selection in it would widen to the cell.
+  - **Outputs carry no stamp on purpose.** There is no source position behind a
+    rendered figure, and an unstamped subtree yields no anchor rather than a
+    wrong one. `text/html` outputs are dropped entirely: the pane renders in
+    the page, and that markup is kernel-authored.
 - **A file-level annotation (`lineNumber: 0`) is how the rendered preview
   replaces a diff**, and three things have to line up or it silently renders
   nothing:

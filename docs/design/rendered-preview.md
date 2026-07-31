@@ -1,11 +1,13 @@
 # Rendered previews: reviewing prose and artifacts, not their source
 
-> **Status: stages 1–5 implemented.** Markdown and HTML previews, selection →
-> comment, comment display, suggest-from-source, and the sandboxed HTML path
-> all landed, and the preview replaces a file's diff **in place** rather than
-> opening a modal. Stage 6 (whole-surface docs mode) and stage 7 (`.ipynb`,
-> `.csv`) are not built. Where the build diverged from this plan — including
-> one claim below that turned out to be wrong — is recorded at the end.
+> **Status: stages 1–5 and 7 implemented.** Markdown, HTML, `.ipynb` and
+> `.csv`/`.tsv` previews, selection → comment, comment display,
+> suggest-from-source, and the sandboxed HTML path all landed, and the preview
+> replaces a file's diff **in place** rather than opening a modal. Stage 6
+> (whole-surface docs mode) is not built, and neither are the SVG, Mermaid and
+> Graphviz renderers sketched below. Where the build diverged from this plan —
+> including one claim below that turned out to be wrong — is recorded at the
+> end.
 
 A growing share of what gets reviewed in krit is not code: design docs,
 READMEs, plans, and self-contained HTML artifacts, all written by an agent. A
@@ -265,7 +267,7 @@ prefer exact match plus a bounded window before reaching for fuzz.
 Ranked by value over effort. All of them reduce to the same question — does
 the format give us a source position?
 
-**`.ipynb` — highest value of anything here.** A notebook diff in raw JSON is
+**`.ipynb` — built.** A notebook diff in raw JSON is
 unreadable, which is why every tool in the space renders cells and why
 [ReviewNB](https://blog.reviewnb.com/commenting-and-discussion-on-jupyter-notebook/)
 exists as a paid product wrapping exactly this gap. Anchoring is
@@ -273,7 +275,7 @@ straightforward with a position-tracking JSON parser: cell index → source line
 range, and markdown cells reuse the entire Markdown path above. Cell outputs
 render as-is; images already have a home in `BinaryFileDiff`.
 
-**`.csv` / `.tsv` — cheapest win in the list.** Table render, and anchoring is
+**`.csv` / `.tsv` — built.** Table render, and anchoring is
 *exactly* line/column with no escape wrinkle at all (modulo quoted fields).
 Almost free once the preview scaffolding exists.
 
@@ -364,3 +366,21 @@ Not covered by tests: a human drag inside the HTML preview's iframe. Nothing
 can deliver input into it (see `CLAUDE.md`), so `BRIDGE_SCRIPT` is executed
 against a document in `htmlSandbox.test.ts` instead — which reaches everything
 except the browser's own selection geometry.
+
+**Stage 7 needed no new machinery, only a second kind of offset.** A renderer's
+whole obligation is `data-src`, so `.csv` was a table whose cells carry their
+own file offsets and nothing else changed. `.ipynb` is the one format where a
+rendered offset is not an offset into the file: cell text lives inside JSON
+string literals, and `\n` is two source characters for one decoded one. So
+`jsonPositions.ts` keeps a per-character map alongside every string it parses,
+and the Markdown renderer gained a `mapOffset` hook to push its stamps through
+it. The locate-by-value rule then works unchanged, because a run of cell text
+does occur verbatim inside its own literal — a paragraph split across two
+`source` entries is the case that snaps outward, which is why code cells are
+stamped a line at a time rather than as a whole.
+
+Cell **outputs are deliberately unstamped**. There is no source position behind
+a rendered figure, and an unstamped subtree yields no anchor rather than a
+plausible wrong one. `text/html` outputs are dropped for the same reason the
+HTML preview is sandboxed: they are arbitrary kernel-authored markup, and the
+notebook pane renders in the page.
