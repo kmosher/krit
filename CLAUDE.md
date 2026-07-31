@@ -24,10 +24,18 @@ the number is free and a bumped version is what makes "which krit is this?"
 answerable. The workspace `version` in `Cargo.toml` and `package.json` and
 `desktop/src-tauri/tauri.conf.json` all carry it and must agree.
 
-Every change that a user or an agent could notice gets a line under
-`## Unreleased` in `CHANGELOG.md`, **in the same commit**. Breaking changes are
+Every change a user or an agent could notice gets a **new file** in
+`changelog/unreleased/`, in the same commit — never a line appended to
+`CHANGELOG.md`. Several agents work this repo at once in separate worktrees and
+land by `wt-fold` in arbitrary order; a shared list means each of them edits the
+same lines, so everyone after the first folds into a conflict over text nobody
+disagrees about. `changelog/README.md` has the format. Breaking changes are
 listed under `### Changed`, not called out specially — at `0.x` they are
 routine, which is what the README's warning is for.
+
+`just release <version>` is the only thing that writes `CHANGELOG.md` or a
+version number; it collates the fragments, deletes them, and sets all three
+version files at once so they cannot drift apart.
 
 ## Edit loops
 

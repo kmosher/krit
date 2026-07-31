@@ -44,3 +44,12 @@ dev:
 # The terminal client, against whatever krit server this worktree has running
 tui:
     cargo run -p krit-tui
+
+# Preview the changelog section the pending fragments would produce
+changelog:
+    ./scripts/changelog.py collate
+
+# Cut a release: collate fragments into CHANGELOG.md, delete them, bump all
+# three version files. Leaves everything staged-but-uncommitted for review.
+release version:
+    ./scripts/changelog.py release {{version}}

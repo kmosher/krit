@@ -73,6 +73,7 @@ The agent stream is **human-only**: the server filters out echoes of your own wo
 - `clients` is presence: `browsers` counts UI event subscriptions, and the UI opens two per tab — so one open tab reports `browsers: 2`, zero means the user closed the UI. Informational; no action needed.
 - `user-edit` / `file-written` mean the user edited a file through the krit in-browser editor. Treat the file as changed on disk (re-Read before editing it yourself).
 - Comments carry both `lineNumber` (start) and `endLine` (inclusive end). When the user drag-selected a range, `endLine > lineNumber` and `lineContent` contains the selected lines joined with `\n`. Treat the range as the scope of the comment.
+- `review-ended` is the server's goodbye, broadcast immediately before it exits, and its `reason` is one of `submitted` / `idle` / `no-browser` / `signal`. `signal` means somebody killed the server — the review did not finish, so say so rather than reporting it as complete.
 - Replies carry `author: 'user' | 'agent'`. You only see `reply-added` for `author: 'user'` (your own CLI replies are suppressed). `commentStatus` is the post-event status of the parent — if the user replied to a comment you'd already resolved, the server auto-reopens it and `commentStatus` is `"open"`.
 
 Attaching also lights up the **Done reviewing** button in the UI — with no agent subscriber attached, the button greys out and the user falls back to "Copy comments."
@@ -119,8 +120,8 @@ End the turn after handling the event(s). The Monitor will wake you again on the
 The krit server shuts itself down 5s after the last UI subscriber disconnects (or 3 minutes if none ever connected). Done reviewing skips even that: closing the last tab after a submit ends the server at once, so `review-ended` can follow `submitted` almost immediately. On shutdown it broadcasts `review-ended` and closes the WebSocket, which ends the Monitor:
 
 - **`review-ended` then close, with a `submitted` seen earlier** — normal completion. Summarize briefly: N applied, M answered, K left open (and why). If that `submitted` carried a `summary`, answer it here too — it is the one piece of the review with no comment thread to reply on.
-- **`review-ended` with no `submitted`** — the user closed the UI without clicking Done. Tell the user and stop; don't silently re-launch.
-- **Socket close with no `review-ended`** — krit crashed or was killed. Say so. The v1 fallback is available: same workflow via the `diffx` skill.
+- **`review-ended` with no `submitted`** — the review did not finish. `reason` says how: `idle` / `no-browser` means the user closed the UI (or it never opened), `signal` means the server was killed. Tell the user which, and stop; don't silently re-launch.
+- **Socket close with no `review-ended`** — krit crashed. Every deliberate exit says goodbye first, so the absence of one is the distinguishing fact; say so. The v1 fallback is available: same workflow via the `diffx` skill.
 
 ## Other subcommands
 
