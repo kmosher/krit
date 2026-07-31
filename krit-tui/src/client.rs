@@ -13,6 +13,7 @@ use krit_core::state::{KritState, StateError, client_base_url, default_state_pat
 use krit_core::types::ReviewComment;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -32,10 +33,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// What `GET /api/diff` gives us. Phase 0 reads the patch and the two labels;
-/// `fileContents` (hunk expansion) and `binaryFiles` are deliberately not
-/// modelled yet — they belong to phase 2, and an unused field here would read
-/// as support that isn't there.
+/// What `GET /api/diff` gives us. `binaryFiles` is still not modelled — the
+/// patch already says a file is binary, and an unused field here would read as
+/// support that isn't there.
 ///
 /// `patch` deliberately has no `#[serde(default)]`. Tolerating fields we don't
 /// model is right; defaulting the one field this client exists to read is not
@@ -54,6 +54,66 @@ pub struct DiffPayload {
     pub custom_mode: bool,
     #[serde(default)]
     pub untracked_files: Vec<String>,
+    /// Whole-file text per path, which is what makes hunk expansion a local
+    /// operation rather than another request per gap. Already in every
+    /// response; the browser reads the same field for the same purpose.
+    #[serde(default)]
+    pub file_contents: HashMap<String, FileSides>,
+}
+
+/// One file's text, as `/api/diff` bundles it.
+///
+/// The response carries `old` as well; unified view only ever shows the new
+/// side of an unchanged line, so modelling the other one now would be a field
+/// nothing reads. Split view is what needs it (phase 2), and it can add it.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct FileSides {
+    #[serde(default)]
+    pub new: SideText,
+}
+
+/// One side's text, or the reason there is none.
+///
+/// The server answers with exactly one of these shapes, and the three refusals
+/// are not interchangeable: `missing` is a file that did not exist at that ref
+/// (every added file has one), `binary` is content no diff can show, and
+/// `oversize` is a file past `read_side`'s caps. Modelled as flags rather than
+/// an enum because that is what serde sees on the wire, and a shape this client
+/// does not recognise leaves every field false — which reads as "no text
+/// available", the safe answer.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SideText {
+    pub contents: Option<String>,
+    #[serde(default)]
+    pub missing: bool,
+    #[serde(default)]
+    pub binary: bool,
+    #[serde(default)]
+    pub oversize: bool,
+}
+
+impl SideText {
+    /// The file's lines, or empty when this side carries no text. Callers can
+    /// treat "no text" and "no lines" alike: a gap over a side that cannot be
+    /// read simply does not expand.
+    pub fn lines(&self) -> Vec<String> {
+        match &self.contents {
+            Some(text) => text.split('\n').map(str::to_string).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Why there is no text, for the row that would otherwise offer to expand.
+    /// `None` when there is text, or when the server said nothing useful.
+    pub fn refusal(&self) -> Option<&'static str> {
+        match self {
+            _ if self.contents.is_some() => None,
+            _ if self.oversize => Some("file too large to expand"),
+            _ if self.binary => Some("binary"),
+            _ if self.missing => Some("not in this revision"),
+            _ => None,
+        }
+    }
 }
 
 /// The reviewer's settings, as both clients read them.

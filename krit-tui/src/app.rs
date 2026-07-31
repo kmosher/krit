@@ -11,8 +11,8 @@ use crate::comments::{CommentAnchor, CommentRows, layout};
 use crate::compose::Composer;
 use crate::patch::{FileDiff, parse_patch};
 use crate::rows::{
-    MARKER_COLS, Row, build_rows, comment_rows, file_rows, gutter_width, hunk_rows, next_stop,
-    scroll_to_show,
+    GapRange, MARKER_COLS, Opened, Row, build_rows, comment_rows, file_rows, gaps_of, gutter_width,
+    hunk_rows, next_stop, scroll_to_show,
 };
 use crate::text::{cluster_at_column, display_width, expand_tabs};
 use krit_core::types::ReviewComment;
@@ -20,7 +20,7 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -115,10 +115,32 @@ pub enum Action {
     /// `scroll_to_show` from immediately undoing it.
     ScrollViewDown(usize),
     ScrollViewUp(usize),
+    /// Open or fold the unchanged run under the cursor by a few lines. Does
+    /// nothing anywhere else, which is why the keys are announced on the row
+    /// itself rather than in the footer — they are only live where they mean
+    /// something. All-at-once is `z`, the same key that folds a file.
+    Expand(Step),
     /// Put the cursor on a file's header. From a click in the file list; a
     /// click in the diff arrives as `SelectStart`, which moves the cursor as
     /// part of starting the gesture.
     FocusFile(usize),
+}
+
+/// Lines opened per `+`, from each edge. Ten is about a screenful between the
+/// two, which is the amount of context a reader asks for when a hunk's own
+/// three lines were not enough.
+pub const EXPAND_STEP: u32 = 5;
+
+/// How far to open, or close, the gap under the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// A few lines in from each edge — the common case, reading around a hunk.
+    More(u32),
+    Less(u32),
+    /// The whole gap. Anchored at the top rather than split between the edges,
+    /// because once it is all open there is no middle left to keep.
+    All,
+    None,
 }
 
 /// What the reviewer has marked, and what a comment posted from it would be
@@ -231,6 +253,19 @@ pub struct App {
     /// same predicate, spelled `watcherCount > 0 || agentCount > 0`.
     pub listeners: usize,
     pub should_quit: bool,
+    /// The new side of every file, by path, so the space between hunks can be
+    /// opened without another request. Bundled in every `/api/diff` response.
+    pub file_text: HashMap<String, Vec<String>>,
+    /// Why a file's new side carries no text, when it doesn't — reported on the
+    /// row that would otherwise offer to expand, since a gap that refuses to
+    /// open looks identical to one that is broken.
+    pub file_text_refusal: HashMap<String, &'static str>,
+    /// The unchanged runs between hunks, by path. Derived in `load` rather than
+    /// per frame: it walks every hunk of every file.
+    pub gaps: HashMap<String, Vec<GapRange>>,
+    /// How much of each gap is open, keyed by path and gap index so it survives
+    /// a refetch the way `collapsed` does.
+    pub expanded: HashMap<(String, usize), Opened>,
     pub panes: Panes,
     /// Height of the last diff pane that was actually drawn — the basis
     /// `set_panes` compares against to decide whether the viewport resized.
@@ -276,6 +311,10 @@ impl Default for App {
             tab_size: 4,
             listeners: 0,
             should_quit: false,
+            file_text: HashMap::new(),
+            file_text_refusal: HashMap::new(),
+            gaps: HashMap::new(),
+            expanded: HashMap::new(),
             panes: Panes::default(),
             reconciled_height: 0,
             gutter: 2,
@@ -298,6 +337,7 @@ impl App {
         self.branch = payload.branch.clone();
         self.custom_mode = payload.custom_mode;
         self.files = parse_patch(&payload.patch, &payload.untracked_files);
+        self.take_file_text(payload);
         self.rebuild();
         self.cursor = match anchor.and_then(|p| self.row_of_path(&p)) {
             Some(row) => row,
@@ -348,9 +388,122 @@ impl App {
         self.offset = scroll_to_show(self.offset, viewport, self.cursor, self.rows.len());
     }
 
+    /// Take the whole-file text the diff came with, and work out where the
+    /// gaps between hunks are.
+    ///
+    /// Done on load rather than per frame because it walks every hunk of every
+    /// file. The expansion state is *not* cleared: a refetch happens on every
+    /// save, and a reviewer who opened a gap to read around a change should not
+    /// have it fold up under them each time the agent writes. It is keyed by
+    /// path and gap index, so the worst an edit can do is move which lines a
+    /// still-open gap shows — and the row model rebuilds from the new gaps
+    /// either way, so an expansion wider than a gap that shrank is clamped
+    /// rather than left dangling.
+    fn take_file_text(&mut self, payload: &DiffPayload) {
+        self.file_text.clear();
+        self.file_text_refusal.clear();
+        self.gaps.clear();
+        for file in &self.files {
+            let Some(sides) = payload.file_contents.get(&file.path) else {
+                continue;
+            };
+            if let Some(why) = sides.new.refusal() {
+                self.file_text_refusal.insert(file.path.clone(), why);
+                // Gaps are still worked out, and still drawn — the row is where
+                // the reason gets said. Told nothing, the reviewer cannot tell a
+                // file too large to expand from a key that does not work. Only
+                // the interior gaps, though: the run after the last hunk is
+                // bounded by the file's length, and that is what we don't have.
+                self.gaps.insert(file.path.clone(), gaps_of(file, 0));
+                continue;
+            }
+            let lines = sides.new.lines();
+            if lines.is_empty() {
+                continue;
+            }
+            // A trailing newline makes `split` yield one empty last element
+            // that is not a line of the file. Counting it would offer to expand
+            // a line that does not exist, and render it blank.
+            let total = match lines.last() {
+                Some(last) if last.is_empty() => lines.len() - 1,
+                _ => lines.len(),
+            };
+            self.gaps
+                .insert(file.path.clone(), gaps_of(file, total as u32));
+            self.file_text.insert(file.path.clone(), lines);
+        }
+    }
+
+    /// The text of one expanded line, and its old-side number.
+    pub fn context_line(&self, file: usize, gap: usize, line: u32) -> Option<(&str, Option<u32>)> {
+        let path = &self.files.get(file)?.path;
+        let range = self.gaps.get(path)?.get(gap)?;
+        let text = self.file_text.get(path)?.get(line as usize - 1)?;
+        Some((text.as_str(), range.old_line(line)))
+    }
+
+    /// How many lines of a gap are still folded away, and why it might not
+    /// open at all.
+    pub fn gap_state(&self, file: usize, gap: usize) -> Option<(u32, Option<&'static str>)> {
+        let path = &self.files.get(file)?.path;
+        let range = self.gaps.get(path)?.get(gap)?;
+        let (from_start, from_end) = self
+            .expanded
+            .get(&(path.clone(), gap))
+            .copied()
+            .unwrap_or((0, 0));
+        let open = (from_start + from_end).min(range.len());
+        Some((
+            range.len() - open,
+            self.file_text_refusal.get(path).copied(),
+        ))
+    }
+
+    /// Open more of the gap the cursor is on, or fold it back.
+    ///
+    /// Both edges move together by design: a gap sits *between* two hunks, and
+    /// the reviewer reading either one wants the lines nearest it. Stepping one
+    /// edge at a time would need two more keys to say which, for a distinction
+    /// nobody has yet asked to make.
+    pub fn expand_gap(&mut self, by: Step) -> bool {
+        let (file, gap) = match self.rows.get(self.cursor).copied() {
+            Some(Row::Expand { file, gap }) | Some(Row::Context { file, gap, .. }) => (file, gap),
+            _ => return false,
+        };
+        let Some(path) = self.files.get(file).map(|f| f.path.clone()) else {
+            return false;
+        };
+        let Some(range) = self.gaps.get(&path).and_then(|g| g.get(gap)).copied() else {
+            return false;
+        };
+        if !self.file_text.contains_key(&path) {
+            return false;
+        }
+        let len = range.len();
+        let entry = self.expanded.entry((path, gap)).or_insert((0, 0));
+        let (from_start, from_end) = *entry;
+        *entry = match by {
+            Step::All => (len, 0),
+            Step::None => (0, 0),
+            Step::More(n) => (
+                (from_start + n).min(len),
+                (from_end + n).min(len.saturating_sub((from_start + n).min(len))),
+            ),
+            Step::Less(n) => (from_start.saturating_sub(n), from_end.saturating_sub(n)),
+        };
+        self.rebuild();
+        true
+    }
+
     pub fn rebuild(&mut self) {
         self.comment_rows = layout(&self.comments, &self.files, self.wrap_width);
-        self.rows = build_rows(&self.files, &self.collapsed, &self.comment_rows);
+        self.rows = build_rows(
+            &self.files,
+            &self.collapsed,
+            &self.comment_rows,
+            &self.gaps,
+            &self.expanded,
+        );
         if self.cursor >= self.rows.len() {
             self.cursor = self.rows.len().saturating_sub(1);
         }
@@ -524,6 +677,9 @@ impl App {
                 }
             }
             Action::ToggleCollapse => self.toggle_collapse(),
+            Action::Expand(step) => {
+                self.expand_gap(step);
+            }
             Action::ToggleHelp => self.show_help = !self.show_help,
             // One key, innermost first. The reviewer's model of Esc is "get me
             // out of whatever this is", and it must never reach "out of krit"
@@ -917,6 +1073,21 @@ impl App {
     }
 
     fn toggle_collapse(&mut self) {
+        // On a gap, the same key means the same thing one level down: fold or
+        // unfold the run under the cursor rather than the file around it. A
+        // reviewer who has opened a gap to read it wants a way to put it back
+        // that isn't pressing `-` eleven times.
+        match self.rows.get(self.cursor) {
+            Some(Row::Expand { .. }) => {
+                self.expand_gap(Step::All);
+                return;
+            }
+            Some(Row::Context { .. }) => {
+                self.expand_gap(Step::None);
+                return;
+            }
+            _ => {}
+        }
         let Some(path) = self.current_file().map(|i| self.files[i].path.clone()) else {
             return;
         };
@@ -1009,6 +1180,12 @@ fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
         // line-wise — and here it always is.
         (KeyCode::Char('v'), false) | (KeyCode::Char('V'), false) => Action::ToggleVisual,
         (KeyCode::Char('?'), false) => Action::ToggleHelp,
+        // Same physical key shifted and unshifted, so they mean the same thing;
+        // binding them differently is how a reviewer expands twice by accident.
+        (KeyCode::Char('+'), false) | (KeyCode::Char('='), false) => {
+            Action::Expand(Step::More(EXPAND_STEP))
+        }
+        (KeyCode::Char('-'), false) => Action::Expand(Step::Less(EXPAND_STEP)),
         _ => Action::None,
     };
     (action, false)
@@ -1038,6 +1215,7 @@ mod tests {
             repo_name: "krit".into(),
             branch: "main".into(),
             custom_mode: false,
+            file_contents: Default::default(),
             untracked_files: Vec::new(),
         }
     }
@@ -1745,6 +1923,89 @@ mod tests {
             end_column: None,
             selected_text: None,
         }
+    }
+
+    /// `PATCH` with b.rs's text attached, so its two hunks have real gaps
+    /// around them.
+    fn payload_with_text(patch: &str) -> DiffPayload {
+        let lines: Vec<String> = (1..=40).map(|n| format!("line {n}")).collect();
+        let mut payload = payload(patch);
+        payload.file_contents.insert(
+            "b.rs".into(),
+            crate::client::FileSides {
+                new: crate::client::SideText {
+                    contents: Some(lines.join("\n")),
+                    ..Default::default()
+                },
+            },
+        );
+        payload
+    }
+
+    #[test]
+    fn an_opened_gap_survives_the_refetch_that_follows_every_save() {
+        // The TUI refetches on every write and on every file the agent
+        // touches, so an expansion that reset each time would be unusable —
+        // the reviewer would be reading a gap that folded up under them.
+        let mut app = App::default();
+        app.load(&payload_with_text(PATCH), 20);
+        let expand = app
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Expand { .. }))
+            .expect("b.rs has gaps around its hunks");
+        app.cursor = expand;
+        assert!(app.expand_gap(Step::More(3)));
+        let opened = app
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Context { .. }))
+            .count();
+        assert!(opened > 0, "the gap opened");
+
+        app.load(&payload_with_text(PATCH), 20);
+        assert_eq!(
+            app.rows
+                .iter()
+                .filter(|r| matches!(r, Row::Context { .. }))
+                .count(),
+            opened,
+            "the refetch folded it back up"
+        );
+    }
+
+    #[test]
+    fn a_gap_with_no_text_behind_it_says_so_rather_than_doing_nothing() {
+        // An oversize or binary side is a refusal, not an error — but a row
+        // that silently declines to open looks exactly like a broken key.
+        let mut app = App::default();
+        let mut payload = payload(PATCH);
+        payload.file_contents.insert(
+            "b.rs".into(),
+            crate::client::FileSides {
+                new: crate::client::SideText {
+                    oversize: true,
+                    ..Default::default()
+                },
+            },
+        );
+        app.load(&payload, 20);
+        let expand = app
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Expand { .. }))
+            .expect("the row is still drawn — it is where the reason is said");
+        let Some(Row::Expand { file, gap }) = app.rows.get(expand).copied() else {
+            unreachable!()
+        };
+        assert_eq!(
+            app.gap_state(file, gap).unwrap().1,
+            Some("file too large to expand")
+        );
+        // And the key declines rather than pretending.
+        app.cursor = expand;
+        assert!(!app.expand_gap(Step::More(3)));
+        assert!(!app.rows.iter().any(|r| matches!(r, Row::Context { .. })));
     }
 
     #[test]

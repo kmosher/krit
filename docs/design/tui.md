@@ -45,7 +45,7 @@ they carry:
 | --- | --- |
 | Split / unified diff | Both; auto-fall-back to unified under ~120 columns |
 | Syntax highlighting | `syntect` + `two-face`'s bundled themes |
-| Hunk expansion | Already served: `fileContents` carries both sides per file |
+| Hunk expansion | Done — `fileContents` carries both sides per file |
 | File tree with change-type icons | Distinct ASCII sigils, not just color |
 | Character-range comments | Free from mouse coords; visual mode for keyboard |
 | Comment / reply / resolve / queue | Plain API calls |
@@ -279,8 +279,10 @@ exists and the composer could hydrate from it, which is worth having in a pane
 that gets closed and reopened. Two clients on one slot is last-writer-wins, so
 a TUI and a browser open on the same review would not see each other type.
 
-**Phase 2 — parity polish.** Split view with the narrow-terminal fallback,
-syntax highlighting, hunk expansion from the bundled `fileContents`, viewed
+**Phase 2 — parity polish.** In progress. Hunk expansion is **done**: the gaps
+between hunks open a few lines at a time from both edges (`+` / `-`, `z` for all
+of it), out of the `fileContents` every diff response already carries. Still to
+do: split view with the narrow-terminal fallback, syntax highlighting, viewed
 state via `/api/viewed`, the stale-file indicators, refresh modes, the
 degraded-color paths.
 

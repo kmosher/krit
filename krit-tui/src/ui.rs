@@ -602,7 +602,54 @@ fn render_row<'a>(
             ));
             Line::from(spans)
         }
+        // Drawn exactly like a context line, gutters and all, because that is
+        // what it is — the only difference is where the text came from. A
+        // different shape here would make expanded lines read as an annotation
+        // rather than as the file.
+        Row::Context { file, gap, line } => {
+            let (text, old) = app.context_line(file, gap, line).unwrap_or(("", None));
+            let body = expand_tabs(text, app.tab_size);
+            let visible = slice_columns(&body, app.h_scroll, text_width);
+            let gutter_style = theme.dim().patch(cursor);
+            let mut spans = vec![
+                Span::styled(fit_columns(&num(old), gutter), gutter_style),
+                Span::styled(" ", gutter_style),
+                Span::styled(fit_columns(&num(Some(line)), gutter), gutter_style),
+                Span::styled("   ", Style::default().patch(cursor)),
+            ];
+            spans.extend(marked_spans(
+                &visible,
+                Style::default().patch(cursor),
+                app.h_scroll,
+                text_width,
+                marks,
+            ));
+            Line::from(spans)
+        }
+        Row::Expand { file, gap } => {
+            let (hidden, refusal) = app.gap_state(file, gap).unwrap_or((0, None));
+            let text = match refusal {
+                // Named rather than left as a row that does nothing: a gap that
+                // cannot open looks exactly like one that is broken.
+                Some(why) => format!("   ⋯ {hidden} unchanged line{} — {why}", plural(hidden)),
+                // The keys are named here rather than in the footer because
+                // this is the only row they do anything on, and a footer that
+                // listed every contextual key would be all of them.
+                None => format!(
+                    "   ⋯ {hidden} unchanged line{}  ·  + more  ·  z all",
+                    plural(hidden)
+                ),
+            };
+            Line::from(Span::styled(
+                fit_columns(&text, pane_width),
+                theme.dim().patch(whole).patch(cursor),
+            ))
+        }
     }
+}
+
+fn plural(n: u32) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 /// The code column, split at the selection's edges.
@@ -675,7 +722,8 @@ fn help<'a>() -> (Paragraph<'a>, u16, u16) {
         Line::from("  ] / [             next / previous file"),
         Line::from("  h / l, 0          scroll sideways, reset"),
         Line::from("  } / {             next / previous comment"),
-        Line::from("  z, enter          collapse the current file"),
+        Line::from("  z, enter          collapse the file, or the gap under it"),
+        Line::from("  + / -             open / close a gap between hunks"),
         Line::from("  tab               move between panes"),
         Line::from("  f                 show / hide the file list"),
         Line::from("  m                 release the mouse to the terminal"),
@@ -746,6 +794,7 @@ mod tests {
                 repo_name: "krit".into(),
                 branch: "main".into(),
                 custom_mode: false,
+                file_contents: Default::default(),
                 untracked_files: vec!["notes.md".into()],
             },
             10,

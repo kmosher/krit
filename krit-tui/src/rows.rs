@@ -10,7 +10,7 @@
 
 use crate::comments::CommentRows;
 use crate::patch::{FileDiff, LineKind};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
@@ -40,8 +40,85 @@ pub enum Row {
         comment: usize,
         line: usize,
     },
+    /// An unchanged line the reviewer opened out of the space between two
+    /// hunks. `line` is its **new-file** number, which is the only number the
+    /// gap knows for certain; the old-file one comes from the gap's `delta`.
+    Context {
+        file: usize,
+        gap: usize,
+        line: u32,
+    },
+    /// The "⋯ N lines" row standing in for whatever is still folded away.
+    /// One per gap, and it survives until the gap is fully open — expanding
+    /// from both edges leaves it in the middle, which is what makes stepping
+    /// in from either side legible.
+    Expand {
+        file: usize,
+        gap: usize,
+    },
     /// One blank line between files, so the headers don't collide.
     Gap,
+}
+
+/// A run of unchanged lines between two hunks, in new-file numbering.
+///
+/// Named separately from the hunks because a gap is what the patch *doesn't*
+/// carry: its text comes from `fileContents`, not from the diff, and the whole
+/// point of expansion is to read lines git had no reason to send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GapRange {
+    /// First and last new-file line in the gap, inclusive.
+    pub new_start: u32,
+    pub new_end: u32,
+    /// `new_line - old_line` for every line here. Constant across a gap: no
+    /// line was added or removed inside it, which is what makes it a gap.
+    pub delta: i64,
+}
+
+impl GapRange {
+    pub fn len(&self) -> u32 {
+        self.new_end.saturating_sub(self.new_start) + 1
+    }
+
+    pub fn old_line(&self, new_line: u32) -> Option<u32> {
+        u32::try_from(new_line as i64 - self.delta)
+            .ok()
+            .filter(|n| *n > 0)
+    }
+}
+
+/// Every gap in a file, including the ones before the first hunk and after the
+/// last. `total_lines` is the new side's length; without it the trailing gap
+/// cannot be sized and the end of the file is unreachable.
+///
+/// Returned in file order and indexed by position, because that index is what
+/// the expansion state is keyed on — a gap identified by its line numbers would
+/// lose the reviewer's expansions the moment an edit above it shifted them.
+pub fn gaps_of(file: &FileDiff, total_lines: u32) -> Vec<GapRange> {
+    let mut gaps = Vec::new();
+    let mut cursor = 1u32; // first new-file line not yet covered by a hunk
+    let mut delta = 0i64;
+    for hunk in &file.hunks {
+        if hunk.new_start > cursor {
+            gaps.push(GapRange {
+                new_start: cursor,
+                new_end: hunk.new_start - 1,
+                // The lines just before a hunk share that hunk's offset.
+                delta: hunk.new_start as i64 - hunk.old_start as i64,
+            });
+        }
+        cursor = hunk.new_start + hunk.new_len;
+        delta = (hunk.new_start as i64 + hunk.new_len as i64)
+            - (hunk.old_start as i64 + hunk.old_len as i64);
+    }
+    if total_lines >= cursor {
+        gaps.push(GapRange {
+            new_start: cursor,
+            new_end: total_lines,
+            delta,
+        });
+    }
+    gaps
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,7 +137,9 @@ impl Row {
             | Row::Meta { file, .. }
             | Row::Hunk { file, .. }
             | Row::Code { file, .. }
-            | Row::Comment { file, .. } => Some(file),
+            | Row::Comment { file, .. }
+            | Row::Context { file, .. }
+            | Row::Expand { file, .. } => Some(file),
             Row::Gap => None,
         }
     }
@@ -82,6 +161,8 @@ pub fn build_rows(
     files: &[FileDiff],
     collapsed: &HashSet<String>,
     comments: &CommentRows,
+    gaps: &HashMap<String, Vec<GapRange>>,
+    expanded: &HashMap<(String, usize), Opened>,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     let push_comments = |rows: &mut Vec<Row>, file: usize, which: &[usize]| {
@@ -123,7 +204,26 @@ pub fn build_rows(
             });
             continue;
         }
+        // A gap sits before the hunk that follows it, and the trailing one
+        // after the last — the same order they occupy in the file, so the row
+        // list reads top to bottom whatever is open.
+        let file_gaps = gaps.get(&file.path).map(Vec::as_slice).unwrap_or(&[]);
+        let mut gi = 0usize;
+        let mut next_line = 1u32;
         for (hi, hunk) in file.hunks.iter().enumerate() {
+            if file_gaps
+                .get(gi)
+                .is_some_and(|g| g.new_start == next_line && g.new_end < hunk.new_start)
+            {
+                push_gap(
+                    &mut rows,
+                    fi,
+                    gi,
+                    file_gaps[gi],
+                    expanded.get(&(file.path.clone(), gi)),
+                );
+                gi += 1;
+            }
             rows.push(Row::Hunk { file: fi, hunk: hi });
             for li in 0..hunk.lines.len() {
                 rows.push(Row::Code {
@@ -133,9 +233,57 @@ pub fn build_rows(
                 });
                 push_comments(&mut rows, fi, comments.after_line(fi, hi, li));
             }
+            next_line = hunk.new_start + hunk.new_len;
+        }
+        if let Some(&gap) = file_gaps.get(gi) {
+            push_gap(
+                &mut rows,
+                fi,
+                gi,
+                gap,
+                expanded.get(&(file.path.clone(), gi)),
+            );
         }
     }
     rows
+}
+
+/// How much of a gap the reviewer has opened, from each end.
+pub type Opened = (u32, u32);
+
+/// Rows for one gap: whatever is open at the top, the "⋯" row while anything
+/// is still folded, then whatever is open at the bottom.
+fn push_gap(
+    rows: &mut Vec<Row>,
+    file: usize,
+    gap: usize,
+    range: GapRange,
+    opened: Option<&Opened>,
+) {
+    let (from_start, from_end) = opened.copied().unwrap_or((0, 0));
+    // Clamped against each other rather than only against the length: two
+    // edges creeping toward the middle must meet exactly once, or the last
+    // step renders a line twice and the row model disagrees with the file.
+    let len = range.len();
+    let from_start = from_start.min(len);
+    let from_end = from_end.min(len - from_start);
+    for n in 0..from_start {
+        rows.push(Row::Context {
+            file,
+            gap,
+            line: range.new_start + n,
+        });
+    }
+    if from_start + from_end < len {
+        rows.push(Row::Expand { file, gap });
+    }
+    for n in (0..from_end).rev() {
+        rows.push(Row::Context {
+            file,
+            gap,
+            line: range.new_end - n,
+        });
+    }
 }
 
 /// How many comments a file holds, laid out or not — what the collapsed note
@@ -280,7 +428,13 @@ mod tests {
 
     fn rows_of(patch: &str) -> (Vec<crate::patch::FileDiff>, Vec<Row>) {
         let files = parse_patch(patch, &[]);
-        let rows = build_rows(&files, &HashSet::new(), &CommentRows::default());
+        let rows = build_rows(
+            &files,
+            &HashSet::new(),
+            &CommentRows::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         (files, rows)
     }
 
@@ -351,7 +505,13 @@ mod tests {
         // TWO_FILES: a.rs new-side line 1 is the "+y" row (hunk 0, line 1).
         let files = parse_patch(TWO_FILES, &[]);
         let comments = crate::comments::layout(&[comment("a.rs", 1)], &files, 60);
-        let rows = build_rows(&files, &HashSet::new(), &comments);
+        let rows = build_rows(
+            &files,
+            &HashSet::new(),
+            &comments,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let at = rows
             .iter()
             .position(|r| matches!(r, Row::Comment { .. }))
@@ -374,7 +534,13 @@ mod tests {
     fn a_comment_outside_every_hunk_renders_under_the_file_header() {
         let files = parse_patch(TWO_FILES, &[]);
         let comments = crate::comments::layout(&[comment("a.rs", 900)], &files, 60);
-        let rows = build_rows(&files, &HashSet::new(), &comments);
+        let rows = build_rows(
+            &files,
+            &HashSet::new(),
+            &comments,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let at = rows
             .iter()
             .position(|r| matches!(r, Row::Comment { .. }))
@@ -390,7 +556,13 @@ mod tests {
         let files = parse_patch(TWO_FILES, &[]);
         let comments = crate::comments::layout(&[comment("a.rs", 1)], &files, 60);
         let collapsed: HashSet<String> = ["a.rs".to_string()].into_iter().collect();
-        let rows = build_rows(&files, &collapsed, &comments);
+        let rows = build_rows(
+            &files,
+            &collapsed,
+            &comments,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(!rows.iter().any(|r| r.comment().is_some()));
         assert_eq!(comments_in(&files, 0, &comments), 1);
         assert_eq!(comments_in(&files, 1, &comments), 0);
@@ -400,7 +572,13 @@ mod tests {
     fn a_collapsed_file_keeps_its_header_so_it_stays_navigable() {
         let files = parse_patch(TWO_FILES, &[]);
         let collapsed: HashSet<String> = ["a.rs".to_string()].into_iter().collect();
-        let rows = build_rows(&files, &collapsed, &CommentRows::default());
+        let rows = build_rows(
+            &files,
+            &collapsed,
+            &CommentRows::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(rows[0], Row::File { file: 0 });
         assert_eq!(
             rows[1],
@@ -511,5 +689,145 @@ mod tests {
         assert_eq!(line_marker(LineKind::Addition), '+');
         assert_eq!(line_marker(LineKind::Deletion), '-');
         assert_eq!(line_marker(LineKind::Context), ' ');
+    }
+
+    /// Two hunks with unchanged runs before, between and after them, and an
+    /// old/new offset that is not zero — a diff whose line numbers agree hides
+    /// every mistake `delta` can make.
+    const SPACED: &str = "diff --git a/a.rs b/a.rs\n\
+                          @@ -10,2 +10,3 @@\n\
+                          \x20keep\n\
+                          +added\n\
+                          \x20tail\n\
+                          @@ -30,1 +31,1 @@\n\
+                          -was\n\
+                          +is";
+
+    #[test]
+    fn a_files_gaps_are_the_lines_no_hunk_covers() {
+        let files = parse_patch(SPACED, &[]);
+        let gaps = gaps_of(&files[0], 60);
+        assert_eq!(gaps.len(), 3, "before, between, after: {gaps:?}");
+
+        // Lines 1..9 precede the first hunk, which starts at 10 on both sides.
+        assert_eq!(gaps[0].new_start, 1);
+        assert_eq!(gaps[0].new_end, 9);
+        assert_eq!(gaps[0].old_line(5), Some(5));
+
+        // The first hunk added a line, so everything after it is one further
+        // down the new file than the old. Getting this wrong renders the right
+        // text against the wrong old number, which reads as a plausible line.
+        assert_eq!(gaps[1].new_start, 13);
+        assert_eq!(gaps[1].new_end, 30);
+        assert_eq!(gaps[1].old_line(13), Some(12));
+
+        assert_eq!(gaps[2].new_start, 32);
+        assert_eq!(gaps[2].new_end, 60);
+        assert_eq!(gaps[2].old_line(32), Some(31));
+    }
+
+    #[test]
+    fn a_hunk_that_starts_at_line_one_has_no_gap_before_it() {
+        let files = parse_patch(TWO_FILES, &[]);
+        let gaps = gaps_of(&files[0], 2);
+        assert_eq!(gaps, Vec::new(), "the hunk covers the whole file");
+    }
+
+    #[test]
+    fn opening_a_gap_from_both_edges_meets_in_the_middle_exactly_once() {
+        // The two edges creep toward each other, and the row model has to stay
+        // a faithful list of the file: a line rendered twice, or skipped, is a
+        // diff that disagrees with itself and nothing on screen says so.
+        let files = parse_patch(SPACED, &[]);
+        let gaps: HashMap<String, Vec<GapRange>> =
+            [("a.rs".to_string(), gaps_of(&files[0], 60))].into();
+        let range = gaps["a.rs"][0];
+        assert_eq!(range.len(), 9);
+
+        for open in 0..=12u32 {
+            let expanded: HashMap<(String, usize), Opened> =
+                [(("a.rs".to_string(), 0), (open, open))].into();
+            let rows = build_rows(
+                &files,
+                &HashSet::new(),
+                &CommentRows::default(),
+                &gaps,
+                &expanded,
+            );
+            let mut shown: Vec<u32> = rows
+                .iter()
+                .filter_map(|r| match *r {
+                    Row::Context { gap: 0, line, .. } => Some(line),
+                    _ => None,
+                })
+                .collect();
+            let before = shown.len();
+            shown.sort_unstable();
+            shown.dedup();
+            assert_eq!(before, shown.len(), "a line rendered twice at open={open}");
+            assert!(
+                shown.len() as u32 <= range.len(),
+                "more lines than the gap holds at open={open}"
+            );
+            let still_folded = rows
+                .iter()
+                .any(|r| matches!(*r, Row::Expand { gap: 0, .. }));
+            assert_eq!(
+                still_folded,
+                (shown.len() as u32) < range.len(),
+                "the ⋯ row must be there exactly while something is hidden (open={open})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_gap_reads_top_to_bottom() {
+        let files = parse_patch(SPACED, &[]);
+        let gaps: HashMap<String, Vec<GapRange>> =
+            [("a.rs".to_string(), gaps_of(&files[0], 60))].into();
+        let expanded: HashMap<(String, usize), Opened> = [(("a.rs".to_string(), 0), (2, 3))].into();
+        let rows = build_rows(
+            &files,
+            &HashSet::new(),
+            &CommentRows::default(),
+            &gaps,
+            &expanded,
+        );
+        let shown: Vec<Row> = rows
+            .iter()
+            .copied()
+            .filter(|r| matches!(r, Row::Context { gap: 0, .. } | Row::Expand { gap: 0, .. }))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                Row::Context {
+                    file: 0,
+                    gap: 0,
+                    line: 1
+                },
+                Row::Context {
+                    file: 0,
+                    gap: 0,
+                    line: 2
+                },
+                Row::Expand { file: 0, gap: 0 },
+                Row::Context {
+                    file: 0,
+                    gap: 0,
+                    line: 7
+                },
+                Row::Context {
+                    file: 0,
+                    gap: 0,
+                    line: 8
+                },
+                Row::Context {
+                    file: 0,
+                    gap: 0,
+                    line: 9
+                },
+            ]
+        );
     }
 }
