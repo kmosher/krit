@@ -12,7 +12,7 @@
 use crate::app::{App, Focus, Panes, Status};
 use crate::comments::{CommentAnchor, CommentLine};
 use crate::compose::Composer;
-use crate::highlight::Run;
+use crate::highlight::{Depth, Run, depth_from_env};
 use crate::patch::{ChangeKind, LineKind};
 use crate::rows::{
     MARKER_COLS, Note, Row, Side, comments_in, line_marker, row_window, split_half_width,
@@ -32,6 +32,11 @@ const FILE_PANE_WIDTH: u16 = 34;
 
 pub struct Theme {
     pub color: bool,
+    /// How much color there is to spend, which the tints need and the rest of
+    /// this module does not: a foreground the terminal cannot show degrades to
+    /// something readable on its own, and a *background* it cannot show
+    /// swallows the text sitting on it.
+    pub depth: Depth,
 }
 
 impl Theme {
@@ -43,6 +48,7 @@ impl Theme {
         let dumb = std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false);
         Theme {
             color: !no_color && !dumb,
+            depth: depth_from_env(),
         }
     }
 
@@ -603,10 +609,21 @@ fn render_row<'a>(
             let marker = line_marker(l.kind);
             let body = expand_tabs(&l.text, app.tab_size);
             let visible = slice_columns(&body, app.h_scroll, text_width);
-            let style = match l.kind {
+            let base = match l.kind {
                 LineKind::Addition => theme.fg(Color::Green),
                 LineKind::Deletion => theme.fg(Color::Red),
                 LineKind::Context => Style::default(),
+            };
+            // Tint under, cursor over: the cursor bar is reverse video, and it
+            // has to stay the most obvious thing on the screen whatever the
+            // line beneath it is doing.
+            let tint = match app.tints && theme.color {
+                true => tint_for(l.kind, theme.depth),
+                false => None,
+            };
+            let style = match tint {
+                Some(bg) => base.bg(bg),
+                None => base,
             }
             .patch(cursor);
             let gutter_style = theme.dim().patch(cursor);
@@ -758,6 +775,31 @@ fn plural(n: u32) -> &'static str {
 /// end of a short line — a blank line inside a multi-line drag, or a pointer
 /// released in the empty right-hand side of the pane — has to show as marked,
 /// and there is no text there to carry the attribute.
+/// The background a changed line sits on when tints are on (`t`).
+///
+/// Tints exist because syntax highlighting takes the foreground, which used to
+/// be what said "added" or "removed" — leaving the one-column `+`/`-` marker
+/// carrying the whole distinction. A background says it again without
+/// competing for the color the syntax is using.
+///
+/// Deliberately dark: this sits *behind* theme foregrounds chosen for the
+/// terminal's own background, and a vivid tint drowns them. That is also why
+/// there is no sixteen-color variant — every background available there is
+/// full-intensity, so the honest answer at that depth is no tint at all and a
+/// `+`/`-` that still means what it always did.
+fn tint_for(kind: LineKind, depth: Depth) -> Option<Color> {
+    let (rgb, indexed) = match kind {
+        LineKind::Addition => ((18, 42, 24), 22),
+        LineKind::Deletion => ((56, 22, 26), 52),
+        LineKind::Context => return None,
+    };
+    match depth {
+        Depth::True => Some(Color::Rgb(rgb.0, rgb.1, rgb.2)),
+        Depth::Ansi256 => Some(Color::Indexed(indexed)),
+        Depth::Ansi16 | Depth::None => None,
+    }
+}
+
 /// One code row's text under two overlays: what the syntax says it is, and
 /// what the reviewer is pointing at.
 ///
@@ -778,9 +820,6 @@ fn code_spans<'a>(
     runs: &[Run],
     marks: Option<(usize, usize)>,
 ) -> Vec<Span<'a>> {
-    if runs.is_empty() {
-        return marked_spans(visible, style, h_scroll, text_width, marks);
-    }
     // Cut the visible window wherever either overlay starts or stops, then
     // style each piece from what covers it. Boundaries rather than per-column
     // styling, because a span is what ratatui draws and a themed line is a
@@ -891,6 +930,7 @@ fn help<'a>() -> (Paragraph<'a>, u16, u16) {
         Line::from("  tab               move between panes"),
         Line::from("  f                 show / hide the file list"),
         Line::from("  s                 split / unified (needs a wide pane)"),
+        Line::from("  t                 background tints on changed lines"),
         Line::from("  V                 tick this file off as viewed"),
         Line::from("  m                 release the mouse to the terminal"),
         Line::from("  wheel, click      scroll / put the cursor there"),
@@ -987,7 +1027,10 @@ mod tests {
 
     fn render_with_panes(app: &App, width: u16, height: u16) -> (Vec<String>, Panes) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let theme = Theme { color: true };
+        let theme = Theme {
+            color: true,
+            depth: Depth::True,
+        };
         let mut panes = Panes::default();
         terminal
             .draw(|f| panes = draw(f, app, &theme, false))
@@ -1179,7 +1222,10 @@ mod tests {
     #[test]
     fn without_color_every_state_is_still_readable() {
         let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
-        let theme = Theme { color: false };
+        let theme = Theme {
+            color: false,
+            depth: Depth::None,
+        };
         let app = app();
         terminal
             .draw(|f| {
@@ -1537,7 +1583,10 @@ mod tests {
         assert!(!plain.contains("shift-enter"), "{plain}");
 
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
-        let theme = Theme { color: true };
+        let theme = Theme {
+            color: true,
+            depth: Depth::True,
+        };
         terminal
             .draw(|f| {
                 draw(f, &app, &theme, true);

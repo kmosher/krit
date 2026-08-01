@@ -73,6 +73,7 @@ pub enum Action {
     /// horizontal wheel notch usually is not. See `H_WHEEL_INTENT`.
     WheelLeft,
     WheelRight,
+    ToggleTints,
     ResetHScroll,
     ToggleFocus,
     ToggleCollapse,
@@ -342,6 +343,11 @@ pub struct App {
     /// Horizontal wheel notches seen in a row, signed by direction and zeroed
     /// by any vertical notch. See `H_WHEEL_INTENT`.
     pub h_wheel: i32,
+    /// Whether a changed line gets a background tint behind its syntax
+    /// colors. On by default: with highlighting owning the foreground, the
+    /// `+`/`-` marker is otherwise the only thing separating an addition from
+    /// context, which is a lot of weight for one column.
+    pub tints: bool,
     /// Syntax colors, computed off the draw loop by the fetcher and carried in
     /// on the payload. Empty is the normal state under `NO_COLOR` and for
     /// every file whose text the server withheld.
@@ -383,6 +389,7 @@ impl Default for App {
             offset: 0,
             h_scroll: 0,
             h_wheel: 0,
+            tints: true,
             highlights: Default::default(),
             focus: Focus::Diff,
             repo: String::new(),
@@ -934,6 +941,7 @@ impl App {
                 }
             }
             Action::ToggleMouse => self.mouse = !self.mouse,
+            Action::ToggleTints => self.tints = !self.tints,
             Action::NextComment => self.jump(&comment_rows(&self.rows), true),
             Action::PrevComment => self.jump(&comment_rows(&self.rows), false),
             Action::FocusFile(index) => {
@@ -1527,6 +1535,7 @@ fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
         (KeyCode::Char('v'), false) => Action::ToggleVisual,
         (KeyCode::Char('?'), false) => Action::ToggleHelp,
         (KeyCode::Char('s'), false) => Action::ToggleSplit,
+        (KeyCode::Char('t'), false) => Action::ToggleTints,
         // `v` alone is the visual mode — it is already line-wise, so `V` was a
         // synonym rather than a second granularity, and this is the key the
         // browser's checkbox is labelled with.
