@@ -347,6 +347,34 @@ is a guarantee — the residual race is the length of a fold:
   so it cannot save a screen of short lines on its own; the footer therefore
   names the column whenever `h_scroll` is non-zero, and names it first, since
   it is the only thing on screen that can explain a pane of bare gutters.
+- **Syntax highlighting parses whole files, never hunks** (`highlight.rs`).
+  Syntax is stateful down a file — a block comment, a raw string, a heredoc all
+  outlive the line that opens them — so a hunk highlighted on its own starts
+  from a parse state nobody established, and one opening inside a comment
+  renders as code. Not an error and not a blank: confidently wrong colors on
+  the lines being read most closely. `/api/diff` already bundles
+  `fileContents` for gap expansion and has always sent **both** sides, so the
+  fix cost one field (`FileSides::old`) and no server change — a deletion
+  row's text belongs to the pre-image. Five things are load-bearing:
+  - **It hangs off `fetch_diff`, not the fetcher thread.** Startup fetches its
+    first diff on the main thread, so a thread-owned highlighter produced a
+    review that gained its colors only once an agent happened to touch a file
+    — which reads as a broken highlighter, not a missing call.
+  - **Alpha below 255 is a palette index, not opacity.** bat's `ansi` theme,
+    which two-face ships, encodes palette slots by dropping alpha; read as RGB
+    its first color is black and the whole review goes invisible.
+  - **Runs are display columns**, sharing the tab rule with `expand_tabs`
+    through `text::cluster_advance`. Two copies of that arithmetic would not
+    fail — they would tint beside the text, and only on lines holding a tab.
+  - **A run set whose extent disagrees with the patch line is refused.** That
+    means the file moved under the response, and colors are the one thing here
+    that can be wrong without looking wrong.
+  - **Tints (`t`) exist because highlighting took the foreground**, which used
+    to be what said added or removed, leaving the one-column `+`/`-` marker
+    carrying it alone. There is no 16-color variant: every background at that
+    depth is full-intensity and would drown the syntax sitting on it, so the
+    marker goes back to carrying it. `Theme` holds the color depth for this
+    and nothing else.
 - **A gap is what the patch does not carry, so its text comes from
   `fileContents`** — bundled in every `/api/diff` response, which is what makes
   expanding one a local operation rather than a request per gap. Three things

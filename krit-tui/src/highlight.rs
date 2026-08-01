@@ -69,14 +69,12 @@ pub fn depth_from_env() -> Depth {
     if std::env::var_os("NO_COLOR").is_some() {
         return Depth::None;
     }
-    match std::env::var("TERM").as_deref() {
-        // The one terminfo name that means "assume nothing".
-        Ok("dumb") => return Depth::None,
-        _ => {}
+    // The one terminfo name that means "assume nothing".
+    if let Ok("dumb") = std::env::var("TERM").as_deref() {
+        return Depth::None;
     }
-    match std::env::var("COLORTERM").as_deref() {
-        Ok("truecolor") | Ok("24bit") => return Depth::True,
-        _ => {}
+    if let Ok("truecolor") | Ok("24bit") = std::env::var("COLORTERM").as_deref() {
+        return Depth::True;
     }
     match std::env::var("TERM") {
         Ok(term) if term.contains("256") => Depth::Ansi256,
@@ -362,5 +360,117 @@ impl Highlights {
             None if width == 0 => Some(runs),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::{display_width, expand_tabs};
+
+    #[test]
+    fn a_color_below_full_alpha_is_a_palette_index_not_an_rgb_value() {
+        // The trap that paints a whole review black. bat's `ansi` theme, which
+        // two-face ships, encodes palette slots by dropping alpha below opaque,
+        // so reading one as RGB gives near-black for every scope in the file.
+        let h = Highlighter::new(Depth::True, Some("ansi")).expect("color is on");
+        let indexed = syntect::highlighting::Color {
+            r: 4,
+            g: 0,
+            b: 0,
+            a: 1,
+        };
+        assert_eq!(h.color(indexed), Color::Indexed(4));
+        let opaque = syntect::highlighting::Color {
+            r: 10,
+            g: 20,
+            b: 30,
+            a: 255,
+        };
+        assert_eq!(h.color(opaque), Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn no_color_declines_to_build_a_highlighter_at_all() {
+        // Not merely "draw it grey": loading the syntax set is nearly all of
+        // what highlighting costs, and under NO_COLOR none of it is spendable.
+        assert!(Highlighter::new(Depth::None, None).is_none());
+    }
+
+    #[test]
+    fn an_unknown_theme_name_costs_the_colors_asked_for_not_the_review() {
+        assert!(Highlighter::new(Depth::True, Some("no such theme")).is_some());
+    }
+
+    #[test]
+    fn a_theme_name_matches_however_it_was_typed() {
+        assert!(theme_named("TwoDark").is_some());
+        assert_eq!(
+            theme_named("solarized-dark"),
+            theme_named("Solarized (dark)")
+        );
+        assert_eq!(theme_named("ANSI"), theme_named("ansi"));
+    }
+
+    #[test]
+    fn sixteen_colors_forces_the_ansi_theme_whatever_was_asked_for() {
+        // A themed color downsampled to sixteen is a guess about a palette we
+        // cannot see; `ansi` names the slots and lets the terminal decide.
+        let h = Highlighter::new(Depth::Ansi16, Some("GruvboxDark")).expect("color is on");
+        let two_face = two_face::theme::extra();
+        assert_eq!(
+            h.theme.name,
+            two_face
+                .get(theme_named(ANSI_THEME).expect("two-face embeds ansi"))
+                .name
+        );
+    }
+
+    #[test]
+    fn a_run_ends_where_expand_tabs_says_the_line_ends() {
+        // The invariant `cluster_advance` exists for. These two walks are the
+        // renderer's and the highlighter's; if they disagree about a tab, the
+        // tint lands beside the text it belongs to and nothing errors.
+        let h = Highlighter::new(Depth::True, None).expect("color is on");
+        let line = "\tlet x = 1;";
+        let runs = h.file("a.rs", &format!("fn a() {{}}\n{line}\n"), 4);
+        assert_eq!(runs.len(), 2, "one entry per line");
+        assert_eq!(
+            runs[1].last().expect("the line has runs").to,
+            display_width(&expand_tabs(line, 4)),
+        );
+        assert_eq!(runs[1].first().expect("the line has runs").from, 0);
+    }
+
+    #[test]
+    fn a_file_in_no_known_language_highlights_to_nothing() {
+        let h = Highlighter::new(Depth::True, None).expect("color is on");
+        assert!(h.file("a.wobble", "nothing claims this\n", 4).is_empty());
+    }
+
+    #[test]
+    fn runs_are_refused_when_the_patch_and_the_file_disagree_about_the_line() {
+        // The file moved under the response, so every line below the edit is
+        // off by however far it moved. Colors are the one thing here that can
+        // be wrong without looking wrong.
+        let mut hl = Highlights::default();
+        let red = Run {
+            from: 0,
+            to: 5,
+            color: Color::Red,
+            bold: false,
+        };
+        hl.insert("a.rs", vec![vec![red]], Vec::new());
+        assert!(hl.runs("a.rs", Side::New, 1, 5).is_some());
+        assert!(
+            hl.runs("a.rs", Side::New, 1, 9).is_none(),
+            "width disagrees"
+        );
+        assert!(hl.runs("a.rs", Side::Old, 1, 5).is_none(), "other side");
+        assert!(hl.runs("b.rs", Side::New, 1, 5).is_none(), "other file");
+        assert!(
+            hl.runs("a.rs", Side::New, 0, 5).is_none(),
+            "lines are 1-based"
+        );
     }
 }

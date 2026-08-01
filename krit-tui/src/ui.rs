@@ -677,11 +677,19 @@ fn render_row<'a>(
                 Span::styled(fit_columns(&num(Some(line)), gutter), gutter_style),
                 Span::styled("   ", Style::default().patch(cursor)),
             ];
-            spans.extend(marked_spans(
+            // An expanded gap is unchanged text, so it takes syntax colors and
+            // no tint — it is on both sides, and tinting it would say a change
+            // happened where the whole point of the row is that none did.
+            let runs = app
+                .highlights
+                .runs(&app.files[file].path, Side::New, line, display_width(&body))
+                .unwrap_or(&[]);
+            spans.extend(code_spans(
                 &visible,
                 Style::default().patch(cursor),
                 app.h_scroll,
                 text_width,
+                runs,
                 marks,
             ));
             Line::from(spans)
@@ -711,11 +719,16 @@ fn render_row<'a>(
                     Side::New => l.new_line,
                     Side::Old => l.old_line,
                 };
-                let style = match l.kind {
+                let base = match l.kind {
                     LineKind::Addition => theme.fg(Color::Green),
                     LineKind::Deletion => theme.fg(Color::Red),
                     LineKind::Context => Style::default(),
+                };
+                let style = match app.tints && theme.color {
+                    true => tint_for(l.kind, theme.depth),
+                    false => None,
                 }
+                .map_or(base, |bg| base.bg(bg))
                 .patch(cursor);
                 let body = expand_tabs(&l.text, app.tab_size);
                 // Padded to the full half, not just sliced to it. `slice_columns`
@@ -730,7 +743,16 @@ fn render_row<'a>(
                     Span::styled(fit_columns(&num(number), gutter), theme.dim().patch(cursor)),
                     Span::styled(format!(" {} ", line_marker(l.kind)), style),
                 ];
-                spans.extend(marked_spans(&visible, style, app.h_scroll, half, marks));
+                let runs = app
+                    .highlights
+                    .runs(
+                        &app.files[file].path,
+                        which_side,
+                        number.unwrap_or(0),
+                        display_width(&body),
+                    )
+                    .unwrap_or(&[]);
+                spans.extend(code_spans(&visible, style, app.h_scroll, half, runs, marks));
                 spans
             };
             let mut spans = side(pair.left, Side::Old);
@@ -861,34 +883,6 @@ fn code_spans<'a>(
         ));
     }
     out
-}
-
-fn marked_spans<'a>(
-    visible: &str,
-    style: Style,
-    h_scroll: usize,
-    text_width: usize,
-    marks: Option<(usize, usize)>,
-) -> Vec<Span<'a>> {
-    let Some((from, to)) = marks else {
-        return vec![Span::styled(visible.to_string(), style)];
-    };
-    let start = from.saturating_sub(h_scroll).min(text_width);
-    let end = to.saturating_sub(h_scroll).min(text_width);
-    if end <= start {
-        return vec![Span::styled(visible.to_string(), style)];
-    }
-    vec![
-        Span::styled(slice_columns(visible, 0, start), style),
-        Span::styled(
-            fit_columns(&slice_columns(visible, start, end - start), end - start),
-            style.patch(marked()),
-        ),
-        Span::styled(
-            slice_columns(visible, end, text_width.saturating_sub(end)),
-            style,
-        ),
-    ]
 }
 
 fn num(n: Option<u32>) -> String {
@@ -1393,6 +1387,21 @@ mod tests {
         app.apply(Action::ScrollRight(4), 10);
         let screen = render(&app, 100, 12);
         assert!(screen[11].contains("col 4 · 0 reset"), "{:?}", screen[11]);
+    }
+
+    #[test]
+    fn a_sixteen_color_terminal_gets_no_tint_because_every_background_there_is_loud() {
+        // A tint is only worth having if the syntax color sitting on it stays
+        // readable, and at sixteen colors every available background is
+        // full-intensity. The `+`/`-` marker carries the distinction there, as
+        // it did before tints existed.
+        assert!(tint_for(LineKind::Addition, Depth::Ansi16).is_none());
+        assert!(tint_for(LineKind::Deletion, Depth::None).is_none());
+        assert!(tint_for(LineKind::Addition, Depth::True).is_some());
+        assert!(tint_for(LineKind::Deletion, Depth::Ansi256).is_some());
+        // Unchanged text is not a change, so it never gets one — including the
+        // context rows an expanded gap is made of.
+        assert!(tint_for(LineKind::Context, Depth::True).is_none());
     }
 
     fn comment(line: u32, body: &str) -> krit_core::types::ReviewComment {

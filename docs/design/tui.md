@@ -44,7 +44,7 @@ they carry:
 | Web UI | Terminal |
 | --- | --- |
 | Split / unified diff | Done — auto-falls back to unified under a 90-column pane |
-| Syntax highlighting | `syntect` + `two-face`'s bundled themes |
+| Syntax highlighting | Done — `syntect` + `two-face`, whole-file parse, `t` toggles tints |
 | Hunk expansion | Done — `fileContents` carries both sides per file |
 | File tree with change-type icons | Distinct ASCII sigils, not just color |
 | Character-range comments | Free from mouse coords; visual mode for keyboard |
@@ -293,7 +293,7 @@ all of it — out of the `fileContents` every diff response already carries),
 split view with the narrow-terminal fallback (`s`, honouring the shared
 `diffStyle` setting, falling back to unified when the diff *pane* is under 90
 columns), and viewed state (`V`, the same `/api/viewed` the browser's checkbox
-writes). Still to do: syntax highlighting, the stale-file indicators, refresh
+writes). Still to do: the stale-file indicators, refresh
 modes, the degraded-color paths.
 
 **Phase 3 — herdr plugin.** `herdr-plugin.toml` with a `split` pane and
