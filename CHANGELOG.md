@@ -13,6 +13,17 @@ see the warning at the top of the README.
 
 <!-- releases below -->
 
+## 0.11.0 — 2026-08-12
+
+### Changed
+
+- TypeScript 6 → 7 and `@types/node` 25 → 26. No source changes: the whole UI
+  typechecks clean under the new compiler.
+- The test toolchain (`vitest`, `happy-dom`, `@testing-library/*`) is now on
+  carets rather than exact pins, so it picks up patches with the routine
+  dependency refresh.
+
+
 ## 0.10.2 — 2026-08-12
 
 ### Changed
