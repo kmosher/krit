@@ -1,6 +1,6 @@
 {
   "name": "krit-ui",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "private": true,
   "description": "Web UI for krit — embedded into the Rust binary by krit/build.rs",
   "type": "module",
