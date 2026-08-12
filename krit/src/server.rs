@@ -2060,11 +2060,11 @@ mod tests {
 
         // 401, not a 404 or a hang: the caller learns what is wrong.
         let missing = ureq::get(&base).call().unwrap_err();
-        assert!(matches!(&missing, ureq::Error::Status(401, _)), "{missing}");
+        assert!(matches!(missing, ureq::Error::StatusCode(401)), "{missing}");
         let wrong = ureq::get(&format!("{base}?krit_token=wrong"))
             .call()
             .unwrap_err();
-        assert!(matches!(&wrong, ureq::Error::Status(401, _)), "{wrong}");
+        assert!(matches!(wrong, ureq::Error::StatusCode(401)), "{wrong}");
 
         // The token in the URL is accepted and handed back as a cookie, which
         // is the whole reason the UI needs no change.
@@ -2072,7 +2072,12 @@ mod tests {
             .call()
             .expect("the minted token is accepted");
         assert_eq!(ok.status(), 200);
-        let cookie = ok.header("set-cookie").expect("token becomes a cookie");
+        let cookie = ok
+            .headers()
+            .get("set-cookie")
+            .expect("token becomes a cookie")
+            .to_str()
+            .expect("a cookie is ascii");
         assert!(
             cookie.starts_with(&format!("krit_token={TEST_TOKEN}")),
             "{cookie}"
@@ -2081,7 +2086,7 @@ mod tests {
 
         // And that cookie alone authorizes the next request.
         let replayed = ureq::get(&base)
-            .set("Cookie", &format!("krit_token={TEST_TOKEN}"))
+            .header("Cookie", &format!("krit_token={TEST_TOKEN}"))
             .call()
             .expect("the cookie authorizes later calls");
         assert_eq!(replayed.status(), 200);
@@ -2190,7 +2195,12 @@ mod tests {
         });
 
         ureq::put(&url).send_json(draft.clone()).expect("put lands");
-        let listed: Value = ureq::get(&url).call().unwrap().into_json().unwrap();
+        let listed: Value = ureq::get(&url)
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);
         assert_eq!(listed[0]["body"], "half a thought");
 
@@ -2206,7 +2216,7 @@ mod tests {
             }))
             .unwrap_err();
         assert!(
-            matches!(escaped, ureq::Error::Status(400, _)),
+            matches!(escaped, ureq::Error::StatusCode(400)),
             "a path outside the repo must be refused: {escaped:?}"
         );
 
@@ -2216,10 +2226,16 @@ mod tests {
                 "startLine": 10, "endLine": 12
             }))
             .unwrap()
-            .into_json()
+            .body_mut()
+            .read_json()
             .unwrap();
         assert_eq!(deleted["removed"], true);
-        let after: Value = ureq::get(&url).call().unwrap().into_json().unwrap();
+        let after: Value = ureq::get(&url)
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
         assert!(after.as_array().unwrap().is_empty());
     }
 
@@ -2263,7 +2279,8 @@ mod tests {
             let res: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/diff?{query}"))
                 .call()
                 .expect("the diff lands")
-                .into_json()
+                .body_mut()
+                .read_json()
                 .unwrap();
             res["patch"].as_str().unwrap_or_default().to_string()
         };
@@ -2310,7 +2327,8 @@ mod tests {
                 "endLine": 2, "endColumn": 3,
             }))
             .expect("the delete lands")
-            .into_json()
+            .body_mut()
+            .read_json()
             .unwrap();
         res["undoId"].as_str().unwrap().to_string()
     }
@@ -2352,7 +2370,7 @@ mod tests {
         let err = ureq::post(&format!("http://127.0.0.1:{port}/api/edits/undo"))
             .send_json(json!({"id": undo_id}))
             .unwrap_err();
-        assert!(matches!(&err, ureq::Error::Status(409, _)), "{err}");
+        assert!(matches!(err, ureq::Error::StatusCode(409)), "{err}");
         assert_eq!(
             std::fs::read_to_string(root.join("a.txt")).unwrap(),
             meddled,
@@ -2371,7 +2389,8 @@ mod tests {
                 "body": body, "status": "queued",
             }))
             .expect("the comment lands")
-            .into_json()
+            .body_mut()
+            .read_json()
             .unwrap();
         res["id"].as_str().unwrap().to_string()
     }
@@ -2385,7 +2404,8 @@ mod tests {
         let res: Value = ureq::put(&format!("http://127.0.0.1:{port}/api/comments/{id}"))
             .send_json(json!({"body": "second thoughts", "expectStatus": "queued"}))
             .expect("a queued comment takes the edit")
-            .into_json()
+            .body_mut()
+            .read_json()
             .unwrap();
         assert_eq!(res["body"], "second thoughts");
         assert_eq!(res["status"], "queued", "editing must not post it");
@@ -2407,12 +2427,13 @@ mod tests {
         let err = ureq::put(&format!("http://127.0.0.1:{port}/api/comments/{id}"))
             .send_json(json!({"body": "too late", "expectStatus": "queued"}))
             .unwrap_err();
-        assert!(matches!(&err, ureq::Error::Status(409, _)), "{err}");
+        assert!(matches!(err, ureq::Error::StatusCode(409)), "{err}");
 
         let all: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/comments"))
             .call()
             .unwrap()
-            .into_json()
+            .body_mut()
+            .read_json()
             .unwrap();
         assert_eq!(
             all[0]["body"], "first thoughts",
@@ -2435,7 +2456,8 @@ mod tests {
         let res: Value = ureq::put(&format!("http://127.0.0.1:{port}/api/comments/{id}"))
             .send_json(json!({"status": "resolved"}))
             .expect("an unconditional update still applies")
-            .into_json()
+            .body_mut()
+            .read_json()
             .unwrap();
         assert_eq!(res["status"], "resolved");
         let _ = std::fs::remove_dir_all(&root);

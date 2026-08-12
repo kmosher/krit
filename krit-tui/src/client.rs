@@ -288,11 +288,48 @@ impl Attached {
     }
 }
 
+/// A response body big enough for anything on this wire. ureq caps a body read
+/// at 10 MiB unless told otherwise, and `/api/diff` bundles both sides of every
+/// file's contents — a review of a few large files clears that on its own. The
+/// cap is a defence against a hostile server; this one is on loopback and was
+/// very likely started by us, so the number only has to be larger than a
+/// review.
+const MAX_BODY: u64 = 512 * 1024 * 1024;
+
+/// `http_status_as_error(false)` on every agent: ureq 3's `Error::StatusCode`
+/// carries the code and nothing else, and three call sites below want the
+/// server's own `error` string — which says which field was rejected, where
+/// the status alone sends someone reading server source. Turning the
+/// translation off keeps the response, so a 4xx/5xx arrives as an `Ok` to be
+/// classified by `status()`.
 fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(CONNECT_TIMEOUT)
-        .timeout(timeout)
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
         .build()
+        .into()
+}
+
+/// The server's `error` field, or the raw body when it isn't the shape we
+/// expect — a 500 from something that isn't krit still has something to say.
+fn error_detail(res: &mut ureq::http::Response<ureq::Body>) -> String {
+    let body = res
+        .body_mut()
+        .with_config()
+        .limit(MAX_BODY)
+        .read_to_string()
+        .unwrap_or_default();
+    serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_string))
+        .unwrap_or(body)
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(
+    res: &mut ureq::http::Response<ureq::Body>,
+) -> Result<T, ureq::Error> {
+    res.body_mut().with_config().limit(MAX_BODY).read_json()
 }
 
 /// Ask a server at `base` for its settings. `Some` means something answered
@@ -305,12 +342,14 @@ fn agent(timeout: Duration) -> ureq::Agent {
 /// since taken would still pass — which is why `attach` also checks the
 /// recorded pid.
 fn probe(base: &str) -> Option<Settings> {
-    let value: Value = agent(PROBE_TIMEOUT)
-        .get(&format!("{base}/api/settings"))
+    let mut res = agent(PROBE_TIMEOUT)
+        .get(format!("{base}/api/settings"))
         .call()
-        .ok()?
-        .into_json()
         .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let value: Value = read_json(&mut res).ok()?;
     value.get("defaultTabSize")?;
     Some(Settings::from_json(&value))
 }
@@ -644,8 +683,14 @@ pub fn fetch_diff(base: &str, settings: Settings) -> Result<DiffPayload, String>
         settings.staged, settings.untracked
     );
     match agent(REQUEST_TIMEOUT).get(&url).call() {
-        Ok(res) => res
-            .into_json::<DiffPayload>()
+        // The diff route 500s with a JSON `error` when git itself failed
+        // (a typo'd ref, an unreadable object). That message is the useful
+        // one — the status alone would send someone looking at the server.
+        Ok(mut res) if !res.status().is_success() => {
+            let code = res.status().as_u16();
+            Err(format!("krit returned {code}: {}", error_detail(&mut res)))
+        }
+        Ok(mut res) => read_json::<DiffPayload>(&mut res)
             .map_err(|e| format!("krit sent a diff this client can't read: {e}"))
             // Highlighting hangs off the fetch itself rather than off the
             // fetcher *thread*, because startup fetches its first diff on this
@@ -659,17 +704,6 @@ pub fn fetch_diff(base: &str, settings: Settings) -> Result<DiffPayload, String>
                 }
                 payload
             }),
-        Err(ureq::Error::Status(code, res)) => {
-            // The diff route 500s with a JSON `error` when git itself failed
-            // (a typo'd ref, an unreadable object). That message is the useful
-            // one — the status alone would send someone looking at the server.
-            let body = res.into_string().unwrap_or_default();
-            let detail = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|v| v["error"].as_str().map(str::to_string))
-                .unwrap_or(body);
-            Err(format!("krit returned {code}: {detail}"))
-        }
         Err(err) => Err(format!("cannot reach krit at {url}: {err}")),
     }
 }
@@ -688,8 +722,12 @@ pub fn fetch_diff(base: &str, settings: Settings) -> Result<DiffPayload, String>
 pub fn fetch_viewed(base: &str) -> Result<Vec<String>, String> {
     let url = format!("{base}/api/viewed");
     match agent(REQUEST_TIMEOUT).get(&url).call() {
-        Ok(res) => res
-            .into_json::<Vec<String>>()
+        Ok(mut res) if !res.status().is_success() => Err(format!(
+            "cannot read the viewed list: krit returned {}: {}",
+            res.status().as_u16(),
+            error_detail(&mut res)
+        )),
+        Ok(mut res) => read_json::<Vec<String>>(&mut res)
             .map_err(|e| format!("krit sent a viewed list this client can't read: {e}")),
         Err(err) => Err(format!("cannot read the viewed list: {err}")),
     }
@@ -698,8 +736,12 @@ pub fn fetch_viewed(base: &str) -> Result<Vec<String>, String> {
 pub fn fetch_comments(base: &str) -> Result<Vec<ReviewComment>, String> {
     let url = format!("{base}/api/comments?includeQueued=true");
     match agent(REQUEST_TIMEOUT).get(&url).call() {
-        Ok(res) => res
-            .into_json::<Vec<ReviewComment>>()
+        Ok(mut res) if !res.status().is_success() => Err(format!(
+            "cannot read comments: krit returned {}: {}",
+            res.status().as_u16(),
+            error_detail(&mut res)
+        )),
+        Ok(mut res) => read_json::<Vec<ReviewComment>>(&mut res)
             .map_err(|e| format!("krit sent comments this client can't read: {e}")),
         Err(err) => Err(format!("cannot read comments: {err}")),
     }
@@ -878,19 +920,18 @@ fn send(base: &str, write: &Write) -> Result<String, String> {
     };
     let response = request.send_json(payload);
     match response {
-        Ok(res) => {
-            let value: Value = res.into_json().unwrap_or(Value::Null);
-            Ok(write.note(&value))
-        }
         // The server's own message, not the status code: it says which field
         // was rejected, and 400 alone sends someone reading server source.
-        Err(ureq::Error::Status(code, res)) => {
-            let body = res.into_string().unwrap_or_default();
-            let detail = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|v| v["error"].as_str().map(str::to_string))
-                .unwrap_or(body);
-            Err(format!("krit refused this ({code}): {detail}"))
+        Ok(mut res) if !res.status().is_success() => {
+            let code = res.status().as_u16();
+            Err(format!(
+                "krit refused this ({code}): {}",
+                error_detail(&mut res)
+            ))
+        }
+        Ok(mut res) => {
+            let value: Value = read_json(&mut res).unwrap_or(Value::Null);
+            Ok(write.note(&value))
         }
         Err(err) => Err(format!("cannot reach krit: {err}")),
     }
@@ -1032,16 +1073,22 @@ fn stream_once(url: &str, tx: &Sender<Incoming>) -> StreamOutcome {
     // No overall timeout: the stream is meant to stay open for the life of the
     // review. The connect timeout still applies, so an unreachable server
     // fails fast instead of hanging the retry loop.
-    let request = ureq::AgentBuilder::new()
-        .timeout_connect(CONNECT_TIMEOUT)
+    let request: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
         .build()
+        .into();
+    let res = match request
         .get(url)
-        .set("Accept", "text/event-stream");
-    let res = match request.call() {
-        Ok(res) => res,
-        Err(_) => return StreamOutcome::Dropped { delivered: false },
+        .header("Accept", "text/event-stream")
+        .call()
+    {
+        Ok(res) if res.status().is_success() => res,
+        _ => return StreamOutcome::Dropped { delivered: false },
     };
-    let mut reader = res.into_reader();
+    // `into_reader` is the unlimited one. The body-reading helpers all cap at
+    // 10 MiB, which on a stream meant to stay open for the life of the review
+    // would look like the server closing it.
+    let mut reader = res.into_body().into_reader();
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
     let mut delivered = false;

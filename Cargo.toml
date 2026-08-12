@@ -11,7 +11,12 @@ license = "MIT"
 krit-core = { path = "krit-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ureq = { version = "2", features = ["json"] }
+# No default features: those are rustls and gzip, and every request krit's
+# clients make is plaintext HTTP to a loopback server they usually started
+# themselves. Nothing degrades to plaintext silently: ureq panics on an
+# https:// URI when no TLS provider is compiled in, so a client that grows a
+# remote endpoint has to add the feature back rather than discovering it later.
+ureq = { version = "3", default-features = false, features = ["json"] }
 
 # Profiles are only honored at the workspace root — cargo silently ignores a
 # member's `[profile]`, so this must live here rather than in krit/.

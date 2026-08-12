@@ -92,33 +92,67 @@ impl ApiError {
     }
 }
 
+/// Larger than anything on this wire, and larger than ureq's 10 MiB default —
+/// `/api/diff` bundles both sides of every file's contents, which a review of a
+/// few large files clears on its own. The cap defends against a hostile server;
+/// this one is on loopback.
+const MAX_BODY: u64 = 512 * 1024 * 1024;
+
 fn call_api(base: &str, call: &ApiCall) -> Result<Value, ApiError> {
     let url = format!("{}{}", base, call.path);
-    let req = ureq::request(call.method, &url);
-    let result = match &call.body {
-        Some(b) => req.send_json(b.clone()),
-        None => req.call(),
+    // `http_status_as_error(false)`: ureq's `Error::StatusCode` carries the code
+    // and nothing else, and the server's body is the half of an error worth
+    // printing. Off, a 4xx/5xx arrives as an `Ok` to be classified by `status()`.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    // ureq 3 has no verb-agnostic request function, and the verb here is data
+    // (`ApiCall.method`), so the request is built through the http crate and
+    // run on the agent.
+    let transport = |err: &dyn std::fmt::Display| ApiError::Transport {
+        url: url.clone(),
+        err: err.to_string(),
     };
-    match result {
+    // An empty `Vec`, not `SendBody::none()`: a `none` body has no known
+    // length, so ureq sends it chunked and a bodyless POST goes out carrying a
+    // terminating chunk. A sized body of zero bytes is `Content-Length: 0`,
+    // which is what `a_bodyless_call_sends_no_body` pins.
+    let body = match &call.body {
+        Some(b) => serde_json::to_vec(b).map_err(|e| transport(&e))?,
+        None => Vec::new(),
+    };
+    let mut req = ureq::http::Request::builder().method(call.method).uri(&url);
+    if call.body.is_some() {
+        req = req.header("content-type", "application/json");
+    }
+    let req = req.body(body).map_err(|e| transport(&e))?;
+    let mut res = agent.run(req).map_err(|e| transport(&e))?;
+    if res.status().is_success() {
         // A 2xx with a non-JSON body is still a success: these verbs care
         // that the server acted, not what it echoed back.
-        Ok(res) => Ok(res.into_json::<Value>().unwrap_or(Value::Null)),
-        Err(ureq::Error::Status(code, res)) => {
-            let status_text = res.status_text().to_string();
-            let text = res.into_string().unwrap_or_default();
-            Err(ApiError::Status {
-                code,
-                status_text,
-                method: call.method,
-                url,
-                text,
-            })
-        }
-        Err(err) => Err(ApiError::Transport {
-            url,
-            err: err.to_string(),
-        }),
+        return Ok(res
+            .body_mut()
+            .with_config()
+            .limit(MAX_BODY)
+            .read_json::<Value>()
+            .unwrap_or(Value::Null));
     }
+    let code = res.status().as_u16();
+    let status_text = res.status().canonical_reason().unwrap_or("").to_string();
+    let text = res
+        .body_mut()
+        .with_config()
+        .limit(MAX_BODY)
+        .read_to_string()
+        .unwrap_or_default();
+    Err(ApiError::Status {
+        code,
+        status_text,
+        method: call.method,
+        url,
+        text,
+    })
 }
 
 fn api(call: ApiCall) -> Value {
@@ -264,7 +298,7 @@ pub fn cmd_wait_for_submit() -> ! {
     let url = format!("{}/api/events?role=cli", client_base_url(&state));
     eprintln!("wait-for-submit: connected — review, then click Done reviewing in the browser.");
 
-    let res = match ureq::get(&url).set("Accept", "text/event-stream").call() {
+    let res = match ureq::get(&url).header("Accept", "text/event-stream").call() {
         Ok(res) => res,
         Err(err) => {
             eprintln!("wait-for-submit: cannot reach krit at {url}: {err}");
@@ -272,7 +306,10 @@ pub fn cmd_wait_for_submit() -> ! {
         }
     };
 
-    let mut reader = res.into_reader();
+    // `into_reader` is the unlimited one: every other body-reading helper caps
+    // at 10 MiB, which on a stream held open for the life of a review would
+    // look like the server closing it.
+    let mut reader = res.into_body().into_reader();
     // Buffered as raw bytes and decoded a whole frame at a time: a read
     // boundary lands anywhere, and decoding each 4 KiB chunk on its own turns
     // a multi-byte character straddling one into U+FFFD on both sides. The
