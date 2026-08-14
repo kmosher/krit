@@ -3,7 +3,7 @@
 
 See changelog/README.md for why fragments exist. This script is the only thing
 that writes CHANGELOG.md, and the only thing that writes a version number: the
-three files carrying one have to agree, and they are three separate merge
+four files carrying one have to agree, and they are four separate merge
 conflicts waiting to happen if each release edits them by hand.
 
     scripts/changelog.py collate            # print the merged section
@@ -85,7 +85,10 @@ def collate() -> str:
 
 
 def bump_versions(version: str) -> None:
-    """Set the version in all three files that carry one.
+    """Set the version in the three files that carry one as source.
+
+    Cargo.lock carries it too, but it is generated — `restamp_lockfile` hands
+    that one to cargo.
 
     Every one is a targeted substitution, including the JSON. Parsing and
     re-serialising those looks tidier and is worse: `json.dumps` re-escapes
@@ -110,6 +113,44 @@ def bump_versions(version: str) -> None:
         if n != 1:
             sys.exit(f"{path.name}: could not find a version to replace")
         path.write_text(new)
+
+
+def restamp_lockfile() -> None:
+    """Point Cargo.lock at the version `bump_versions` just wrote.
+
+    Cargo.lock records a version for each of the three workspace members, so it
+    is a fourth file carrying the number — but a generated one, which is why
+    cargo restamps it rather than a regex like the others. `--workspace` limits
+    the update to those three; `--offline` keeps a release from silently
+    resolving new dependency versions, which is a separate change that has no
+    business riding along inside a release commit.
+
+    Left out, the lock stays a version behind until the next `cargo build`
+    rewrites it — so it lands as an unrelated dirty file in whichever worktree
+    builds first, and `wt-fold` refuses to fold while the canonical checkout is
+    dirty. The release that causes it and the fold it blocks are far enough
+    apart to look unconnected.
+
+    A failure here is a warning rather than an exit: the changelog and the other
+    three files are already written by this point, and dying would leave a
+    half-cut release for a file the next build regenerates anyway.
+    """
+    try:
+        done = subprocess.run(
+            ["cargo", "update", "--workspace", "--offline"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as err:  # no cargo on PATH
+        print(f"warning: could not restamp Cargo.lock ({err})", file=sys.stderr)
+        return
+    if done.returncode != 0:
+        print(
+            "warning: could not restamp Cargo.lock — commit it separately after "
+            f"the next build:\n{done.stderr.strip()}",
+            file=sys.stderr,
+        )
 
 
 CURRENT_VERSION = re.compile(r'(?m)^version = "(\d+)\.(\d+)\.(\d+)"$')
@@ -193,6 +234,7 @@ def release(spec: str) -> None:
     for path in sorted(FRAGMENTS.glob("*.md")):
         path.unlink()
     bump_versions(version)
+    restamp_lockfile()
     print(f"Released {version}. Review the diff, then commit.")
 
 

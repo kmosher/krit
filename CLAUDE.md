@@ -29,7 +29,9 @@ liberally** — a patch for a fix, a minor for anything a user would notice or
 that moves the wire. Don't hoard changes waiting for a release-worthy batch;
 the number is free and a bumped version is what makes "which krit is this?"
 answerable. The workspace `version` in `Cargo.toml` and `package.json` and
-`desktop/src-tauri/tauri.conf.json` all carry it and must agree.
+`desktop/src-tauri/tauri.conf.json` all carry it and must agree, and
+`Cargo.lock` carries it a fourth time for each workspace member — generated,
+so `just release` has cargo restamp it rather than editing it.
 
 Every change a user or an agent could notice gets a **new file** in
 `changelog/unreleased/`, in the same commit — never a line appended to
@@ -44,9 +46,12 @@ routine, which is what the README's warning is for.
 for a patch, `just release minor` when the change is one a user would notice or
 that moves the wire. Which of the two is your call; getting it wrong costs
 nothing at `0.x`, and skipping the release costs the thing releases are for.
-`just release` collates the fragments, deletes them, and sets all three version
-files at once, and it is the only thing that may write `CHANGELOG.md` or a
-version number.
+`just release` collates the fragments, deletes them, and sets every version
+file at once, and it is the only thing that may write `CHANGELOG.md` or a
+version number. Leaving `Cargo.lock` out of that used to strand it a version
+behind until some later `cargo build` rewrote it — surfacing as an unrelated
+dirty file that made `wt-fold` refuse, far enough from the release that caused
+it to look like a separate problem.
 
 Releasing this often reopens the conflict the fragments closed, from one
 direction only: two agents folding minutes apart both derive the same next

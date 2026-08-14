@@ -13,6 +13,16 @@ see the warning at the top of the README.
 
 <!-- releases below -->
 
+## 0.12.2 — 2026-08-14
+
+### Fixed
+
+- `just release` now restamps `Cargo.lock` along with the three source files
+  carrying the version. It was left a release behind until the next `cargo
+  build` rewrote it, which showed up as an unrelated dirty file blocking a
+  `wt-fold` in whichever worktree built first.
+
+
 ## 0.12.1 — 2026-08-14
 
 ### Fixed
