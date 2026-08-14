@@ -21,6 +21,7 @@ use std::io::{self, Stdout, stdout};
 use std::sync::Arc;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -200,6 +201,161 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.finish();
+    }
+}
+
+/// How a wait for input ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Input {
+    /// There is something for crossterm to read.
+    Ready,
+    /// The wait elapsed with nothing to read.
+    Idle,
+    /// The terminal is gone: the far end of the pty closed. Nothing will ever
+    /// arrive again, and every write from here on is into a void.
+    Gone,
+}
+
+/// The terminal we read from, held open so the loop can ask whether it is
+/// still there.
+///
+/// **This exists because `event::poll` does not return once the terminal
+/// dies.** crossterm waits by reading, and a pty slave whose master has closed
+/// is readable forever, yielding zero bytes — so `poll_internal` spins inside
+/// its own deadline loop and the draw loop never gets another iteration. The
+/// cost is not merely a wasted core: the loop is where *every* signal is
+/// answered, so a wedged poll makes `SIGTERM`, `SIGHUP` and `SIGINT` all
+/// unanswerable and the process needs `SIGKILL`. That was a `krit-tui`
+/// orphaned by a closed tmux session, pegging a core for two days.
+///
+/// So the loop waits *here* instead, on the same `/dev/tty` crossterm reads
+/// (the file `enable_raw_mode` works through), and only hands off once there is
+/// something to parse. `EV_EOF` is the answer `read` cannot give: EOF and "no
+/// input yet" are the same zero bytes, and only the event filter separates them.
+///
+/// **`select(2)`, because this is macOS and a terminal is a device.** The two
+/// obvious mechanisms are both unavailable here, each failing in a way that
+/// reads as a different bug:
+/// - `poll` does not work on device files on Darwin. On a `/dev/tty` it returns
+///   `POLLNVAL` (`0x20`) immediately and forever; read as "the terminal is
+///   gone" that is worse than the wedge it replaces, because the viewer then
+///   quits the instant it starts — cleanly, empty screen, exit status 0.
+/// - `kqueue` refuses a tty outright: registering `EVFILT_READ` on one returns
+///   `EINVAL`. This is the same Darwin limitation libuv carries a dedicated
+///   `select`-on-a-thread workaround for. A failed registration is silent, so
+///   the fallback path just quietly restores the original wedge.
+///
+/// `select` works on ttys, but answers a narrower question — readable or not —
+/// and at EOF a pty slave is readable forever. So readability alone cannot say
+/// the terminal died, and `is_gone` answers that separately.
+pub struct Tty {
+    fd: std::os::fd::OwnedFd,
+}
+
+impl Tty {
+    /// Opens the controlling terminal and registers it for read events.
+    ///
+    /// `None` for any failure, including having no controlling terminal at all
+    /// (`/dev/tty` is `ENXIO` then). That is not worth reporting: a viewer with
+    /// no terminal has nothing to watch for, and the loop falls back to
+    /// crossterm's own wait rather than refusing to start over a watchdog.
+    pub fn open() -> Option<Self> {
+        use std::os::fd::{AsRawFd, OwnedFd};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()?;
+        let fd: OwnedFd = file.into();
+        // `select` cannot express a descriptor at or past `FD_SETSIZE`, and
+        // setting one anyway is a buffer overrun rather than an error. A tty
+        // opened this early is always a low number; bailing here means the
+        // fallback path, not a corrupted stack.
+        if fd.as_raw_fd() < 0 || fd.as_raw_fd() as usize >= libc::FD_SETSIZE {
+            return None;
+        }
+        Some(Tty { fd })
+    }
+
+    /// Readable, but with how many bytes? `None` if the question failed.
+    ///
+    /// **Readable-with-nothing-to-read is the only evidence a dead terminal
+    /// ever gives.** Every other thing that looks like it should notice keeps
+    /// reporting rude health once the far end of the pty closes: `/dev/tty`
+    /// still opens, `isatty` is still 1, `tcgetattr` and `tcgetpgrp` both still
+    /// succeed. The single value that changes anywhere is a `read` returning 0
+    /// — an EOF indistinguishable, to anything that does not already know the
+    /// fd was readable, from "no input yet".
+    ///
+    /// So the test is `FIONREAD` rather than a `read`: it asks exactly what a
+    /// read would find and consumes nothing. Reading here would race crossterm
+    /// for the same input queue and could swallow a byte out of the middle of
+    /// an escape sequence — a keystroke lost, or worse, silently reinterpreted.
+    fn readable_bytes(&self) -> Option<usize> {
+        use std::os::fd::AsRawFd;
+        let mut n: libc::c_int = 0;
+        // Safety: FIONREAD writes one int through the pointer.
+        let rc = unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::FIONREAD, &mut n) };
+        if rc < 0 || n < 0 {
+            return None;
+        }
+        Some(n as usize)
+    }
+
+    /// Wait up to `timeout` for input, or for the terminal to disappear.
+    pub fn wait(&self, timeout: Duration) -> Input {
+        use std::os::fd::AsRawFd;
+        // Anything crossterm has already parsed and buffered is invisible to
+        // the kernel — it lives in crossterm's own queue, not in the fd.
+        // Asking it first (with no timeout, so this cannot block) keeps a
+        // buffered keystroke from waiting out a whole tick.
+        if matches!(ratatui::crossterm::event::poll(Duration::ZERO), Ok(true)) {
+            return Input::Ready;
+        }
+        let raw = self.fd.as_raw_fd();
+        let mut set = std::mem::MaybeUninit::<libc::fd_set>::uninit();
+        // Safety: `FD_ZERO` initialises the whole set, which is what makes the
+        // `assume_init` below sound; `raw` was bounds-checked in `open`.
+        let mut set = unsafe {
+            libc::FD_ZERO(set.as_mut_ptr());
+            let mut set = set.assume_init();
+            libc::FD_SET(raw, &mut set);
+            set
+        };
+        let mut tv = libc::timeval {
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+        };
+        // Safety: one initialised set holding one in-range descriptor.
+        let n = unsafe {
+            libc::select(
+                raw + 1,
+                &mut set,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        // A negative return is EINTR in practice — a signal arriving, which is
+        // precisely what the loop is being freed up to answer. Report an
+        // ordinary idle tick and let the flag check upstairs do its job.
+        if n <= 0 {
+            return Input::Idle;
+        }
+        // Readable, which is *not* the same as "the terminal is alive": a pty
+        // slave whose master closed is readable forever and yields nothing,
+        // which is the whole failure this type exists for.
+        //
+        // Zero bytes waiting on a readable descriptor means EOF here, and it
+        // cannot be confused with a half-arrived escape sequence: the crossterm
+        // poll above already drained anything pending into its own parser, so a
+        // partial sequence leaves the descriptor *not* readable and never
+        // reaches this line. `None` is a question we could not ask, which is no
+        // evidence of death — carry on and let the loop keep running.
+        match self.readable_bytes() {
+            Some(0) => Input::Gone,
+            _ => Input::Ready,
+        }
     }
 }
 

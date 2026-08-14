@@ -181,6 +181,13 @@ is a guarantee — the residual race is the length of a fold:
     inherits no size, and a 0×0 terminal makes the app faithfully draw nothing
     — and replay the whole byte stream rather than feeding chunks, since a read
     splits escape sequences at 1 KiB.
+  - **`kill-server` leaves the viewer behind — check for it.** The TUI is
+    reparented to launchd rather than dying with the pane, so `ps -eo
+    pid,ppid,stat,%cpu | grep krit-tui` after a run is part of the teardown, not
+    paranoia. It exits on its own now (`term::Tty`), but that is one bounded
+    wait standing between a stray run and a pegged core, and only the *last*
+    build has it — an older binary already running keeps its old behavior. Kill
+    the app before the server when you can.
   - Suspend has to be verified from outside: `ps -o state=` shows `T` while
     stopped, and the app must have emitted `ESC[?1049l` *before* it stopped.
     tmux is the wrong tool for that one — it owns the process group — so
@@ -292,6 +299,34 @@ is a guarantee — the residual race is the length of a fold:
   `confirm()`" but "the program never stops redrawing while it waits".
   Relatedly, SIGTERM/SIGINT/SIGHUP are handled rather than fatal, since their
   default disposition skips the panic hook and the `Drop` guard both.
+- **The loop waits on `term::Tty`, not inside `event::poll`, because a dead
+  terminal never ends that call.** A pty slave whose master has closed is
+  readable forever and yields zero bytes, so crossterm's own deadline loop spins
+  and the draw loop gets no further iterations. The wasted core is the small
+  half: the loop is where *every* signal is answered, so a wedged wait makes
+  SIGTERM, SIGHUP and SIGINT equally unanswerable and only SIGKILL is left.
+  Handling the signals buys nothing if nothing ever rechecks the flag.
+  Three things about the detection are load-bearing, and the first two are
+  Darwin-specific traps that each look like a different bug:
+  - **`poll(2)` does not work on device files on macOS.** On a `/dev/tty` it
+    returns `POLLNVAL` (`0x20`) immediately and forever. Read as death, that is
+    worse than the wedge: the viewer quits the instant it starts, cleanly, empty
+    screen, exit status 0.
+  - **kqueue refuses a tty**: `EVFILT_READ` on one is `EINVAL`. (libuv carries a
+    whole `select`-on-a-thread workaround for this.) A failed registration is
+    silent, so the fallback path just quietly restores the original wedge —
+    which reads as "my fix did nothing" rather than as a platform limit.
+    `select` is what works, and it is why `Tty` bounds-checks against
+    `FD_SETSIZE`.
+  - **Only a `read` returning 0 distinguishes a dead terminal.** `/dev/tty`
+    still opens, `isatty` is still 1, `tcgetattr` and `tcgetpgrp` both still
+    succeed — every obvious probe reports rude health. So the test is
+    `FIONREAD`, which asks what a read would find and consumes nothing: reading
+    here would race crossterm for the same input queue and could swallow a byte
+    out of the middle of an escape sequence. Zero readable bytes on a readable
+    descriptor is unambiguous *only because* the crossterm poll ahead of it has
+    already drained anything pending — a half-arrived escape sequence therefore
+    leaves the descriptor unreadable and never reaches the test.
 - **The loop redraws when something changed, not every tick.** Several
   aggregates scale with the review rather than the window; they are cached in
   `App::rebuild` and the frame is skipped when nothing marked it dirty. A

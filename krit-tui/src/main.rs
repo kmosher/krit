@@ -497,6 +497,10 @@ fn run(diff_args: &[String]) -> Result<(), String> {
     // has to say which bindings are live, and guessing from the developer's
     // own terminal is how a design doc's warning becomes a bug report.
     let enhanced = session.keyboard_enhanced();
+    // The loop waits on this rather than inside `event::poll`; `term::Tty` says
+    // why. `None` means no controlling terminal, where there is nothing to
+    // watch for and crossterm's own wait is as good as it gets.
+    let tty = term::Tty::open();
 
     let mut viewport = 1usize;
     let mut refetch = Refetch::default();
@@ -540,7 +544,29 @@ fn run(diff_args: &[String]) -> Result<(), String> {
                 continue;
             }
 
-            if event::poll(TICK).map_err(|e| format!("input failed: {e}"))? {
+            // The wait for input, and the one place the terminal's death is
+            // noticed. Quitting on `Gone` is not tidiness: the loop is where
+            // every signal is answered, so a viewer that keeps waiting on a
+            // dead terminal answers none of them and has to be `SIGKILL`ed.
+            let ready = match &tty {
+                Some(tty) => match tty.wait(TICK) {
+                    // Bytes are waiting, which is not the same as an event:
+                    // an escape sequence can arrive split across reads. Only
+                    // crossterm knows whether it has a whole one, and asking
+                    // with a zero timeout is what keeps `read` — which blocks
+                    // until a sequence completes — out of the draw loop.
+                    term::Input::Ready => {
+                        event::poll(Duration::ZERO).map_err(|e| format!("input failed: {e}"))?
+                    }
+                    term::Input::Idle => false,
+                    term::Input::Gone => {
+                        app.should_quit = true;
+                        continue;
+                    }
+                },
+                None => event::poll(TICK).map_err(|e| format!("input failed: {e}"))?,
+            };
+            if ready {
                 let mut wiring = Wiring {
                     session: &mut session,
                     terminal: &mut terminal,
@@ -883,6 +909,49 @@ mod tests {
             "these block the viewer while it waits for input; route the question \
              through a Status strip instead:\n{}",
             offenders.join("\n")
+        );
+    }
+
+    /// The other half of the rule above: the loop must not only avoid blocking
+    /// on input, it must notice when input can never arrive again.
+    ///
+    /// `event::poll` does not return once the terminal dies — a pty slave whose
+    /// master closed is readable forever and yields nothing — so a loop waiting
+    /// only on crossterm spins a core and, far worse, stops answering signals,
+    /// since the loop is where every signal is answered. Such a viewer survives
+    /// SIGTERM and SIGHUP alike and needs SIGKILL. One escaped that way from a
+    /// closed tmux session and pegged a core for two days.
+    ///
+    /// A source check because there is nothing else to check: the failure needs
+    /// a real pty to reproduce, leaves no error, and looks from the inside
+    /// exactly like a terminal nobody is typing at.
+    #[test]
+    fn the_draw_loop_notices_a_terminal_that_has_gone_away() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("main.rs");
+        let whole = std::fs::read_to_string(path).expect("main.rs is readable");
+        let source = match whole.find("#[cfg(test)]") {
+            Some(at) => &whole[..at],
+            None => &whole[..],
+        };
+        let at = source.find("Input::Gone").unwrap_or_else(|| {
+            panic!(
+                "the draw loop no longer handles term::Input::Gone, so a terminal \
+                 that goes away leaves this process spinning and deaf to signals"
+            )
+        });
+        // The arm has to *quit*, not merely exist. Matching the name alone
+        // passes for `Input::Gone => false`, which is the same wedge with the
+        // handling filed off — and that is the likelier regression, since
+        // deleting a match arm does not compile while emptying one does.
+        assert!(
+            source[at..]
+                .lines()
+                .take(4)
+                .any(|l| l.contains("should_quit")),
+            "the term::Input::Gone arm no longer quits; a terminal that goes \
+             away leaves this process spinning and deaf to signals"
         );
     }
 }
