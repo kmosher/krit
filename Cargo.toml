@@ -13,9 +13,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # No default features: those are rustls and gzip, and every request krit's
 # clients make is plaintext HTTP to a loopback server they usually started
-# themselves. Nothing degrades to plaintext silently: ureq panics on an
-# https:// URI when no TLS provider is compiled in, so a client that grows a
-# remote endpoint has to add the feature back rather than discovering it later.
+# themselves.
+#
+# Nothing degrades to plaintext silently — an https:// URI fails with
+# `Error::TlsRequired` rather than being retried in the clear. But it fails as
+# an ordinary transport error, not loudly: a call site that discards errors
+# (`client::probe`) reads it as "no server there", which is why `ApiError`
+# names the scheme rather than leaving the generic "did krit crash?".
+# A client that grows a remote endpoint has to add the feature back.
 ureq = { version = "3", default-features = false, features = ["json"] }
 
 # Profiles are only honored at the workspace root — cargo silently ignores a

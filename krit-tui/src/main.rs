@@ -746,7 +746,33 @@ fn run(diff_args: &[String]) -> Result<(), String> {
     // that first and keep the restore failure for when it is the only one.
     let restored = session.finish();
     result?;
-    restored.map_err(|e| format!("could not restore the terminal: {e}"))
+    // Failing to hand back a terminal that no longer exists is not a failure.
+    // Reporting it would be wrong twice over: the viewer did exactly the right
+    // thing, and the complaint goes to the terminal that just went away, so
+    // nobody reads it — while the exit status lies to whatever *is* watching,
+    // recording every closed window as an error.
+    //
+    // Keyed off the error rather than off which arm quit, because there are two
+    // ways in and only one of them knows: closing a terminal usually delivers
+    // SIGHUP first, so the loop quits through the signal handler without ever
+    // consulting the descriptor, and `Input::Gone` never fires. Two ways in,
+    // one rule out.
+    match restored {
+        Err(e) if terminal_is_gone(&e) => Ok(()),
+        other => other.map_err(|e| format!("could not restore the terminal: {e}")),
+    }
+}
+
+/// Did this write fail because the terminal is no longer there?
+///
+/// `EIO` is what a pty whose far end has closed answers, and `ENXIO` is a
+/// terminal that was revoked outright; `BrokenPipe` covers a `krit-tui` whose
+/// stdout was a pipe that closed. Anything else is a real failure to restore —
+/// which must still be reported, since that is the case that leaves a shell in
+/// raw mode.
+fn terminal_is_gone(err: &std::io::Error) -> bool {
+    matches!(err.kind(), std::io::ErrorKind::BrokenPipe)
+        || matches!(err.raw_os_error(), Some(libc::EIO) | Some(libc::ENXIO))
 }
 
 #[cfg(test)]

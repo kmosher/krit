@@ -77,39 +77,61 @@ impl ApiError {
                 url,
                 text,
             } => {
-                let mut lines = vec![format!("Error: {code} {status_text} from {method} {url}")];
+                // The phrase is whatever the status code is *known* to mean, so
+                // an unrecognised code has none — joined rather than
+                // interpolated, since a blank one would otherwise print as a
+                // gap and make the line look malformed rather than terse.
+                let status = [code.to_string(), status_text.to_string()].join(" ");
+                let mut lines = vec![format!("Error: {} from {method} {url}", status.trim_end())];
                 if !text.is_empty() {
                     lines.push(text.clone());
                 }
                 lines
             }
-            ApiError::Transport { url, err } => vec![
-                format!("Error reaching krit at {url}: {err}"),
-                "The state file points to a server that is not responding. Did krit crash?"
-                    .to_string(),
-            ],
+            ApiError::Transport { url, err } => {
+                let mut lines = vec![format!("Error reaching krit at {url}: {err}")];
+                // krit is built without a TLS provider, so an https base URL
+                // cannot work and fails as an ordinary transport error — which
+                // reads exactly like a dead server. Nothing krit writes into a
+                // state file is https, but a hand-edited or foreign one can be,
+                // and the generic diagnosis below would send the reader looking
+                // at a server that is fine.
+                if url.starts_with("https://") {
+                    lines.push(
+                        "This krit speaks plain HTTP only, and the state file names an https URL."
+                            .to_string(),
+                    );
+                } else {
+                    lines.push(
+                        "The state file points to a server that is not responding. Did krit crash?"
+                            .to_string(),
+                    );
+                }
+                lines
+            }
         }
     }
 }
 
-/// Larger than anything on this wire, and larger than ureq's 10 MiB default —
-/// `/api/diff` bundles both sides of every file's contents, which a review of a
-/// few large files clears on its own. The cap defends against a hostile server;
-/// this one is on loopback.
-const MAX_BODY: u64 = 512 * 1024 * 1024;
+/// A client for the loopback server. Both settings are explained on
+/// `krit-tui`'s `agent`, which is the same pair for the same reasons:
+/// `proxy(None)` because ureq otherwise routes even 127.0.0.1 through an
+/// exported `HTTP_PROXY`, and `http_status_as_error(false)` because the
+/// server's body is the half of an error worth printing.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .proxy(None)
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
 
 fn call_api(base: &str, call: &ApiCall) -> Result<Value, ApiError> {
     let url = format!("{}{}", base, call.path);
-    // `http_status_as_error(false)`: ureq's `Error::StatusCode` carries the code
-    // and nothing else, and the server's body is the half of an error worth
-    // printing. Off, a 4xx/5xx arrives as an `Ok` to be classified by `status()`.
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .build()
-        .into();
-    // ureq 3 has no verb-agnostic request function, and the verb here is data
-    // (`ApiCall.method`), so the request is built through the http crate and
-    // run on the agent.
+    let agent = agent();
+    // The verb is runtime data (`ApiCall.method`) and ureq exposes no
+    // verb-agnostic constructor, so the request is built through the `http`
+    // crate and run on the agent.
     let transport = |err: &dyn std::fmt::Display| ApiError::Transport {
         url: url.clone(),
         err: err.to_string(),
@@ -134,7 +156,7 @@ fn call_api(base: &str, call: &ApiCall) -> Result<Value, ApiError> {
         return Ok(res
             .body_mut()
             .with_config()
-            .limit(MAX_BODY)
+            .limit(krit_core::MAX_BODY)
             .read_json::<Value>()
             .unwrap_or(Value::Null));
     }
@@ -143,7 +165,7 @@ fn call_api(base: &str, call: &ApiCall) -> Result<Value, ApiError> {
     let text = res
         .body_mut()
         .with_config()
-        .limit(MAX_BODY)
+        .limit(krit_core::MAX_ERROR_BODY)
         .read_to_string()
         .unwrap_or_default();
     Err(ApiError::Status {
@@ -298,8 +320,26 @@ pub fn cmd_wait_for_submit() -> ! {
     let url = format!("{}/api/events?role=cli", client_base_url(&state));
     eprintln!("wait-for-submit: connected — review, then click Done reviewing in the browser.");
 
-    let res = match ureq::get(&url).header("Accept", "text/event-stream").call() {
-        Ok(res) => res,
+    // Through the configured agent, not a bare `ureq::get`: the default
+    // configuration would route this loopback stream through an exported
+    // `HTTP_PROXY`, and this verb is the one an agent blocks on — a stream that
+    // never connects is a review that never finishes.
+    let res = match agent()
+        .get(&url)
+        .header("Accept", "text/event-stream")
+        .call()
+    {
+        Ok(res) if res.status().is_success() => res,
+        // `http_status_as_error(false)` means a refusal arrives as an `Ok`;
+        // without this arm a 401 or a 404 would be treated as an open stream
+        // that simply never says anything.
+        Ok(res) => {
+            eprintln!(
+                "wait-for-submit: krit answered {} at {url}",
+                res.status().as_u16()
+            );
+            std::process::exit(2);
+        }
         Err(err) => {
             eprintln!("wait-for-submit: cannot reach krit at {url}: {err}");
             std::process::exit(2);
@@ -535,6 +575,23 @@ mod tests {
         assert!(lines[0].starts_with("Error: 404 Not Found from PUT http://127.0.0.1:"));
         assert!(lines[0].ends_with("/api/comments/ghost"));
         assert_eq!(lines[1].trim(), "no such comment");
+    }
+
+    /// A status nothing recognises has no reason phrase to print, and the
+    /// client shows the code alone rather than a gap where a phrase would be.
+    /// The phrase is derived from the code now, so this is reachable from any
+    /// server — or anything else — answering on that port.
+    #[test]
+    fn an_unrecognised_status_prints_the_code_without_a_hole_where_the_phrase_goes() {
+        let (base, server) = one_shot("HTTP/1.1 599 \r\nContent-Length: 0\r\n\r\n");
+        let err = call_api(&base, &refresh_call()).unwrap_err();
+        server.join().unwrap();
+        let lines = err.lines();
+        assert!(
+            lines[0].starts_with("Error: 599 from POST http://127.0.0.1:"),
+            "{}",
+            lines[0]
+        );
     }
 
     #[test]

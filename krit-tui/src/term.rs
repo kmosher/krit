@@ -207,7 +207,11 @@ impl Drop for Session {
 /// How a wait for input ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
-    /// There is something for crossterm to read.
+    /// Hand off to crossterm: either it has a buffered event already, or the
+    /// descriptor has bytes — or the liveness question could not be asked,
+    /// which is not evidence of death. Deliberately *not* a promise that a
+    /// blocking read would return: readability, parseability and liveness are
+    /// three different questions, which is the whole reason this type exists.
     Ready,
     /// The wait elapsed with nothing to read.
     Idle,
@@ -230,13 +234,13 @@ pub enum Input {
 ///
 /// So the loop waits *here* instead, on the same `/dev/tty` crossterm reads
 /// (the file `enable_raw_mode` works through), and only hands off once there is
-/// something to parse. `EV_EOF` is the answer `read` cannot give: EOF and "no
-/// input yet" are the same zero bytes, and only the event filter separates them.
+/// something to parse.
 ///
-/// **`select(2)`, because this is macOS and a terminal is a device.** The two
-/// obvious mechanisms are both unavailable here, each failing in a way that
-/// reads as a different bug:
-/// - `poll` does not work on device files on Darwin. On a `/dev/tty` it returns
+/// **The wait is `select(2)` on every unix.** Nothing here is conditionally
+/// compiled: `select` works on ttys everywhere, and it is the mechanism because
+/// the two more obvious ones are unavailable on Darwin, each failing in a way
+/// that reads as a different bug:
+/// - `poll` does not work on device files there. On a `/dev/tty` it returns
 ///   `POLLNVAL` (`0x20`) immediately and forever; read as "the terminal is
 ///   gone" that is worse than the wedge it replaces, because the viewer then
 ///   quits the instant it starts — cleanly, empty screen, exit status 0.
@@ -245,33 +249,48 @@ pub enum Input {
 ///   `select`-on-a-thread workaround for. A failed registration is silent, so
 ///   the fallback path just quietly restores the original wedge.
 ///
-/// `select` works on ttys, but answers a narrower question — readable or not —
-/// and at EOF a pty slave is readable forever. So readability alone cannot say
-/// the terminal died, and `is_gone` answers that separately.
+/// `select` answers a narrower question than we need — readable or not — and at
+/// EOF a pty slave is readable forever. So readability alone cannot say the
+/// terminal died; `readable_bytes` is what separates the two.
 pub struct Tty {
     fd: std::os::fd::OwnedFd,
 }
 
+/// Can `select` name this descriptor at all?
+///
+/// A soundness check, not a courtesy: `select` has no way to express a
+/// descriptor at or past `FD_SETSIZE`, and `FD_SET` on one writes outside the
+/// set rather than returning an error. Its own function so the bound can be
+/// tested without conjuring an `OwnedFd` for a descriptor the test does not own
+/// — dropping one of those closes a stranger's file, and aborts the process if
+/// the close fails.
+fn fd_is_selectable(raw: libc::c_int) -> bool {
+    raw >= 0 && (raw as usize) < libc::FD_SETSIZE
+}
+
 impl Tty {
-    /// Opens the controlling terminal and registers it for read events.
+    /// Opens the controlling terminal and holds it for the life of the viewer.
     ///
     /// `None` for any failure, including having no controlling terminal at all
     /// (`/dev/tty` is `ENXIO` then). That is not worth reporting: a viewer with
     /// no terminal has nothing to watch for, and the loop falls back to
     /// crossterm's own wait rather than refusing to start over a watchdog.
     pub fn open() -> Option<Self> {
-        use std::os::fd::{AsRawFd, OwnedFd};
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/tty")
             .ok()?;
-        let fd: OwnedFd = file.into();
-        // `select` cannot express a descriptor at or past `FD_SETSIZE`, and
-        // setting one anyway is a buffer overrun rather than an error. A tty
-        // opened this early is always a low number; bailing here means the
-        // fallback path, not a corrupted stack.
-        if fd.as_raw_fd() < 0 || fd.as_raw_fd() as usize >= libc::FD_SETSIZE {
+        Self::from_fd(file.into())
+    }
+
+    /// Wrap an already-open descriptor, refusing one `select` cannot name (see
+    /// `fd_is_selectable`). A tty opened as early as we do is always a low
+    /// number, so refusing means the caller falls back to crossterm's own wait
+    /// rather than corrupting the stack.
+    fn from_fd(fd: std::os::fd::OwnedFd) -> Option<Self> {
+        use std::os::fd::AsRawFd;
+        if !fd_is_selectable(fd.as_raw_fd()) {
             return None;
         }
         Some(Tty { fd })
@@ -304,14 +323,24 @@ impl Tty {
 
     /// Wait up to `timeout` for input, or for the terminal to disappear.
     pub fn wait(&self, timeout: Duration) -> Input {
-        use std::os::fd::AsRawFd;
         // Anything crossterm has already parsed and buffered is invisible to
         // the kernel — it lives in crossterm's own queue, not in the fd.
         // Asking it first (with no timeout, so this cannot block) keeps a
-        // buffered keystroke from waiting out a whole tick.
+        // buffered keystroke from waiting out a whole tick, and is what makes
+        // the zero-bytes rule below unambiguous.
         if matches!(ratatui::crossterm::event::poll(Duration::ZERO), Ok(true)) {
             return Input::Ready;
         }
+        self.wait_on_fd(timeout)
+    }
+
+    /// The half of `wait` that is only about the descriptor.
+    ///
+    /// Split out because it is the testable half: it consults nothing but the
+    /// fd, so a test can drive it against a pair it controls, where `wait`
+    /// itself would consult the *test runner's* terminal through crossterm.
+    fn wait_on_fd(&self, timeout: Duration) -> Input {
+        use std::os::fd::AsRawFd;
         let raw = self.fd.as_raw_fd();
         let mut set = std::mem::MaybeUninit::<libc::fd_set>::uninit();
         // Safety: `FD_ZERO` initialises the whole set, which is what makes the
@@ -336,11 +365,26 @@ impl Tty {
                 &mut tv,
             )
         };
-        // A negative return is EINTR in practice — a signal arriving, which is
-        // precisely what the loop is being freed up to answer. Report an
-        // ordinary idle tick and let the flag check upstairs do its job.
-        if n <= 0 {
+        if n == 0 {
             return Input::Idle;
+        }
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            return match err.raw_os_error() {
+                // A signal arrived, which is precisely what the loop is being
+                // freed up to answer. An ordinary idle tick; the flag check
+                // upstairs does the rest.
+                Some(libc::EINTR) | Some(libc::EAGAIN) => Input::Idle,
+                // Anything else is a descriptor we can no longer wait on, and
+                // waiting is the only thing keeping this loop from spinning:
+                // `select` failing for a structural reason (EBADF, EINVAL)
+                // fails *immediately*, so treating it as idle would peg a core
+                // exactly as the wedge this type replaces did. A terminal we
+                // cannot wait on is one we cannot read either, so say so and
+                // let the viewer exit through its normal path with the screen
+                // restored.
+                _ => Input::Gone,
+            };
         }
         // Readable, which is *not* the same as "the terminal is alive": a pty
         // slave whose master closed is readable forever and yields nothing,
@@ -350,11 +394,23 @@ impl Tty {
         // cannot be confused with a half-arrived escape sequence: the crossterm
         // poll above already drained anything pending into its own parser, so a
         // partial sequence leaves the descriptor *not* readable and never
-        // reaches this line. `None` is a question we could not ask, which is no
-        // evidence of death — carry on and let the loop keep running.
+        // reaches this line.
         match self.readable_bytes() {
             Some(0) => Input::Gone,
-            _ => Input::Ready,
+            Some(_) => Input::Ready,
+            // A question we could not ask is no evidence of death — but it is
+            // also no evidence of life, and the caller's `Ready` arm does not
+            // block: at EOF it would find no event, come straight back, and
+            // `select` would report readable again instantly. That is a spin,
+            // so this branch has to supply the wait `select` just failed to.
+            // Sleeping the tick keeps the loop bounded without claiming the
+            // terminal is dead, and costs at most one tick of input latency in
+            // a case that should never happen — crossterm's own poll at the
+            // top of the next call still picks up anything real.
+            None => {
+                std::thread::sleep(timeout);
+                Input::Idle
+            }
         }
     }
 }
@@ -403,5 +459,97 @@ impl Signals {
 
     pub fn quit_requested(&self) -> bool {
         self.quit.swap(false, Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    /// A connected pair of descriptors, standing in for a pty.
+    ///
+    /// A `socketpair` rather than an `openpty`, deliberately. What is under
+    /// test is the classification — readable-with-bytes against
+    /// readable-with-none against nothing-to-read — and that is fd-generic:
+    /// both kinds go readable on write and readable-forever-yielding-nothing
+    /// when the far end closes, which is the whole shape `wait_on_fd` decodes.
+    /// The tty-specific facts (`poll` returning `POLLNVAL`, `kqueue` refusing
+    /// to register) are why `select` was chosen, not what the classification
+    /// does with it. A pty would also make the test unrunnable in a sandbox,
+    /// where `openpty` is denied outright — a test that silently stops running
+    /// is worse than one that stands in.
+    fn pair() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0 as libc::c_int; 2];
+        // Safety: writes two descriptors into a two-element array.
+        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "socketpair: {}", io::Error::last_os_error());
+        // Safety: socketpair just handed us both, and neither is owned elsewhere.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    fn write_byte(fd: &OwnedFd) {
+        use std::os::fd::AsRawFd;
+        let byte = b"x";
+        // Safety: one byte from a valid pointer.
+        let n = unsafe { libc::write(fd.as_raw_fd(), byte.as_ptr() as *const libc::c_void, 1) };
+        assert_eq!(n, 1, "write: {}", io::Error::last_os_error());
+    }
+
+    const TICK: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn a_quiet_terminal_is_idle() {
+        let (ours, _theirs) = pair();
+        let tty = Tty::from_fd(ours).expect("a fresh fd is inside FD_SETSIZE");
+        assert_eq!(tty.wait_on_fd(TICK), Input::Idle);
+    }
+
+    #[test]
+    fn bytes_waiting_are_ready() {
+        let (ours, theirs) = pair();
+        write_byte(&theirs);
+        let tty = Tty::from_fd(ours).expect("a fresh fd is inside FD_SETSIZE");
+        assert_eq!(tty.wait_on_fd(TICK), Input::Ready);
+    }
+
+    /// The bug this whole type exists for: the far end goes away, and the
+    /// descriptor answers *readable* forever while yielding nothing. Anything
+    /// that treats readability as liveness spins here, and a spinning draw loop
+    /// answers no signals — which is what made the original orphan need
+    /// SIGKILL.
+    #[test]
+    fn a_closed_far_end_is_gone_rather_than_endlessly_ready() {
+        let (ours, theirs) = pair();
+        drop(theirs);
+        let tty = Tty::from_fd(ours).expect("a fresh fd is inside FD_SETSIZE");
+        assert_eq!(tty.wait_on_fd(TICK), Input::Gone);
+        // Twice, because the answer has to be stable: the loop calls this every
+        // tick, and a `Gone` that decayed into `Ready` on the next pass would
+        // be the spin with an extra step.
+        assert_eq!(tty.wait_on_fd(TICK), Input::Gone);
+    }
+
+    /// Unread bytes outrank the far end's departure. A terminal can deliver a
+    /// last burst and then close, and dropping it would lose the reviewer's
+    /// final keystroke to a race they cannot see.
+    #[test]
+    fn a_last_burst_is_read_before_the_close_is_reported() {
+        let (ours, theirs) = pair();
+        write_byte(&theirs);
+        drop(theirs);
+        let tty = Tty::from_fd(ours).expect("a fresh fd is inside FD_SETSIZE");
+        assert_eq!(tty.wait_on_fd(TICK), Input::Ready);
+    }
+
+    /// The bound is checked by number rather than by opening 1024 descriptors:
+    /// same branch, no fixture. It is tested at all because exceeding it is not
+    /// an error anyone reports — `FD_SET` just writes past the end of the set.
+    #[test]
+    fn a_descriptor_select_cannot_name_is_refused() {
+        assert!(fd_is_selectable(0));
+        assert!(fd_is_selectable(libc::FD_SETSIZE as libc::c_int - 1));
+        assert!(!fd_is_selectable(libc::FD_SETSIZE as libc::c_int));
+        assert!(!fd_is_selectable(-1));
     }
 }

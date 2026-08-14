@@ -288,24 +288,28 @@ impl Attached {
     }
 }
 
-/// A response body big enough for anything on this wire. ureq caps a body read
-/// at 10 MiB unless told otherwise, and `/api/diff` bundles both sides of every
-/// file's contents — a review of a few large files clears that on its own. The
-/// cap is a defence against a hostile server; this one is on loopback and was
-/// very likely started by us, so the number only has to be larger than a
-/// review.
-const MAX_BODY: u64 = 512 * 1024 * 1024;
-
-/// `http_status_as_error(false)` on every agent: ureq 3's `Error::StatusCode`
-/// carries the code and nothing else, and three call sites below want the
-/// server's own `error` string — which says which field was rejected, where
-/// the status alone sends someone reading server source. Turning the
-/// translation off keeps the response, so a 4xx/5xx arrives as an `Ok` to be
-/// classified by `status()`.
+/// An HTTP client for the loopback server; `timeout` bounds the whole request.
+///
+/// Two settings on it are load-bearing and neither is the default:
+///
+/// **`proxy(None)`.** ureq's default configuration reads `ALL_PROXY`,
+/// `HTTPS_PROXY` and `HTTP_PROXY` from the environment, and its no-proxy list
+/// is empty unless `NO_PROXY` says otherwise — there is no automatic loopback
+/// bypass. On a machine with a corporate or dev proxy exported, that sends
+/// every request for our own 127.0.0.1 server through the proxy, and the
+/// reviewer sees "cannot reach krit" against a server that is running perfectly.
+/// Nothing about the review is anyone's proxy's business.
+///
+/// **`http_status_as_error(false)`.** ureq's status error carries the code and
+/// nothing else, and the call sites below want the server's own `error` string,
+/// which says which field was rejected where the status alone sends someone
+/// reading server source. Off, a 4xx/5xx arrives as an `Ok` to be classified by
+/// `status()`.
 fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(timeout))
+        .proxy(None)
         .http_status_as_error(false)
         .build()
         .into()
@@ -317,7 +321,7 @@ fn error_detail(res: &mut ureq::http::Response<ureq::Body>) -> String {
     let body = res
         .body_mut()
         .with_config()
-        .limit(MAX_BODY)
+        .limit(krit_core::MAX_ERROR_BODY)
         .read_to_string()
         .unwrap_or_default();
     serde_json::from_str::<Value>(&body)
@@ -329,7 +333,10 @@ fn error_detail(res: &mut ureq::http::Response<ureq::Body>) -> String {
 fn read_json<T: serde::de::DeserializeOwned>(
     res: &mut ureq::http::Response<ureq::Body>,
 ) -> Result<T, ureq::Error> {
-    res.body_mut().with_config().limit(MAX_BODY).read_json()
+    res.body_mut()
+        .with_config()
+        .limit(krit_core::MAX_BODY)
+        .read_json()
 }
 
 /// Ask a server at `base` for its settings. `Some` means something answered
@@ -1073,8 +1080,13 @@ fn stream_once(url: &str, tx: &Sender<Incoming>) -> StreamOutcome {
     // No overall timeout: the stream is meant to stay open for the life of the
     // review. The connect timeout still applies, so an unreachable server
     // fails fast instead of hanging the retry loop.
+    // Its own agent rather than `agent()` because the global timeout must not
+    // apply — see above. `proxy(None)` for the same reason every other client
+    // here sets it: an exported `HTTP_PROXY` would otherwise capture a loopback
+    // stream, and a stream that never connects reads as a server that died.
     let request: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(CONNECT_TIMEOUT))
+        .proxy(None)
         .build()
         .into();
     let res = match request

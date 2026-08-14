@@ -311,27 +311,12 @@ is a guarantee — the residual race is the length of a fold:
   half: the loop is where *every* signal is answered, so a wedged wait makes
   SIGTERM, SIGHUP and SIGINT equally unanswerable and only SIGKILL is left.
   Handling the signals buys nothing if nothing ever rechecks the flag.
-  Three things about the detection are load-bearing, and the first two are
-  Darwin-specific traps that each look like a different bug:
-  - **`poll(2)` does not work on device files on macOS.** On a `/dev/tty` it
-    returns `POLLNVAL` (`0x20`) immediately and forever. Read as death, that is
-    worse than the wedge: the viewer quits the instant it starts, cleanly, empty
-    screen, exit status 0.
-  - **kqueue refuses a tty**: `EVFILT_READ` on one is `EINVAL`. (libuv carries a
-    whole `select`-on-a-thread workaround for this.) A failed registration is
-    silent, so the fallback path just quietly restores the original wedge —
-    which reads as "my fix did nothing" rather than as a platform limit.
-    `select` is what works, and it is why `Tty` bounds-checks against
-    `FD_SETSIZE`.
-  - **Only a `read` returning 0 distinguishes a dead terminal.** `/dev/tty`
-    still opens, `isatty` is still 1, `tcgetattr` and `tcgetpgrp` both still
-    succeed — every obvious probe reports rude health. So the test is
-    `FIONREAD`, which asks what a read would find and consumes nothing: reading
-    here would race crossterm for the same input queue and could swallow a byte
-    out of the middle of an escape sequence. Zero readable bytes on a readable
-    descriptor is unambiguous *only because* the crossterm poll ahead of it has
-    already drained anything pending — a half-arrived escape sequence therefore
-    leaves the descriptor unreadable and never reaches the test.
+  Getting there took three wrong mechanisms, each of which fails in a way that
+  reads as a different bug — `poll` and kqueue are both unusable on a Darwin
+  tty, and every obvious liveness probe reports rude health on a dead one. The
+  argument lives on `term::Tty` rather than here, because it is what you need
+  *while reading that file*; what you need before opening it is only that the
+  wait is ours and that a terminal's death is detected rather than assumed.
 - **The loop redraws when something changed, not every tick.** Several
   aggregates scale with the review rather than the window; they are cached in
   `App::rebuild` and the frame is skipped when nothing marked it dirty. A
