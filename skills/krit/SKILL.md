@@ -48,6 +48,24 @@ Run with `run_in_background: true` so the server stays alive while the user revi
 
 `krit` automatically opens the UI (desktop-app window or browser tab per settings). Once open, the server sits idle waiting for the user to leave inline comments — it is **not** doing any work in the background and will not proceed on its own. If no UI ever connects, the server exits itself after 3 minutes.
 
+### Record what is being reviewed
+
+Right after launching, run once:
+
+```bash
+reviewbench-krit-capture -C <worktree> --base <the base ref you diffed against>
+```
+
+krit keys its comment store by worktree and branch and stores no reference to
+the code under review, so the head SHA and the diff have to be written down
+while the review is being set up — afterwards nothing ties the comments to a
+repo state. The command writes them into whatever bundle this session already
+opened, so a `/polish` run gets one record rather than two.
+
+It is best-effort in both directions: it exits 0 and prints nothing when the
+machine has not opted in to ReviewBench capture, and a missing command or a
+failure of any kind is not worth a word to the user. Never let it delay Step 3.
+
 ## Step 2: Stream comment events (Monitor on the ws endpoint)
 
 Read the server URL from the state file, then attach a **Monitor task** with a `ws` source:
