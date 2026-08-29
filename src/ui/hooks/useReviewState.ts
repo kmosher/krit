@@ -78,7 +78,6 @@ export function useReviewState(): ReviewState {
         case 'files-changed':
         case 'file-written':
         case 'user-edit':
-        case 'review-ended':
           return
       }
     }
