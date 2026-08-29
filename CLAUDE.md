@@ -193,6 +193,19 @@ is a guarantee — the residual race is the length of a fold:
     wait standing between a stray run and a pegged core, and only the *last*
     build has it — an older binary already running keeps its old behavior. Kill
     the app before the server when you can.
+  - **A young `krit-tui` at 100% CPU is highlighting, not spinning.** A debug
+    build spends its first several seconds parsing syntax for the whole review
+    and has not drawn a frame yet, so `ps` moments after launch reports `R+
+    98%` beside an empty `capture-pane` — which reads exactly like a wedge. It
+    settles to ~1% by 10s and ~0% by 25s, and a *release* build does the same
+    work in milliseconds, so an installed binary looks healthy beside a
+    `cargo build` one and invites the conclusion that whatever is under test
+    caused it. **`sample` will not settle it either**: it records every thread
+    every interval whether running or blocked, so a stack parked in `select` or
+    `read` is what a *healthy* wait looks like, not evidence of a spin. Reading
+    one that way cost most of a session, and the second look showed all three
+    threads blocked. What answers it is the thread state (`R` against `S` in
+    `ps -o state=`), or watching %cpu decay over half a minute.
   - Suspend has to be verified from outside: `ps -o state=` shows `T` while
     stopped, and the app must have emitted `ESC[?1049l` *before* it stopped.
     tmux is the wrong tool for that one — it owns the process group — so
