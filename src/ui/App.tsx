@@ -15,6 +15,8 @@ import { RenderErrorBoundary } from './components/RenderErrorBoundary'
 import type { CodeViewWrapperHandle } from './components/CodeViewWrapper'
 import { FileTree } from './components/FileTree'
 import { CommentTracker } from './components/CommentTracker'
+import { OrphanCommentPanel } from './components/OrphanCommentPanel'
+import { orphanCommentPaths } from './utils/orphanComments'
 import {
   SidebarSplitter,
   parseStoredFraction,
@@ -885,6 +887,28 @@ export function App() {
     [islandedFiles, tooWideFiles],
   )
 
+  // A comment whose file the surface isn't rendering has nowhere to scroll to,
+  // so the tracker flags it and clicking it opens the thread in a panel
+  // instead. See orphanComments.ts for why this happens routinely.
+  const renderedPaths = useMemo(() => new Set(renderedFiles.map((f) => f.name)), [renderedFiles])
+  const orphanPaths = useMemo(
+    () => orphanCommentPaths(comments, renderedPaths),
+    [comments, renderedPaths],
+  )
+  const [orphanView, setOrphanView] = useState<{ path: string; commentId: string } | null>(null)
+  // Derived from the live comment list rather than captured when the panel
+  // opens, so a reply arriving over SSE shows up in the open thread — which is
+  // the whole reason the panel exists. It also closes itself: an empty list
+  // means the last comment was deleted, and a path that is no longer orphaned
+  // means the file came back and the surface can render it again.
+  const orphanThread = useMemo(() => {
+    if (!orphanView || !orphanPaths.has(orphanView.path)) return null
+    const thread = comments
+      .filter((c) => c.filePath === orphanView.path)
+      .sort((a, b) => a.createdAt - b.createdAt)
+    return thread.length > 0 ? thread : null
+  }, [orphanView, orphanPaths, comments])
+
   const handleFileClick = useCallback((filePath: string) => {
     setActiveFile(filePath)
     diffViewerRef.current?.scrollToFile(filePath)
@@ -992,7 +1016,12 @@ export function App() {
             <CommentTracker
               comments={comments}
               onDelete={removeComment}
+              orphanPaths={orphanPaths}
               onJump={(comment) => {
+                if (orphanPaths.has(comment.filePath)) {
+                  setOrphanView({ path: comment.filePath, commentId: comment.id })
+                  return
+                }
                 setActiveFile(comment.filePath)
                 // The line the annotation hangs off — see annotationLineFor.
                 diffViewerRef.current?.scrollToLine(
@@ -1058,6 +1087,17 @@ export function App() {
           </RenderErrorBoundary>
         </main>
       </div>
+      {orphanThread && orphanView && (
+        <OrphanCommentPanel
+          filePath={orphanView.path}
+          comments={orphanThread}
+          focusId={orphanView.commentId}
+          onClose={() => setOrphanView(null)}
+          onDelete={removeComment}
+          onReply={replyToComment}
+          onEdit={editComment}
+        />
+      )}
       {editingFile && (
         <FileEditorModal
           filePath={editingFile.path}

@@ -53,6 +53,20 @@ describe('CommentTracker', () => {
     expect(screen.queryByText(/second line/)).toBeNull()
   })
 
+  it('flags a comment whose file the surface is not rendering', () => {
+    render(
+      <CommentTracker
+        comments={[makeComment({ id: 'a', filePath: 'gone.ts' }), makeComment({ id: 'b', filePath: 'here.ts' })]}
+        orphanPaths={new Set(['gone.ts'])}
+      />,
+    )
+    // Without the flag the row looks like every other one, and clicking it
+    // scrolls nowhere with no explanation.
+    expect(
+      screen.getAllByTitle('This file is no longer in the diff — click to read the thread'),
+    ).toHaveLength(1)
+  })
+
   describe('status counts', () => {
     it('classifies a replied comment separately from an open one', () => {
       // "Replied" is the reviewer's cue that the agent has answered and the

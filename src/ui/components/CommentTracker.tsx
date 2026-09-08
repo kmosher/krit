@@ -5,6 +5,7 @@ import {
   Reply,
   Circle,
   PenLine,
+  Unlink,
 } from 'lucide-react'
 import type { ReviewComment } from '../../types'
 import { timeAgo, truncate, fileName } from '../utils'
@@ -12,6 +13,10 @@ import { useVirtualRows } from '../hooks/useVirtualRows'
 
 interface CommentTrackerProps {
   comments: ReviewComment[]
+  // Files the surface is not rendering (orphanComments.ts). A row on one of
+  // these says so, because clicking it cannot scroll anywhere — the caller
+  // opens the thread instead, and the reviewer should know which they get.
+  orphanPaths?: ReadonlySet<string>
   onJump?: (comment: ReviewComment) => void
   onDelete?: (id: string) => void
 }
@@ -64,19 +69,21 @@ const OVERSCAN = 10
 const CommentRow = memo(function CommentRow({
   comment,
   status,
+  orphan,
   top,
   onJump,
   onDelete,
 }: {
   comment: ReviewComment
   status: CommentStatus
+  orphan: boolean
   top: number
   onJump?: (comment: ReviewComment) => void
   onDelete?: (id: string) => void
 }) {
   return (
     <li
-      className={`ct-item ${status === 'resolved' ? 'ct-item-resolved' : ''}`}
+      className={`ct-item ${status === 'resolved' ? 'ct-item-resolved' : ''} ${orphan ? 'ct-item-orphan' : ''}`}
       style={{ position: 'absolute', top, left: 0, right: 0, height: ROW_HEIGHT }}
     >
       <a
@@ -91,6 +98,14 @@ const CommentRow = memo(function CommentRow({
       >
         <div className="ct-item-header">
           <StatusBadge status={status} />
+          {orphan && (
+            <span
+              className="ct-status ct-status-orphan"
+              title="This file is no longer in the diff — click to read the thread"
+            >
+              <Unlink size={12} />
+            </span>
+          )}
           <span className="ct-item-file" title={comment.filePath}>
             {fileName(comment.filePath)}:{comment.lineNumber}
             {comment.endLine && comment.endLine > comment.lineNumber ? `–${comment.endLine}` : ''}
@@ -117,7 +132,7 @@ const CommentRow = memo(function CommentRow({
   )
 })
 
-function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps) {
+function CommentTrackerImpl({ comments, orphanPaths, onJump, onDelete }: CommentTrackerProps) {
   const headerRef = useRef<HTMLDivElement>(null)
   const [headerHeight, setHeaderHeight] = useState(0)
 
@@ -194,6 +209,7 @@ function CommentTrackerImpl({ comments, onJump, onDelete }: CommentTrackerProps)
             key={comment.id}
             comment={comment}
             status={getCommentStatus(comment)}
+            orphan={orphanPaths?.has(comment.filePath) ?? false}
             top={offsetY + i * ROW_HEIGHT}
             onJump={onJump}
             onDelete={onDelete}
