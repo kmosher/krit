@@ -151,9 +151,15 @@ is a guarantee — the residual race is the length of a fold:
   - Done reviewing needs a listener: attach `krit wait-for-submit` (background
     it properly — it blocks) or an agent WS subscriber, or it renders as a
     disabled "No watcher". It does not need any comments.
-  - Playwright needs `PLAYWRIGHT_BROWSERS_PATH` somewhere writable, and
-    launching the browser needs the sandbox off (XPC fails "Connection
-    Invalid" otherwise).
+  - Playwright is installed **globally**, not as a devDependency here — there
+    is no `node_modules/playwright` to import. Resolve it by absolute path
+    (`require('/Users/kmosher/.local/lib/node_modules/playwright')`); a bare
+    specifier does not resolve, since node never searches the global root.
+    Chromium and WebKit are both unpacked, and `PLAYWRIGHT_BROWSERS_PATH` needs
+    no setting: the default `~/Library/Caches/ms-playwright` is a symlink to
+    `/cache/ms-playwright`, which the sandbox already grants for writes.
+    Launching still needs the sandbox off (XPC fails "Connection Invalid"
+    otherwise).
 - **Drive `krit-tui` under tmux, not under a hand-rolled pty.** tmux is a
   debugged terminal emulator that will hand you the rendered screen, which is
   the whole problem (see below). It needs the sandbox off — `openpty` fails
