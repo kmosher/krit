@@ -13,6 +13,18 @@ see the warning at the top of the README.
 
 <!-- releases below -->
 
+## 0.13.0 — 2026-09-08
+
+### Added
+
+- `just install` now builds and installs `krit.app` to `/Applications`
+  (`just install-app` on its own; a no-op off macOS). The app is a separate
+  cargo workspace and previously only a manual `cargo tauri build` ever touched
+  it, so an installed bundle could sit many versions behind the UI it frames —
+  which is how Done reviewing came to leave the window open, its capabilities
+  predating `core:window:allow-close`.
+
+
 ## 0.12.3 — 2026-08-14
 
 ### Changed
