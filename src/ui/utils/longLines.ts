@@ -23,25 +23,42 @@ import type { FileDiffMetadata } from '@pierre/diffs'
  * all reach this length in ordinary repos, so this is a papercut on real work
  * long before it is anything to do with hostile input.
  *
- * The number is well below where the damage was seen (4k rendered fine, 16k did
+ * The number is below where the damage was seen (4k rendered fine, 16k did
  * not) rather than just under it, because the failure scales with how many rows
  * the line wraps to — which grows as the window narrows. A cap tuned to a wide
  * window would come back on a split screen.
  */
-export const MAX_RENDERABLE_LINE = 2000
+export const MAX_RENDERABLE_LINE = 4000
 
 /**
- * The longest line on either side, counting context: Pierre renders unchanged
- * lines too once a collapsed region is expanded, and the reserved height is
- * computed from what it renders.
+ * The longest line the file's hunks will render, on either side. Only hunk
+ * lines count: a file is not withheld for a line sitting in collapsed context,
+ * because the Pulumi stack configs that motivated this carry 2k-character
+ * `secure:` ciphertexts nobody changes and nobody expands to. The cost is that
+ * expanding a gap across such a line can still displace the surface.
+ *
+ * Truncating gap lines in the copy handed to CodeView would close that, but
+ * an inline edit session takes its text from the same `additionLines`, so
+ * saving would write the truncated line to disk.
+ *
+ * Pass the islanded diff: a comment island is a hunk, and renders its lines.
  */
 export function longestLineIn(fileDiff: FileDiffMetadata): number {
   let longest = 0
-  for (const line of fileDiff.additionLines) {
-    if (line.length > longest) longest = line.length
+  for (const hunk of fileDiff.hunks) {
+    longest = Math.max(
+      longest,
+      longestIn(fileDiff.additionLines, hunk.additionLineIndex, hunk.additionCount),
+      longestIn(fileDiff.deletionLines, hunk.deletionLineIndex, hunk.deletionCount),
+    )
   }
-  for (const line of fileDiff.deletionLines) {
-    if (line.length > longest) longest = line.length
+  return longest
+}
+
+function longestIn(lines: string[], start: number, count: number): number {
+  let longest = 0
+  for (let i = start; i < start + count && i < lines.length; i++) {
+    if (lines[i].length > longest) longest = lines[i].length
   }
   return longest
 }

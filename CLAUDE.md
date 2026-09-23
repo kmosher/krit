@@ -666,6 +666,11 @@ is a guarantee — the residual race is the length of a fold:
   data URIs reach that length in ordinary repos, so it is a papercut long before
   it is anything adversarial. `longLines.ts` holds the cap and App withholds
   those files from `DiffViewer`, naming them in a strip above it.
+  - **Only hunk lines count.** A long line in collapsed context no longer
+    withholds its file, so expanding across one can still displace the
+    surface. Don't close that by truncating gap lines in the copy handed to
+    CodeView: an inline edit session reads its text from the same
+    `additionLines`, and saving would write the truncation to disk.
   - **Emptying the body is not enough**, which is the part that costs a day:
     handing CodeView a hunk-less copy (`emptyDiffFor`, the mechanism the preview
     pane uses) still reserves the item's height, so the surface stays displaced
