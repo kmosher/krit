@@ -13,6 +13,16 @@ see the warning at the top of the README.
 
 <!-- releases below -->
 
+## 0.15.0 — 2026-09-23
+
+### Changed
+
+- A file is withheld from the review surface for an overlong line only when
+  that line is in a hunk. A long line in collapsed context — a Pulumi stack
+  config's `secure:` ciphertext, say — no longer hides the file. The cap is
+  raised from 2,000 to 4,000 characters.
+
+
 ## 0.14.0 — 2026-09-08
 
 ### Added
