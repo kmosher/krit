@@ -148,7 +148,7 @@ is a guarantee — the residual race is the length of a fold:
     thing under test is reachable another way — seeding server state and letting
     the UI restore it, say — take that route rather than making the run depend
     on the hover affordance.
-  - Done reviewing needs a listener: attach `krit wait-for-submit` (background
+  - Done reviewing needs a listener: attach `krit wait` or `krit wait-for-submit` (background
     it properly — it blocks) or an agent WS subscriber, or it renders as a
     disabled "No watcher". It does not need any comments.
   - Playwright is installed **globally**, not as a devDependency here — there

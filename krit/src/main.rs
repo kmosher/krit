@@ -61,6 +61,12 @@ Subcommands (talk to the running krit server for the current session):
                               (exit 0 on submit, 1 if no server is reachable or
                               the state file is unusable, 2 if the connection
                               drops before submit)
+  wait                        Block quietly until the reviewer does something (a comment, a
+                              reply, a submit, or the review ending), print that as JSON
+                              and exit 0 — or, at once, print any open comment still
+                              awaiting your reply as `unanswered`. The cold counterpart to
+                              streaming /api/events-ws: re-run it after handling each wake.
+                              (exit 1 if no server is reachable, 2 if the connection drops)
   refresh                     Tell the browser tab to refetch the diff (after edits
                               made outside the in-browser editor)
 
@@ -233,6 +239,7 @@ enum Verb<'a> {
     Resolve(&'a str),
     Reopen(&'a str),
     WaitForSubmit,
+    Wait,
     Refresh,
 }
 
@@ -270,6 +277,7 @@ fn parse_verb(args: &[String]) -> Result<Verb<'_>, String> {
             None => Err("Usage: krit reopen <comment-id>".into()),
         },
         "wait-for-submit" => Ok(Verb::WaitForSubmit),
+        "wait" => Ok(Verb::Wait),
         "refresh" => Ok(Verb::Refresh),
         _ => unreachable!("dispatch() only routes names in SUBCOMMANDS"),
     }
@@ -290,6 +298,7 @@ fn run_subcommand(args: &[String]) {
         Verb::Resolve(id) => subcommands::cmd_resolve(id),
         Verb::Reopen(id) => subcommands::cmd_reopen(id),
         Verb::WaitForSubmit => subcommands::cmd_wait_for_submit(),
+        Verb::Wait => subcommands::cmd_wait(),
         Verb::Refresh => subcommands::cmd_refresh(),
     }
 }
@@ -830,6 +839,7 @@ mod tests {
             parse_verb(&argv(&["wait-for-submit"])).unwrap(),
             Verb::WaitForSubmit
         );
+        assert_eq!(parse_verb(&argv(&["wait"])).unwrap(), Verb::Wait);
     }
 
     #[test]

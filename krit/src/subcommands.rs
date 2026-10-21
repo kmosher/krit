@@ -13,13 +13,14 @@ use crate::state::{KritState, client_base_url, default_state_path, read_state_at
 use serde_json::{Value, json};
 use std::io::Read;
 
-pub const SUBCOMMANDS: [&str; 7] = [
+pub const SUBCOMMANDS: [&str; 8] = [
     "state",
     "comments",
     "reply",
     "resolve",
     "reopen",
     "wait-for-submit",
+    "wait",
     "refresh",
 ];
 
@@ -276,10 +277,10 @@ pub fn cmd_refresh() {
     println!("refreshed");
 }
 
-/// Pull every complete SSE frame out of `buf`, returning the `submitted`
-/// payload as soon as one appears. Split out because it is the whole of
-/// wait-for-submit that can be wrong: everything else is a socket.
-fn scan_for_submit(buf: &mut Vec<u8>) -> Option<Value> {
+/// Pull the next complete SSE frame out of `buf` and parse it, skipping
+/// keep-alives and anything that is not JSON. Split out because it is the whole
+/// of the stream verbs that can be wrong: everything else is a socket.
+fn next_event(buf: &mut Vec<u8>) -> Option<Value> {
     // SSE frames are separated by a blank line.
     while let Some(idx) = buf.windows(2).position(|w| w == b"\n\n") {
         let frame = String::from_utf8_lossy(&buf[..idx]).into_owned();
@@ -292,9 +293,16 @@ fn scan_for_submit(buf: &mut Vec<u8>) -> Option<Value> {
         if data.is_empty() {
             continue; // ping/keep-alive
         }
-        let Ok(parsed) = serde_json::from_str::<Value>(&data) else {
-            continue;
-        };
+        if let Ok(parsed) = serde_json::from_str::<Value>(&data) {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
+/// Consume frames until a `submitted` appears and return its payload.
+fn scan_for_submit(buf: &mut Vec<u8>) -> Option<Value> {
+    while let Some(parsed) = next_event(buf) {
         if parsed["type"] == "submitted" {
             // `summary` is forwarded verbatim, including its absence: the
             // concluding notes are the point of waiting, and a caller that
@@ -310,46 +318,46 @@ fn scan_for_submit(buf: &mut Vec<u8>) -> Option<Value> {
     None
 }
 
+/// Open the SSE stream at `path` as a `role=cli` subscriber, or **exit 2**
+/// saying why. Through the configured agent, not a bare `ureq::get`: the
+/// default configuration would route this loopback stream through an exported
+/// `HTTP_PROXY`, and the verbs that block on it are what an agent waits for — a
+/// stream that never connects is a review that never finishes.
+fn open_stream(verb: &str, path: &str) -> impl Read {
+    let state = require_state();
+    let url = format!("{}{path}", client_base_url(&state));
+    match agent()
+        .get(&url)
+        .header("Accept", "text/event-stream")
+        .call()
+    {
+        // `into_reader` is the unlimited one: every other body-reading helper
+        // caps at 10 MiB, which on a stream held open for the life of a review
+        // would look like the server closing it.
+        Ok(res) if res.status().is_success() => res.into_body().into_reader(),
+        // `http_status_as_error(false)` means a refusal arrives as an `Ok`;
+        // without this arm a 401 or a 404 would be treated as an open stream
+        // that simply never says anything.
+        Ok(res) => {
+            eprintln!("{verb}: krit answered {} at {url}", res.status().as_u16());
+            std::process::exit(2);
+        }
+        Err(err) => {
+            eprintln!("{verb}: cannot reach krit at {url}: {err}");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Block until the user clicks "Done reviewing". Exits 0 on submit, 1 when
 /// there's no reachable server or the state file is unusable (`require_state`
 /// exits before the stream ever opens), 2 on connection loss before submit.
 /// Retained for the batch workflow — the streaming flow subscribes to
 /// /api/events-ws directly (see the skill).
 pub fn cmd_wait_for_submit() -> ! {
-    let state = require_state();
-    let url = format!("{}/api/events?role=cli", client_base_url(&state));
+    let mut reader = open_stream("wait-for-submit", "/api/events?role=cli");
     eprintln!("wait-for-submit: connected — review, then click Done reviewing in the browser.");
 
-    // Through the configured agent, not a bare `ureq::get`: the default
-    // configuration would route this loopback stream through an exported
-    // `HTTP_PROXY`, and this verb is the one an agent blocks on — a stream that
-    // never connects is a review that never finishes.
-    let res = match agent()
-        .get(&url)
-        .header("Accept", "text/event-stream")
-        .call()
-    {
-        Ok(res) if res.status().is_success() => res,
-        // `http_status_as_error(false)` means a refusal arrives as an `Ok`;
-        // without this arm a 401 or a 404 would be treated as an open stream
-        // that simply never says anything.
-        Ok(res) => {
-            eprintln!(
-                "wait-for-submit: krit answered {} at {url}",
-                res.status().as_u16()
-            );
-            std::process::exit(2);
-        }
-        Err(err) => {
-            eprintln!("wait-for-submit: cannot reach krit at {url}: {err}");
-            std::process::exit(2);
-        }
-    };
-
-    // `into_reader` is the unlimited one: every other body-reading helper caps
-    // at 10 MiB, which on a stream held open for the life of a review would
-    // look like the server closing it.
-    let mut reader = res.into_body().into_reader();
     // Buffered as raw bytes and decoded a whole frame at a time: a read
     // boundary lands anywhere, and decoding each 4 KiB chunk on its own turns
     // a multi-byte character straddling one into U+FFFD on both sides. The
@@ -371,6 +379,81 @@ pub fn cmd_wait_for_submit() -> ! {
         }
     }
     eprintln!("wait-for-submit: server closed the connection before submit fired.");
+    std::process::exit(2);
+}
+
+/// Open comments the agent owes an answer to: the reviewer spoke last. A
+/// comment is always the reviewer's, so one with no replies qualifies, and so
+/// does one whose latest reply is theirs. A missing reply author is 'agent',
+/// the same convention `agent_visible` uses. Queued comments are not comments
+/// yet and are left out.
+///
+/// This is what lets a cold wait be re-armed without losing anything: the
+/// stream replays nothing, so a comment that landed between one `wait` exiting
+/// and the next starting would otherwise be heard by no one.
+fn unanswered(all: &[Value]) -> Vec<&Value> {
+    all.iter()
+        .filter(|c| {
+            c["status"] == "open"
+                && c["replies"]
+                    .as_array()
+                    .and_then(|r| r.last())
+                    .is_none_or(|last| !matches!(last["author"].as_str(), None | Some("agent")))
+        })
+        .collect()
+}
+
+/// The frame that ends a cold wait: anything but the server's own presence
+/// snapshot, which the stream opens with and repeats as tabs come and go.
+fn wakes_a_wait(event: &Value) -> bool {
+    event["type"] != "state"
+}
+
+/// The silent half of watching a review. Where the Monitor's websocket wakes
+/// the agent on every frame and cannot outlive 30 minutes, this blocks quietly
+/// for as long as it takes, prints what woke it, and exits — so a review gone
+/// idle costs nothing until the reviewer returns. Output is one JSON object per
+/// line, in the shapes the websocket speaks, plus `unanswered` (a comment the
+/// agent has not yet replied to, found on arrival). Exits 0 when woken, 1 when
+/// no server is reachable, 2 when the connection drops.
+pub fn cmd_wait() -> ! {
+    let state = require_state();
+    let backlog = match call_api(&client_base_url(&state), &comments_call()) {
+        Ok(v) => v,
+        Err(err) => {
+            for line in err.lines() {
+                eprintln!("{line}");
+            }
+            std::process::exit(1);
+        }
+    };
+    let empty = Vec::new();
+    let owed = unanswered(backlog.as_array().unwrap_or(&empty));
+    if !owed.is_empty() {
+        for comment in owed {
+            println!("{}", json!({"type": "unanswered", "comment": comment}));
+        }
+        std::process::exit(0);
+    }
+
+    let mut reader = open_stream("wait", "/api/events?role=cli&view=agent");
+    eprintln!("wait: connected — blocking until the reviewer does something.");
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        while let Some(event) = next_event(&mut buf) {
+            if wakes_a_wait(&event) {
+                println!("{event}");
+                std::process::exit(0);
+            }
+        }
+    }
+    eprintln!("wait: server closed the connection without a review-ended.");
     std::process::exit(2);
 }
 
@@ -620,6 +703,85 @@ mod tests {
         let lines = err.lines();
         assert!(lines[0].starts_with("Error reaching krit at "));
         assert!(lines[1].contains("not responding"));
+    }
+
+    // --- wait ------------------------------------------------------------
+
+    fn reply(author: Option<&str>) -> Value {
+        match author {
+            Some(a) => json!({"body": "x", "author": a}),
+            None => json!({"body": "x"}),
+        }
+    }
+
+    fn owed_ids(all: &[Value]) -> Vec<String> {
+        unanswered(all)
+            .iter()
+            .map(|c| c["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_comment_nobody_has_answered_is_owed_a_reply() {
+        let all = vec![comment("a", "open", json!([]))];
+        assert_eq!(owed_ids(&all), ["a"]);
+    }
+
+    #[test]
+    fn whoever_spoke_last_decides_whether_a_reply_is_owed() {
+        // The agent answered, so the ball is with the reviewer; the reviewer
+        // answering back hands it over again. A reply with no author is the
+        // agent's, as everywhere else.
+        let all = vec![
+            comment(
+                "agent-last",
+                "open",
+                json!([reply(Some("user")), reply(Some("agent"))]),
+            ),
+            comment("unsigned-last", "open", json!([reply(None)])),
+            comment(
+                "user-last",
+                "open",
+                json!([reply(Some("agent")), reply(Some("user"))]),
+            ),
+        ];
+        assert_eq!(owed_ids(&all), ["user-last"]);
+    }
+
+    #[test]
+    fn resolved_and_queued_comments_are_never_owed() {
+        // Waking on a queued comment would hand the agent text the reviewer
+        // has deliberately not posted yet.
+        let all = vec![
+            comment("r", "resolved", json!([])),
+            comment("q", "queued", json!([])),
+        ];
+        assert!(owed_ids(&all).is_empty());
+    }
+
+    #[test]
+    fn only_the_presence_snapshot_fails_to_wake_a_wait() {
+        assert!(!wakes_a_wait(&json!({"type": "state", "uiCount": 2})));
+        for t in [
+            "comment-added",
+            "reply-added",
+            "user-edit",
+            "file-written",
+            "submitted",
+            "review-ended",
+        ] {
+            assert!(wakes_a_wait(&json!({"type": t})), "{t}");
+        }
+    }
+
+    #[test]
+    fn next_event_skips_noise_and_returns_frames_in_order() {
+        let mut buf =
+            b": ping\n\ndata: not json\n\ndata: {\"type\":\"a\"}\n\ndata: {\"type\":\"b\"}\n\n"
+                .to_vec();
+        assert_eq!(next_event(&mut buf).unwrap()["type"], "a");
+        assert_eq!(next_event(&mut buf).unwrap()["type"], "b");
+        assert!(next_event(&mut buf).is_none());
     }
 
     // --- wait-for-submit frame scanning --------------------------------

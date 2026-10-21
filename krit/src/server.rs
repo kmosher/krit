@@ -1288,6 +1288,10 @@ async fn api_events(
     Query(params): Query<HashMap<String, String>>,
 ) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, std::convert::Infallible>>> {
     let role = subscriber_role(params.get("role").map(|s| s.as_str()));
+    // `view=agent` is the ws stream's filter on this transport, for the one
+    // agent-side consumer that cannot speak a websocket (`krit wait`). Opt-in,
+    // so the UI and the TUI keep hearing everything.
+    let agent_view = params.get("view").map(|s| s.as_str()) == Some("agent");
     let (mut rx, guard) = state.hub.subscribe(role);
     let initial = state.hub.state_event();
     let stream = async_stream::stream! {
@@ -1298,6 +1302,9 @@ async fn api_events(
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    if agent_view && !agent_visible(&event) {
+                        continue;
+                    }
                     let terminal = matches!(event, Event::ReviewEnded { .. });
                     yield Ok(to_sse(&event));
                     // Ending the stream on the terminal event is what lets

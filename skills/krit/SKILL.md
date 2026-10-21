@@ -96,6 +96,22 @@ The agent stream is **human-only**: the server filters out echoes of your own wo
 
 Attaching also lights up the **Done reviewing** button in the UI — with no agent subscriber attached, the button grays out and the user falls back to "Copy comments."
 
+### When the Monitor expires: hot and cold
+
+A Monitor lives at most 30 minutes, and every wake is a model turn that re-reads the whole context — a review left open over lunch is expensive to babysit with a stream. So there are two ways to listen:
+
+- **Hot: the `ws` Monitor above.** One wake per event. Right while the reviewer is actively commenting and you are iterating with them.
+- **Cold: `krit wait`, run with `Bash(run_in_background: true, description: "Cold wait: krit review")`.** Silent until the reviewer does something, then prints that as one JSON line per event (the same shapes as Step 2) and exits. The exit is your one wake. Background shells have no time limit in interactive sessions, so an idle review costs nothing.
+
+When the Monitor ends (its notice arrives with no `review-ended`), decide **without asking the user and without mentioning it to them**:
+
+- **Still hot** — the reviewer commented, replied or edited within the last few minutes, or you just applied a change and expect a reaction: arm a new `ws` Monitor.
+- **Gone quiet** — start `krit wait` in the background and end your turn.
+
+When a cold `krit wait` exits, handle its output as in Step 4, then **re-arm before ending your turn**: cold again by default, hot if you just replied or changed something and expect a follow-up. `krit wait` first prints any open comment you have not answered, as `{"type":"unanswered","comment":{…}}`, and exits at once — that catch-up is what makes the gap between one wait exiting and the next starting safe, since the stream itself replays nothing. Treat `unanswered` exactly like `comment-added` (or `reply-added`, if its `replies` end with the reviewer's). It is also why every comment you handle must get a reply: one you read and leave silent is "unanswered" forever and wakes every wait immediately.
+
+Exit codes: `0` woke, `1` no reachable server or unusable state file, `2` connection dropped with no `review-ended` — krit crashed (Step 5). Cold waits don't survive non-interactive runs (`-p`, Agent SDK): background shells are killed there, so stay hot. Never arm either listener from a subagent; it exits after arming and the listener dies with it.
+
 ## Step 3: Hand off and end the turn
 
 Tell the user — in your own words — that:
@@ -131,7 +147,7 @@ Read the new frame(s) from the Monitor. For each:
 
   `summary` is the user's concluding notes, typed into the box the button opens. It is optional and often absent. When it is there, read it as review content, not as a sign-off: it is where verdicts that belong to no single line get said ("the error handling is the part I'm unsure about", "fine to land, but not the migration"). It can also be the *entire* review — finishing with no comments at all is allowed, since sometimes a change is simply fine. A `submitted` with no comments and no summary means the user found nothing to say; take it at face value rather than prompting for more.
 
-End the turn after handling the event(s). The Monitor will wake you again on the next one.
+End the turn after handling the event(s). The Monitor will wake you again on the next one — or, if you went cold, re-arm `krit wait` first.
 
 ## Step 5: Wrap up (when the stream ends)
 
@@ -146,6 +162,7 @@ The krit server shuts itself down 5s after the last UI subscriber disconnects (o
 ```bash
 krit comments [open|resolved|replied|all]   # dump comments as JSON (no arg = all)
 krit reopen <id>                        # flip a resolved comment back to open
+krit wait                              # cold listener: block until the reviewer acts, print it, exit 0 (see Step 2)
 krit wait-for-submit                    # batch alternative: block until Done reviewing (exit 0) or disconnect (exit 2)
                                         # prints {"submitted":true,"timestamp":...,"summary":"..."}; summary is absent if none was written
 ```

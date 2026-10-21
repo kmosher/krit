@@ -95,6 +95,8 @@ krit reply <id> <text...>         # Reply to a comment (tagged author: 'agent')
 krit resolve <id>                 # Mark a comment resolved
 krit reopen <id>                  # Reopen a resolved comment
 krit refresh                      # Re-diff and push updates to the UI
+krit wait                         # Block quietly until the reviewer acts, print it as JSON, exit
+                                  # (first prints any comment still awaiting a reply)
 krit wait-for-submit              # Block until the user clicks Done reviewing, then print
                                   # the submit as JSON (with their concluding notes, if any)
 ```
