@@ -180,7 +180,7 @@ describe('Toolbar — settings menu', () => {
 
 describe('Toolbar — copying comments', () => {
   it('counts only the comments Copy will actually produce', () => {
-    // formatAllComments excludes queued comments. Labelling the button with the total
+    // formatAllComments excludes queued comments. Labeling the button with the total
     // would promise the reviewer text that never lands on the clipboard.
     renderToolbar({ commentCount: 5, queuedCount: 2 })
     expect(screen.getByRole('button', { name: 'Copy (3)' })).toBeEnabled()

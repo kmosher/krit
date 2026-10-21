@@ -91,7 +91,7 @@ def bump_versions(version: str) -> None:
     that one to cargo.
 
     Every one is a targeted substitution, including the JSON. Parsing and
-    re-serialising those looks tidier and is worse: `json.dumps` re-escapes
+    re-serializing those looks tidier and is worse: `json.dumps` re-escapes
     non-ASCII, so the first run mangled an em-dash in package.json's
     description into `\\u2014` — a release that silently edits prose it was
     never asked to touch. A regex changes the version and nothing else.

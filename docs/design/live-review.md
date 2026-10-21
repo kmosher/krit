@@ -292,7 +292,7 @@ deliberately layered:
   convention, and every convention loses a race eventually; this is the part
   that can't be raced past. It is opt-in per request — a PUT without `If-Match`
   is last-writer-wins, as it always was — so no existing caller changed
-  behaviour. A refused inline save is held in a conflict bar rather than
+  behavior. A refused inline save is held in a conflict bar rather than
   reported as lost, since Pierre has torn the editor down by the time the
   server answers.
 

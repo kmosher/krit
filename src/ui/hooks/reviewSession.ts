@@ -82,7 +82,7 @@ export async function closeReviewWindow(): Promise<'closing' | 'stays-open'> {
   } catch {
     // Blocked by the browser; the page simply stays open.
   }
-  // `window.closed` does not flip synchronously even when the close is honoured,
+  // `window.closed` does not flip synchronously even when the close is honored,
   // so this is the pessimistic answer: the caller says the window is the
   // reviewer's to close, and a window that *is* closing takes the message with
   // it.

@@ -35,7 +35,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// What `GET /api/diff` gives us. `binaryFiles` is still not modelled — the
+/// What `GET /api/diff` gives us. `binaryFiles` is still not modeled — the
 /// patch already says a file is binary, and an unused field here would read as
 /// support that isn't there.
 ///
@@ -94,10 +94,10 @@ pub struct FileSides {
 /// The server answers with exactly one of these shapes, and the three refusals
 /// are not interchangeable: `missing` is a file that did not exist at that ref
 /// (every added file has one), `binary` is content no diff can show, and
-/// `oversize` is a file past `read_side`'s caps. Modelled as flags rather than
+/// `oversize` is a file past `read_side`'s caps. Modeled as flags rather than
 /// an enum because that is what serde sees on the wire.
 ///
-/// A shape this client does not recognise leaves every field false, which
+/// A shape this client does not recognize leaves every field false, which
 /// `refusal` cannot name — so `take_file_text` treats *any* side with no
 /// `contents` as a refusal rather than trusting this list to stay complete. The
 /// wire will grow shapes, and the alternative is a file whose hidden context
@@ -152,7 +152,7 @@ pub struct Settings {
     /// `diffStyle == "split"`. Read from the reviewer's settings once at
     /// startup and never written back — `s` flips the view for this session
     /// only, where the browser's toggle is durable, so the two can diverge
-    /// until the next launch. Whether the terminal is wide enough to honour it
+    /// until the next launch. Whether the terminal is wide enough to honor it
     /// is `App::split`'s question, not this one.
     pub split: bool,
 }

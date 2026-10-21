@@ -1,6 +1,6 @@
 //! Syntax highlighting, from whole files rather than from hunks.
 //!
-//! **The whole file is the unit, and that is not an optimisation.** Syntax is
+//! **The whole file is the unit, and that is not an optimization.** Syntax is
 //! stateful down a file — a block comment, a raw string, a heredoc all run
 //! past the line that opens them — so a hunk highlighted on its own starts
 //! from a parse state nobody established. A hunk that opens inside a block
@@ -49,7 +49,7 @@ pub type FileRuns = Vec<Vec<Run>>;
 /// How much color the terminal will take.
 ///
 /// Measured once from the environment rather than per frame. `None` is not
-/// merely "draw it grey": it is the signal to skip loading the syntax set
+/// merely "draw it gray": it is the signal to skip loading the syntax set
 /// entirely, which is most of what highlighting costs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Depth {
@@ -140,7 +140,7 @@ impl Highlighter {
     ///
     /// `path` picks the syntax by extension, falling back to the file's first
     /// line (which is what catches a `#!` script with no extension at all — a
-    /// real shape in every repo). A file whose language is not recognised gets
+    /// real shape in every repo). A file whose language is not recognized gets
     /// an empty result rather than plain-text runs, so the renderer can skip
     /// the whole overlay for it.
     pub fn file(&self, path: &str, text: &str, tab_size: usize) -> FileRuns {
@@ -243,9 +243,9 @@ fn normalize(s: &str) -> String {
 
 /// Nearest xterm-256 index for an RGB triple.
 ///
-/// The 6×6×6 cube and the 24-step grey ramp are compared rather than assuming
-/// the cube wins: a near-grey lands much closer on the ramp, and syntax themes
-/// are full of near-greys (comments, punctuation).
+/// The 6×6×6 cube and the 24-step gray ramp are compared rather than assuming
+/// the cube wins: a near-gray lands much closer on the ramp, and syntax themes
+/// are full of near-grays (comments, punctuation).
 fn ansi256_of(r: u8, g: u8, b: u8) -> u8 {
     let cube_index = |v: u8| -> u8 {
         // The cube's levels are 0, 95, 135, 175, 215, 255 — not evenly spaced,
@@ -275,15 +275,15 @@ fn ansi256_of(r: u8, g: u8, b: u8) -> u8 {
             ),
         ),
     );
-    // Grey ramp: 232..=255 at 8 + 10n.
+    // Gray ramp: 232..=255 at 8 + 10n.
     let grey_step = ((r as u32 + g as u32 + b as u32) / 3).saturating_sub(8) / 10;
     let grey_step = grey_step.min(23) as u8;
     let grey_value = 8 + 10 * grey_step;
-    let grey = (
+    let gray = (
         232 + grey_step,
         dist((r, g, b), (grey_value, grey_value, grey_value)),
     );
-    if grey.1 < cube.1 { grey.0 } else { cube.0 }
+    if gray.1 < cube.1 { gray.0 } else { cube.0 }
 }
 
 fn dist(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn no_color_declines_to_build_a_highlighter_at_all() {
-        // Not merely "draw it grey": loading the syntax set is nearly all of
+        // Not merely "draw it gray": loading the syntax set is nearly all of
         // what highlighting costs, and under NO_COLOR none of it is spendable.
         assert!(Highlighter::new(Depth::None, None).is_none());
     }

@@ -436,7 +436,7 @@ is a guarantee — the residual race is the length of a fold:
   - **A side with no text still gets its gaps.** An oversize or binary file
     computes its interior gaps anyway so the row can say *why* it will not open
     — told nothing, a reviewer cannot tell a file too large to expand from a key
-    that does not work. That covers shapes this client does not recognise as
+    that does not work. That covers shapes this client does not recognize as
     well as the three it does, because the wire will grow more of them and the
     alternative is a file whose hidden context has silently no row at all. Only
     the interior gaps: the run after the last hunk is bounded by the file's
@@ -491,7 +491,7 @@ is a guarantee — the residual race is the length of a fold:
     the other column's frame.
   - The fallback threshold is measured on the **diff pane**, not the terminal,
     because the file list takes a fixed 34 columns — so hiding the list is a way
-    to get split view back on a narrow terminal, which is the behaviour you want
+    to get split view back on a narrow terminal, which is the behavior you want
     and would be unexplainable if the threshold were on the window. That also
     makes `f` an *implicit* view flip, so `set_panes` drops the selection when
     `split()` changes across a rebuild, exactly as the explicit toggle does: its
@@ -814,7 +814,7 @@ is a guarantee — the residual race is the length of a fold:
   an error. Both traps found so far shift *every* offset in the document —
   `<!DOCTYPE html>` scanned as text, and the newline between `</head>` and
   `<body>` that the parser drops but a naive scan keeps. `visibleTextOffsetOf`
-  is serialised into the bridge with `toString()` so there is only one copy of
+  is serialized into the bridge with `toString()` so there is only one copy of
   the traversal, and `htmlSandbox.test.ts` asserts the two halves agree on
   every text run in a sample document. Keep that test honest if you touch
   either side.
@@ -916,7 +916,7 @@ is a guarantee — the residual race is the length of a fold:
   - The bubble is **keyed by comment id** at every call site, and resets its own
     editing state when the id changes. Pierre keys line annotations by array
     *index*, so deleting a comment earlier in a file shifts every later one into
-    its neighbour's slot — React then reuses the component, and an open editor
+    its neighbor's slot — React then reuses the component, and an open editor
     would file one comment's text under another comment's id.
 - Pending drafts are the one mutation that **deliberately does not broadcast**.
   Echoing a reviewer's keystrokes back into the form they came from fights the

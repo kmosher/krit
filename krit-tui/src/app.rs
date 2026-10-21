@@ -293,7 +293,7 @@ pub struct App {
     /// named `watchers`: that is a narrower field on the same frame (the
     /// `role=cli` count alone), and a reader grepping for it in the server or
     /// the browser would conclude agents are not counted. Done reviewing means
-    /// nothing with nobody listening; the browser greys its button out on the
+    /// nothing with nobody listening; the browser grays its button out on the
     /// same predicate, spelled `watcherCount > 0 || agentCount > 0`.
     pub listeners: usize,
     pub should_quit: bool,
@@ -1194,12 +1194,12 @@ impl App {
 
     /// Whether the diff is actually being drawn side by side.
     ///
-    /// The reviewer's preference *and* enough room to honour it. Measured on
+    /// The reviewer's preference *and* enough room to honor it. Measured on
     /// the diff pane rather than the terminal, because the file list takes a
     /// fixed 34 columns off the front — a 120-column terminal showing the list
     /// has 86 to split, and two 36-column code columns are not a diff anyone
     /// can read. Hiding the list is therefore a way to get split view back on a
-    /// narrow terminal, which is the behaviour you want and would be impossible
+    /// narrow terminal, which is the behavior you want and would be impossible
     /// to explain if the threshold were on the window.
     pub fn split(&self) -> bool {
         self.split_pref && self.wrap_width >= SPLIT_MIN_COLS
@@ -1254,7 +1254,7 @@ impl App {
     /// which decides nothing once two rows have become one line. A drag that
     /// went down and to the left then arrives still in gesture order, and an
     /// unswapped pair is stored durably — the server clamps `endLine` and never
-    /// the columns, and the browser normalises the same case in
+    /// the columns, and the browser normalizes the same case in
     /// `mapRangeToAnchor`, so the two clients would disagree about an invariant
     /// only one of them keeps. Ordered before the lookup, never after: swapping
     /// resolved endpoints would move each to the far side of its own character
@@ -1538,7 +1538,7 @@ fn resolve(key: KeyEvent, ctrl: bool) -> (Action, bool) {
         (KeyCode::Char('t'), false) => Action::ToggleTints,
         // `v` alone is the visual mode — it is already line-wise, so `V` was a
         // synonym rather than a second granularity, and this is the key the
-        // browser's checkbox is labelled with.
+        // browser's checkbox is labeled with.
         (KeyCode::Char('V'), false) => Action::ToggleViewed,
         // Same physical key shifted and unshifted, so they mean the same thing;
         // binding them differently is how a reviewer expands twice by accident.

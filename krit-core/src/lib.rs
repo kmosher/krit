@@ -22,7 +22,7 @@ pub mod types;
 /// being too large fails as a parse error naming no cap, which is a bad way to
 /// learn a review is too big.
 ///
-/// Generous rather than tuned. The cap is a defence against a hostile server
+/// Generous rather than tuned. The cap is a defense against a hostile server
 /// streaming until the client dies; this one is on loopback and was usually
 /// started by the client reading it, so the number only has to be larger than
 /// any real review.

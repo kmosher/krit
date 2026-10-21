@@ -28,7 +28,7 @@ beforeEach(() => {
       if (init?.method === 'PUT') {
         puts.push(JSON.parse(init.body ?? '{}') as Put)
         // Held open so tests can observe the window between the optimistic
-        // update and the server's acknowledgement.
+        // update and the server's acknowledgment.
         return new Promise<unknown>((resolve) => {
           resolvePut = () => resolve({ json: () => Promise.resolve({ ok: true }) })
         })

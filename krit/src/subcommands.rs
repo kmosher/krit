@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(lines[1].trim(), "no such comment");
     }
 
-    /// A status nothing recognises has no reason phrase to print, and the
+    /// A status nothing recognizes has no reason phrase to print, and the
     /// client shows the code alone rather than a gap where a phrase would be.
     /// The phrase is derived from the code now, so this is reachable from any
     /// server — or anything else — answering on that port.

@@ -38,7 +38,7 @@ export interface SourceOffsetOptions {
  * Runs after rehype-raw (so elements recovered from raw HTML in the markdown
  * are stamped too — it re-parses but preserves positions) and before
  * rehype-sanitize, which is what drops the attributes off anything the schema
- * doesn't recognise.
+ * doesn't recognize.
  */
 export function rehypeSourceOffsets(options: SourceOffsetOptions) {
   const map = options.mapOffset ?? ((n: number) => n)

@@ -250,7 +250,7 @@ describe('filePathForRoot', () => {
     expect(filePathForRoot(a.root, [a.rendered])).toBe('src/anchor.ts')
   })
 
-  it('does not answer with a neighbouring file', () => {
+  it('does not answer with a neighboring file', () => {
     // Two files are mounted; each root must report its own. Getting this wrong
     // is the whole failure being fixed — the columns are right and the file is
     // someone else's, which no reviewer would think to check.

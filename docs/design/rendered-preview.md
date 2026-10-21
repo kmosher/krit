@@ -330,7 +330,7 @@ a silent way.** Both halves must agree on what counts as visible text, or every
 offset shifts and the anchor is quietly wrong. Two traps hit during
 implementation — `<!DOCTYPE html>` counted as text, and the newline between
 `</head>` and `<body>` that the parser drops — each shifted the whole document.
-`visibleTextOffsetOf` is therefore serialised into the bridge with `toString()`
+`visibleTextOffsetOf` is therefore serialized into the bridge with `toString()`
 so a single copy of the traversal exists, and the tests assert agreement on
 every text run rather than on a sampled one.
 

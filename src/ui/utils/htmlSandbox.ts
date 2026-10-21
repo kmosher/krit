@@ -18,7 +18,7 @@
  * the offset it reports indexes a different string than the parent built.
  *
  * Deliberately self-contained — no imports, no closure over module scope —
- * because it is serialised with `toString()` into the injected bridge below.
+ * because it is serialized with `toString()` into the injected bridge below.
  * That is what keeps the two halves from drifting: there is only one copy.
  * `htmlSandbox.test.ts` pins the agreement.
  */
@@ -122,7 +122,7 @@ const HEAD_INJECT =
 /**
  * The artifact source with krit's policy and bridge woven in.
  *
- * The CSP meta has to land inside `<head>` to be honoured, so a document that
+ * The CSP meta has to land inside `<head>` to be honored, so a document that
  * brings its own head gets the tag inserted at the top of it rather than being
  * wrapped — wrapping would nest `<html>` inside `<html>` and the parser would
  * throw the outer one away, policy included.

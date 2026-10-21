@@ -87,12 +87,12 @@ describe('locateSelection', () => {
   })
 
   it('maps a selection spanning tags back to a source range covering them', () => {
-    const html = '<p>Some <em>emphasised</em> text</p>'
+    const html = '<p>Some <em>emphasized</em> text</p>'
     const m = buildHtmlTextMap(html)
-    const found = locateSelection(m, 'Some emphasised text', 0)!
+    const found = locateSelection(m, 'Some emphasized text', 0)!
     expect(found.exact).toBe(true)
     // The range widens over the markup it crossed, which is what a suggestion
     // against this file has to replace.
-    expect(html.slice(found.startOffset, found.endOffset)).toBe('Some <em>emphasised</em> text')
+    expect(html.slice(found.startOffset, found.endOffset)).toBe('Some <em>emphasized</em> text')
   })
 })

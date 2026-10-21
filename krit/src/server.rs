@@ -615,7 +615,7 @@ async fn api_file_content_put(
     // Optimistic concurrency, opt-in: a client that tells us what it thinks is
     // on disk gets its write refused if that's no longer true, instead of
     // silently winning the race. Omitting If-Match keeps the original
-    // last-writer-wins behaviour, which every pre-existing caller relies on.
+    // last-writer-wins behavior, which every pre-existing caller relies on.
     // The check and the write it guards share one lock, or two PUTs holding
     // the same tag would both pass it and the loser's content would vanish.
     let write_guard = lock(&state.file_write);
@@ -1465,7 +1465,7 @@ fn is_local_authority(authority: &str) -> bool {
 /// reading file contents — as same-origin requests from the one position
 /// that is exempt. Names resolved through DNS are therefore refused;
 /// only literal addresses and `localhost`, neither of which an attacker can
-/// repoint, are honoured. A cross-site `Origin` is refused for the same
+/// repoint, are honored. A cross-site `Origin` is refused for the same
 /// reason; a request with no Origin at all is a non-browser client (the CLI,
 /// the agent's ws Monitor, curl) and passes.
 async fn guard_local_requests(

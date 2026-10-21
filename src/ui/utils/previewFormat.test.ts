@@ -7,7 +7,7 @@ import {
 } from './previewFormat'
 
 describe('previewFormatFor', () => {
-  it('recognises markdown and html by extension, case-insensitively', () => {
+  it('recognizes markdown and html by extension, case-insensitively', () => {
     expect(previewFormatFor('docs/design/tui.md')).toBe('markdown')
     expect(previewFormatFor('README.MARKDOWN')).toBe('markdown')
     expect(previewFormatFor('report.html')).toBe('html')

@@ -290,7 +290,7 @@ a TUI and a browser open on the same review would not see each other type.
 **Phase 2 — parity polish.** In progress. **Done:** hunk expansion (the gaps
 between hunks open a few lines at a time from both edges — `+` / `-`, `z` for
 all of it — out of the `fileContents` every diff response already carries),
-split view with the narrow-terminal fallback (`s`, honouring the shared
+split view with the narrow-terminal fallback (`s`, honoring the shared
 `diffStyle` setting, falling back to unified when the diff *pane* is under 90
 columns), and viewed state (`V`, the same `/api/viewed` the browser's checkbox
 writes). Still to do: the stale-file indicators, refresh

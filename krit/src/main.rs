@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn the_deep_link_failure_still_points_at_the_app_when_the_sandbox_is_not_the_cause() {
         // Sandbox first, but a genuinely missing app is the other real cause
-        // and must not be dropped in favour of it.
+        // and must not be dropped in favor of it.
         let msg = deep_link_failure_message("could not run `open`: No such file or directory");
         assert!(msg.contains("krit.app"), "{msg}");
         assert!(msg.contains("krit:// scheme"), "{msg}");

@@ -374,7 +374,7 @@ pub fn file_content(root: &Path, file_path: &str, version: &str) -> Option<Vec<u
 /// GET/PUT /api/file-content (`ETag` / `If-Match`). FNV-1a: this answers "did
 /// the bytes change under me", not "did an adversary substitute them", so a
 /// ten-line non-cryptographic hash beats taking on a hashing dependency. A
-/// collision costs one lost overwrite warning, which is the behaviour every
+/// collision costs one lost overwrite warning, which is the behavior every
 /// client had before the token existed.
 pub fn content_tag(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;

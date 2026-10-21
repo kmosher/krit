@@ -150,7 +150,7 @@ describe('bridge / source-scan agreement', () => {
     }
   })
 
-  it('serialises the shared traversal into the bridge rather than duplicating it', () => {
+  it('serializes the shared traversal into the bridge rather than duplicating it', () => {
     // The bridge must carry this exact function; a hand-written second copy is
     // what would let the two halves drift apart unnoticed.
     expect(BRIDGE_SCRIPT).toContain(visibleTextOffsetOf.toString())

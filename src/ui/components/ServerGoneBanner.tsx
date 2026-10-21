@@ -54,7 +54,7 @@ export function ServerGoneBanner({
         className="btn btn-secondary btn-sm"
         onClick={() => setDismissed(true)}
         // Named for what it does to the banner, not to the problem. "Dismiss"
-        // next to a tombstone reads like an acknowledgement that fixed it.
+        // next to a tombstone reads like an acknowledgment that fixed it.
         aria-label="Hide this warning"
       >
         Hide

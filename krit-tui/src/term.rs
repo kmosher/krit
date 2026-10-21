@@ -343,7 +343,7 @@ impl Tty {
         use std::os::fd::AsRawFd;
         let raw = self.fd.as_raw_fd();
         let mut set = std::mem::MaybeUninit::<libc::fd_set>::uninit();
-        // Safety: `FD_ZERO` initialises the whole set, which is what makes the
+        // Safety: `FD_ZERO` initializes the whole set, which is what makes the
         // `assume_init` below sound; `raw` was bounds-checked in `open`.
         let mut set = unsafe {
             libc::FD_ZERO(set.as_mut_ptr());
@@ -355,7 +355,7 @@ impl Tty {
             tv_sec: timeout.as_secs() as libc::time_t,
             tv_usec: timeout.subsec_micros() as libc::suseconds_t,
         };
-        // Safety: one initialised set holding one in-range descriptor.
+        // Safety: one initialized set holding one in-range descriptor.
         let n = unsafe {
             libc::select(
                 raw + 1,

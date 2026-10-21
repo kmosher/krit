@@ -113,7 +113,7 @@ describe('closeReviewWindow', () => {
     ;(window as unknown as { __TAURI__: unknown }).__TAURI__ = {
       window: {
         getCurrentWindow: () => {
-          throw new Error('not initialised')
+          throw new Error('not initialized')
         },
       },
     }

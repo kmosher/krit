@@ -94,7 +94,7 @@ The agent stream is **human-only**: the server filters out echoes of your own wo
 - `review-ended` is the server's goodbye, broadcast immediately before it exits, and its `reason` is one of `submitted` / `idle` / `no-browser` / `signal`. `signal` means somebody killed the server — the review did not finish, so say so rather than reporting it as complete.
 - Replies carry `author: 'user' | 'agent'`. You only see `reply-added` for `author: 'user'` (your own CLI replies are suppressed). `commentStatus` is the post-event status of the parent — if the user replied to a comment you'd already resolved, the server auto-reopens it and `commentStatus` is `"open"`.
 
-Attaching also lights up the **Done reviewing** button in the UI — with no agent subscriber attached, the button greys out and the user falls back to "Copy comments."
+Attaching also lights up the **Done reviewing** button in the UI — with no agent subscriber attached, the button grays out and the user falls back to "Copy comments."
 
 ## Step 3: Hand off and end the turn
 

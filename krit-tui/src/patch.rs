@@ -219,7 +219,7 @@ pub fn parse_patch(patch: &str, untracked: &[String]) -> Vec<FileDiff> {
         // git emits `old mode`/`new mode` only when the two actually differ —
         // never as an identical pair, on a rename or anywhere else — so
         // `old_mode` being present is what carries the weight here. The
-        // equality check is defence against patch text git did not write, not
+        // equality check is defense against patch text git did not write, not
         // against a case it produces. A rename *with* a chmod does emit the
         // pair, differing, and reporting it there is right: the file moved and
         // its mode changed, and only one of those has anywhere else to show.
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn an_identical_mode_pair_is_not_a_change() {
-        // Defence against patch text git did not write — it never emits an
+        // Defense against patch text git did not write — it never emits an
         // equal pair. Kept because the alternative is a file claiming a change
         // from 100644 to 100644, which reads as a bug in krit rather than in
         // whatever produced the patch.

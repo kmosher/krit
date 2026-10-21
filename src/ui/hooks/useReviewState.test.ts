@@ -219,7 +219,7 @@ describe('submitReview', () => {
     renderHook(() => useReviewState())
     const es = FakeEventSource.last!
     // 'stays-open' is the answer the Toolbar turns into "close this tab": a
-    // refusal is the browser's normal behaviour, not an error to swallow.
+    // refusal is the browser's normal behavior, not an error to swallow.
     await expect(submitReview()).resolves.toBe('stays-open')
     expect(close).toHaveBeenCalled()
     expect(es.closed).toBe(true)

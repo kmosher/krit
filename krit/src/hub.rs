@@ -61,7 +61,7 @@ pub struct Hub {
     // here — so the last browser leaving ends the server immediately.
     submitted: AtomicBool,
     shutting_down: AtomicBool,
-    /// Signalled once the review-ended broadcast is out; axum's graceful
+    /// Signaled once the review-ended broadcast is out; axum's graceful
     /// shutdown waits on this.
     pub shutdown: Notify,
     /// Run by the hard-exit fallback in initiate_shutdown (state-file

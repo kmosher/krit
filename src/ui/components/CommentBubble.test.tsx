@@ -261,7 +261,7 @@ describe('editing a queued comment', () => {
 
   it('drops an open editor when the same instance is handed a different comment', () => {
     // Pierre keys line annotations by array *index*, so deleting a comment
-    // earlier in the file shifts every later one into its neighbour's slot and
+    // earlier in the file shifts every later one into its neighbor's slot and
     // React reuses this component for a different comment. Carrying the editor
     // across would file one comment's text under another comment's id.
     const onEdit = vi.fn()

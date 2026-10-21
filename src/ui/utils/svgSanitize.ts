@@ -55,7 +55,7 @@ export interface BuildResult {
   /** Names dropped by the allowlist, for telling the reader what was removed. */
   removed: string[]
   /** Whether nesting past `MAX_DEPTH` was cut. Reported separately from
-   *  `removed` because it is not a judgement about any element — the same tag
+   *  `removed` because it is not a judgment about any element — the same tag
    *  elsewhere in the file renders fine. */
   truncated: boolean
 }

@@ -26,7 +26,7 @@
     /* Same story as --surface-2: referenced across this sheet but never
        defined. Alias each to a palette entry so the dark-mode overrides
        propagate without a second definition. --bg-tertiary is the exception
-       that proves the rule — translucent grey rather than an alias, because
+       that proves the rule — translucent gray rather than an alias, because
        it must read correctly over either mode's background. */
     --accent: var(--primary);
     --surface: var(--bg-secondary);
@@ -862,7 +862,7 @@ body {
 }
 
 /* A mode change is often the *only* thing a file has to show — a chmod has no
- * hunks and no +N/−N — so this carries the secondary colour rather than a
+ * hunks and no +N/−N — so this carries the secondary color rather than a
  * muted one. It has to read as content, not as a decoration on a diff. */
 .cv-mode {
     color: var(--text-secondary);

@@ -210,7 +210,7 @@ export function locateSelection(
   const first = map.text.indexOf(selectedText)
   if (first === -1) return null
   // Prefer the occurrence closest to where the iframe said it was; with a
-  // mutated DOM the hint is still usually in the right neighbourhood.
+  // mutated DOM the hint is still usually in the right neighborhood.
   let best = first
   let bestDistance = Math.abs(first - textOffset)
   for (let at = map.text.indexOf(selectedText, first + 1); at !== -1; ) {

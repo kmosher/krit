@@ -351,7 +351,7 @@ export function App() {
   // the save-anyway question are conventions layered on top of an endpoint that
   // couldn't enforce anything; this is the part that actually can't be raced
   // past. A path with no entry saves unconditionally, which is the old
-  // behaviour — the token is opt-in per request, not a mode.
+  // behavior — the token is opt-in per request, not a mode.
   const editBaseTagsRef = useRef<Map<string, string>>(new Map())
   const rememberTag = useCallback((filePath: string, tag: string | null) => {
     if (tag) editBaseTagsRef.current.set(filePath, tag)

@@ -308,7 +308,7 @@ interface Props {
   // primary path; this one still reaches regions the diff doesn't render.
   onEditFile?(filePath: string): void
   // Opens the rendered-document preview. Only offered for files
-  // `previewFormatFor` recognises; the parent decides which those are.
+  // `previewFormatFor` recognizes; the parent decides which those are.
   onPreviewFile?(filePath: string): void
   previewableFiles: Set<string>
   // Files currently showing their rendered document instead of their diff.
@@ -725,7 +725,7 @@ export const CodeViewWrapper = memo(
 
     // Which draft to hold still: the one being typed in. With two drafts open,
     // pinning the topmost (document order) can scroll the focused one out of
-    // view — worse than the scrollTop behaviour this replaces. Focus is read
+    // view — worse than the scrollTop behavior this replaces. Focus is read
     // through the shadow roots the forms are slotted into.
     const focusedDraftForm = (forms: HTMLElement[]): HTMLElement | undefined => {
       let active: Element | null = document.activeElement
