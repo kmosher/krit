@@ -1271,7 +1271,7 @@ fn to_sse(event: &Event) -> SseEvent {
 
 /// Only an explicit `role=ui` counts as a browser. Browser presence gates
 /// idle shutdown and the Done-reviewing button, so the default has to be the
-/// one that can't hold a review open forever: an unlabelled subscriber — a
+/// one that can't hold a review open forever: an unlabeled subscriber — a
 /// curl, a script, a consumer written before this parameter existed — is a
 /// CLI. The UI says what it is (`src/ui/hooks/useDiff.ts`,
 /// `useReviewState.ts`, both pinned by a Vitest test).

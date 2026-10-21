@@ -276,12 +276,12 @@ fn ansi256_of(r: u8, g: u8, b: u8) -> u8 {
         ),
     );
     // Gray ramp: 232..=255 at 8 + 10n.
-    let grey_step = ((r as u32 + g as u32 + b as u32) / 3).saturating_sub(8) / 10;
-    let grey_step = grey_step.min(23) as u8;
-    let grey_value = 8 + 10 * grey_step;
+    let gray_step = ((r as u32 + g as u32 + b as u32) / 3).saturating_sub(8) / 10;
+    let gray_step = gray_step.min(23) as u8;
+    let gray_value = 8 + 10 * gray_step;
     let gray = (
-        232 + grey_step,
-        dist((r, g, b), (grey_value, grey_value, grey_value)),
+        232 + gray_step,
+        dist((r, g, b), (gray_value, gray_value, gray_value)),
     );
     if gray.1 < cube.1 { gray.0 } else { cube.0 }
 }

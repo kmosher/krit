@@ -474,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn replies_are_labelled_by_who_wrote_them() {
+    fn replies_are_labeled_by_who_wrote_them() {
         let files = parse_patch(PATCH, &[]);
         let mut c = comment(11, "why?");
         c.replies = vec![

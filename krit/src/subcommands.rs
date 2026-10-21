@@ -78,7 +78,7 @@ impl ApiError {
                 text,
             } => {
                 // The phrase is whatever the status code is *known* to mean, so
-                // an unrecognised code has none — joined rather than
+                // an unrecognized code has none — joined rather than
                 // interpolated, since a blank one would otherwise print as a
                 // gap and make the line look malformed rather than terse.
                 let status = [code.to_string(), status_text.to_string()].join(" ");
@@ -582,7 +582,7 @@ mod tests {
     /// The phrase is derived from the code now, so this is reachable from any
     /// server — or anything else — answering on that port.
     #[test]
-    fn an_unrecognised_status_prints_the_code_without_a_hole_where_the_phrase_goes() {
+    fn an_unrecognized_status_prints_the_code_without_a_hole_where_the_phrase_goes() {
         let (base, server) = one_shot("HTTP/1.1 599 \r\nContent-Length: 0\r\n\r\n");
         let err = call_api(&base, &refresh_call()).unwrap_err();
         server.join().unwrap();
@@ -625,7 +625,7 @@ mod tests {
     // --- wait-for-submit frame scanning --------------------------------
 
     #[test]
-    fn submitted_is_recognised_and_carries_the_timestamp_through() {
+    fn submitted_is_recognized_and_carries_the_timestamp_through() {
         let mut buf = br#"data: {"type":"submitted","timestamp":1700000000000}
 
 "#
