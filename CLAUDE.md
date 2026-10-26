@@ -657,7 +657,12 @@ is a guarantee — the residual race is the length of a fold:
   Pierre wraps a long line across thousands of screen rows and every other item
   is then placed from a bad offset: at ~16k characters the review renders half a
   screen too low, at ~56k it is pushed off the viewport and the pane looks
-  blank. **Why upstream gets this wrong is not established** — the virtualizer's
+  blank. **Still present on `@pierre/diffs` 1.6.1**, re-measured in WebKit with the
+  cap lifted: a 16k-character changed line put the first file ~600px down a
+  blank pane on load, and the same repo with the cap restored laid out from
+  the top. Jumping to a later file from the sidebar re-measured and looked
+  right, so only the first paint shows it. **Why upstream gets this wrong is
+  not established** — the virtualizer's
   height estimate, the obvious suspect, is corrected properly, and a standalone
   CodeView does not displace at either length (both pinned down in our pierre
   fork on `kmosher/longline-virt`). Nothing throws and nothing logs —
@@ -870,11 +875,6 @@ is a guarantee — the residual race is the length of a fold:
   session with no editable element and an unhandled rejection as the only
   symptom. Fixed upstream in `1.3.0` (pierrecomputer/pierre#1037, from our
   issue #1036): one resolver now feeds both the highlighter and the tokenizer.
-
-- `@pierre/theming@1.0.0` declares a peer of `@pierre/theme: ^1.1.0` but the
-  tree resolves `@pierre/theme@2.0.0` — an unsatisfied peer inside upstream's
-  own dependency graph, not ours. Installs fine (optional peer,
-  `strict-peer-dependencies` off). Nothing to do; don't "fix" it by pinning.
 
 - Pierre resolves selection at **line** granularity only — `SelectionPoint` is
   `{lineNumber, side}`, and upstream never touches the DOM Selection API or

@@ -1,13 +1,19 @@
 import { useState, useRef, useMemo, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, lazy, Suspense } from 'react'
-import { CodeView, EditProvider, useStableCallback, type CodeViewHandle } from '@pierre/diffs/react'
-import { Editor, type EditorOptions } from '@pierre/diffs/edit'
+import {
+  CodeView,
+  EditProvider,
+  useStableCallback,
+  type CodeViewAnnotationArgs,
+  type CodeViewHandle,
+} from '@pierre/diffs/react'
+import { Editor, type EditorOptions, type EditorType } from '@pierre/diffs/edit'
 import type {
   CodeViewItem,
   CodeViewOptions,
   DiffLineAnnotation,
   FileDiffMetadata,
   AnnotationSide,
-  DiffsEditableComponent,
+  FileDiff,
   PostRenderPhase,
   SelectedLineRange,
   SelectionSide,
@@ -409,7 +415,7 @@ type DiffItem = Extract<CodeViewItem<Metadata>, { type: 'diff' }>
 // deep compare) and the stale sync (which deliberately updates its snapshot
 // for files it skipped).
 function syncItems(
-  viewer: CodeViewHandle<Metadata> | null,
+  viewer: CodeViewHandle<Metadata, undefined> | null,
   files: FileDiffMetadata[],
   changed: (name: string) => boolean,
   mutate?: (item: DiffItem, name: string) => void,
@@ -439,7 +445,7 @@ function syncItems(
 // slate, so it both closes that hole and removes the dependency on a frame
 // ever arriving.
 export function attachEditors(
-  viewer: CodeViewHandle<Metadata> | null,
+  viewer: CodeViewHandle<Metadata, undefined> | null,
   editingFiles: ReadonlySet<string>,
 ): void {
   if (!viewer || editingFiles.size === 0) return
@@ -505,7 +511,7 @@ export const CodeViewWrapper = memo(
     },
     ref,
   ) {
-    const viewerRef = useRef<CodeViewHandle<Metadata> | null>(null)
+    const viewerRef = useRef<CodeViewHandle<Metadata, undefined> | null>(null)
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const [pending, setPending] = useState<Map<string, DraftMetadata>>(() => new Map())
     const {
@@ -612,13 +618,11 @@ export const CodeViewWrapper = memo(
           })
         },
         applyExternalEdit(filePath: string, contents: string): boolean {
-          // getEditor is typed as DiffsEditor, the narrow interface CodeView
-          // needs; the document methods live on the concrete class. Probed
-          // rather than asserted: this is a prerelease, and the declared
-          // interface deliberately omits both methods, so if a later release
-          // hands back something else we want the documented "no live editor"
-          // answer — a diff refetch — not a TypeError mid-apply.
-          const editor = viewerRef.current?.getEditor(filePath) as Editor<Metadata> | undefined
+          // Probed rather than trusted: if a later release hands back
+          // something without the document methods we want the documented
+          // "no live editor" answer — a diff refetch — not a TypeError
+          // mid-apply.
+          const editor = viewerRef.current?.getEditor(filePath)
           if (typeof editor?.getText !== 'function' || typeof editor.applyEdits !== 'function') {
             return false
           }
@@ -1345,11 +1349,12 @@ export const CodeViewWrapper = memo(
     }
 
     const renderAnnotation = useStableCallback(
-      (
-        annotation: DiffLineAnnotation<Metadata>,
-        item: CodeViewItem<Metadata>,
-      ) => {
+      (...args: CodeViewAnnotationArgs<Metadata>) => {
+        // The item is last in the tuple and decides which annotation shape
+        // came with it, but TypeScript can't carry that across slots.
+        const item = args[2]
         if (item.type !== 'diff') return null
+        const annotation = args[0] as DiffLineAnnotation<Metadata>
         if ('_preview' in annotation.metadata) {
           const data = previewData.get(annotation.metadata.filePath)
           if (!data) return null
@@ -1763,22 +1768,20 @@ export const CodeViewWrapper = memo(
     const handlePostRender = useStableCallback(
       (
         _node: HTMLElement,
-        instance: DiffsEditableComponent<Metadata>,
+        instance: FileDiff<Metadata, undefined>,
         phase: PostRenderPhase,
         context: { item: CodeViewItem<Metadata> },
       ) => {
         const item = context.item
         if (phase === 'unmount' || item.type !== 'diff') return
-        // Optional upstream — a component with no collapsible regions leaves
-        // it unimplemented.
-        const reveal = instance.revealLine?.bind(instance)
+        const reveal = instance.revealLine.bind(instance)
         // Every reveal queues another render pass, so an expansion that failed
         // to make its line renderable would spin the render loop and hang the
         // tab. One pass opens every region this file needs (each anchor queues
         // its own expansion); the pass after it should find nothing left.
         const passes = revealPassesRef.current.get(item.id) ?? 0
         let revealed = false
-        if (reveal && passes < MAX_REVEAL_PASSES) {
+        if (passes < MAX_REVEAL_PASSES) {
           for (const line of linesToReveal(item.fileDiff, item.annotations ?? [])) {
             // Leave the long gaps to islanding, which is about to replace this
             // fileDiff — see islandOwnsLine. Expanding here would win the race
@@ -1814,7 +1817,7 @@ export const CodeViewWrapper = memo(
       },
     )
 
-    const options: CodeViewOptions<Metadata> = useMemo(
+    const options: CodeViewOptions<Metadata, undefined> = useMemo(
       () => ({
         diffStyle,
         // Wrap long lines instead of clipping them — the surface has
@@ -1902,13 +1905,23 @@ export const CodeViewWrapper = memo(
     // one. `persistState` stays off: it keys documents by `cacheKey`, and
     // ours changes on every refetch (contents changed => new key, by the
     // library's own contract), so there is nothing stable to persist against.
-    const createEditor = useStableCallback((editorOptions: EditorOptions<Metadata>) => {
-      return new Editor<Metadata>({
-        matchBrackets: true,
-        roundedSelection: true,
-        ...editorOptions,
-      })
-    })
+    const createEditor = useStableCallback(
+      <EType extends EditorType>(
+        editorType: EType,
+        editorOptions: EditorOptions<EType, Metadata, undefined>,
+        editStateKey?: string,
+      ) => {
+        return new Editor<EType, Metadata, undefined>(
+          editorType,
+          {
+            matchBrackets: true,
+            roundedSelection: true,
+            ...editorOptions,
+          },
+          editStateKey,
+        )
+      },
+    )
 
     // Pierre's documented commit path is one immediate updateItem carrying the
     // new fileDiff and a fresh cacheKey. We deliberately don't: the diff shown
@@ -1917,15 +1930,24 @@ export const CodeViewWrapper = memo(
     // Writing and letting file-written drive the refetch keeps one source of
     // truth, at the cost of a brief window where the item still holds the
     // pre-edit fileDiff.
+    //
+    // The handler also has to decide. 'accept' would install the diff the
+    // editor derived from its own text — the thing we just declined to render —
+    // so we 'reject', which puts the server's diff back until the refetch.
     const handleItemEditComplete = useStableCallback(
-      (item: CodeViewItem<Metadata>, file: { contents: string }) => {
-        onEditComplete(item.id, file.contents)
+      (
+        event: { newFile?: { contents: string } | null; file?: { contents: string } },
+        item: CodeViewItem<Metadata>,
+      ): 'reject' => {
+        const contents = event.newFile?.contents ?? event.file?.contents
+        if (contents != null) onEditComplete(item.id, contents)
+        return 'reject'
       },
     )
 
     return (
-      <EditProvider<Metadata> createEditor={createEditor}>
-        <CodeView<Metadata>
+      <EditProvider<Metadata, undefined> createEditor={createEditor}>
+        <CodeView<Metadata, undefined>
           key={structuralRevision}
           ref={(v) => {
             viewerRef.current = v
@@ -2003,6 +2025,8 @@ function emptyDiffFor(fileDiff: FileDiffMetadata): FileDiffMetadata {
     unifiedLineCount: 0,
     additionLines: [],
     deletionLines: [],
+    additionCharacterCount: 0,
+    deletionCharacterCount: 0,
     // Pierre keys its highlight cache on this; reusing the real diff's key
     // would serve the emptied body from the same slot as the full one.
     cacheKey: `${fileDiff.cacheKey ?? fileDiff.name}#preview`,

@@ -1,4 +1,4 @@
-import type { TextEdit } from '@pierre/diffs'
+import type { TextEdit } from '@pierre/diffs/edit'
 
 // A high surrogate is the first code unit of a surrogate pair; slicing between
 // it and its partner would produce a lone surrogate and corrupt the character.

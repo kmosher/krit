@@ -89,6 +89,8 @@ function stubFile(name: string, type: FileDiffMetadata['type']): FileDiffMetadat
     isPartial: true,
     deletionLines: [],
     additionLines: [],
+    deletionCharacterCount: 0,
+    additionCharacterCount: 0,
     cacheKey: fileCacheKey(name, type),
   }
 }
