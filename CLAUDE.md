@@ -865,7 +865,14 @@ is a guarantee — the residual race is the length of a fold:
   the view, which upstream documents as ignored under a pool. krit passes the
   pool no theme, so everything renders in Pierre's own `pierre-dark`/
   `pierre-light`; that is why `CodeViewWrapper`'s options carry `themeType` but
-  no `theme`. To restyle, set `highlighterOptions`.
+  no `theme`. To restyle, set `highlighterOptions`. That is also where the backend is
+  chosen: `preferredHighlighter: 'highlights'` (Pierre's beta WASM highlighter,
+  with `mainThreadMaxCharacters` set beside it in `poolOptions`). Measured in
+  WebKit on the 45-file demo, it reaches colored text in ~2.1s against ~2.4s
+  and never paints a plain-text pass first, which Shiki-in-workers did on every
+  run. It has no lexer for every language (CUE came out plain) and Pierre may
+  still change its API; setting `highlighterOptions` back to `{}` and dropping
+  `mainThreadMaxCharacters` restores the old behavior.
 
   A theme named on the view alone used to be fatal rather than merely ignored
   (`1.3.0-rc.2` and `-rc.3`): the tokenizer resolved its theme from the

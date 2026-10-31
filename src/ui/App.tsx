@@ -9,6 +9,7 @@ import { useServerHealth } from './hooks/useServerHealth'
 import { ServerGoneBanner } from './components/ServerGoneBanner'
 import { useSettings } from './hooks/useSettings'
 import { useViewed } from './hooks/useViewed'
+import { subscribeWorkerErrors } from './workerErrors'
 import { Toolbar } from './components/Toolbar'
 import { DiffViewer } from './components/DiffViewer'
 import { RenderErrorBoundary } from './components/RenderErrorBoundary'
@@ -300,6 +301,9 @@ export function App() {
   const dismissError = useCallback((id: number) => {
     setErrors((prev) => prev.filter((e) => e.id !== id))
   }, [])
+  // The highlight pool lives above App (main.tsx), so its failures arrive by
+  // subscription rather than by call.
+  useEffect(() => subscribeWorkerErrors(reportError), [reportError])
 
   const {
     patch,
