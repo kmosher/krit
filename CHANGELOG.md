@@ -13,6 +13,23 @@ see the warning at the top of the README.
 
 <!-- releases below -->
 
+## 0.17.0 — 2026-10-31
+
+### Added
+
+- A failed syntax-highlighting worker is now reported in an error strip instead
+  of only the browser console, so a review that loads slowly or loses colors
+  says why.
+
+### Changed
+
+- Syntax highlighting now uses Pierre's Highlights backend on the main thread
+  for files up to 100k characters, so code arrives already colored instead of
+  as plain text first. A language it has no lexer for renders plain.
+- Updated `@pierre/diffs` to 1.6.2, plus patch updates to `@types/node` and
+  `lucide-react`.
+
+
 ## 0.16.1 — 2026-10-26
 
 ### Changed
