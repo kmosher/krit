@@ -301,6 +301,54 @@ mod tests {
         dir
     }
 
+    /// Whether the OS delivers file events to this process at all, probed once
+    /// with a bare `notify` watcher and no debouncer.
+    ///
+    /// The two event-driven tests below fail the same way — an empty result —
+    /// whether the watcher is wrong or the machine never reports a write, and
+    /// the second reads as a debounce bug. It is not rare: a sandbox without
+    /// `com.apple.FSEvents`, or an `fseventsd` that has stopped answering
+    /// after weeks of uptime, both start the stream without error and then
+    /// stay silent. Checking first turns "left: []" into the actual cause.
+    fn os_delivers_file_events() -> bool {
+        use notify::Watcher;
+        static DELIVERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *DELIVERS.get_or_init(|| {
+            let dir = scratch("canary");
+            let seen = Arc::new(Mutex::new(0usize));
+            let seen_cb = seen.clone();
+            let Ok(mut w) = notify::recommended_watcher(move |_: notify::Result<notify::Event>| {
+                *seen_cb.lock().unwrap() += 1;
+            }) else {
+                return false;
+            };
+            if w.watch(&dir, RecursiveMode::Recursive).is_err() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1500));
+            std::fs::write(dir.join("canary.txt"), b"x").unwrap();
+            for _ in 0..30 {
+                if *seen.lock().unwrap() > 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            let count = *seen.lock().unwrap();
+            count > 0
+        })
+    }
+
+    fn require_file_events() {
+        assert!(
+            os_delivers_file_events(),
+            "the OS delivered no file events to a bare notify watcher, so this \
+             failure is the machine and not the watcher. On macOS check that the \
+             sandbox grants com.apple.FSEvents, or restart fseventsd \
+             (`sudo killall fseventsd`; launchd respawns it)."
+        );
+    }
+
     /// A scratch repo with `*.log` ignored, one tracked `.log` (force-added)
     /// and one untracked `.log`.
     fn scratch_repo(name: &str) -> PathBuf {
@@ -547,6 +595,7 @@ mod tests {
     fn a_burst_of_changes_yields_one_batched_callback_invocation() {
         // The whole point of A2: two files changed inside one debounce
         // window must arrive as ONE Vec, not two per-path callbacks.
+        require_file_events();
         let dir = scratch("batch-callback");
         std::fs::write(dir.join("a.txt"), b"a1").unwrap();
         std::fs::write(dir.join("b.txt"), b"b1").unwrap();
@@ -605,6 +654,7 @@ mod tests {
         // mtime-only churn (a touch) must not invoke on_change at all — an
         // empty Vec is never a valid frame on the wire, so the watcher must
         // suppress the call entirely rather than pass one through.
+        require_file_events();
         let dir = scratch("empty-tick-no-callback");
         let f = dir.join("f.txt");
         std::fs::write(&f, b"same").unwrap();
